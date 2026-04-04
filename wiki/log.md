@@ -4,6 +4,19 @@ title: Activity Log
 
 # Activity Log
 
+## 2026-04-04 ingest | Chalkia & Jayne ANCA-associated vasculitis treatment review
+Major ingest of comprehensive clinical review. Created:
+- 1 source page (chalkia-jayne-aav-treatment-2024)
+- 9 new entity pages:
+  - 3 AAV subtypes (GPA, MPA, EGPA)
+  - 4 drugs (Avacopan, Mepolizumab, updated Rituximab)
+  - 2 trials (PEXIVAS, ADVOCATE)
+- 6 concept pages (Induction, Maintenance, Complement Inhibition, IL-5 Inhibition, updated existing)
+- Updated existing pages with new evidence
+- Index now shows 13 entities, 9 concepts from 2 sources
+
+Key themes: Rituximab + Avacopan "dual-hit" induction, rapid steroid tapering, mepolizumab for EGPA, complement/B-cell synergy
+
 ## 2026-04-04 setup-complete | Wiki ready for Obsidian
 Created OBSIDIAN_SETUP.md with step-by-step instructions. System fully scaffolded and tested.
 

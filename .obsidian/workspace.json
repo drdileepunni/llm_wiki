@@ -4,17 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "5d5f153602dddcb9",
+        "id": "a2501dbc5dd47919",
         "type": "tabs",
         "children": [
           {
-            "id": "987dbfd189aaa7b7",
+            "id": "38225a4fdd0e7f3f",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "raw/ANCA-associated vasculitis—treatment standard.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "ANCA-associated vasculitis—treatment standard"
             }
           }
         ]
@@ -150,30 +154,22 @@
             "state": {
               "type": "outline",
               "state": {
+                "file": "raw/ANCA-associated vasculitis—treatment standard.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline"
-            }
-          },
-          {
-            "id": "1c4fac4be03d6bad",
-            "type": "leaf",
-            "state": {
-              "type": "git-view",
-              "state": {},
-              "icon": "git-pull-request",
-              "title": "Source Control"
+              "title": "Outline of ANCA-associated vasculitis—treatment standard"
             }
           }
         ],
-        "currentTab": 5
+        "currentTab": 4
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 300,
+    "collapsed": true
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -187,13 +183,36 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "987dbfd189aaa7b7",
+  "active": "39942b5604bab66d",
   "lastOpenFiles": [
-    "2026-04-04.md",
+    "wiki/entities/advocate-trial.md",
+    "wiki/entities/pexivas-trial.md",
+    "wiki/concepts/interleukin-5-inhibition.md",
+    "wiki/concepts/complement-inhibition.md",
+    "wiki/concepts/maintenance-therapy.md",
+    "wiki/entities/mepolizumab.md",
+    "wiki/entities/avacopan.md",
+    "wiki/entities/eosinophilic-granulomatosis-with-polyangiitis-egpa.md",
+    "wiki/entities/granulomatosis-with-polyangiitis-gpa.md",
+    "wiki/sources/chalkia-jayne-aav-treatment-2024.md",
+    "ANCA-AAV-treatment-structured.json",
+    "wiki/concepts/induction-therapy.md",
+    "raw/ANCA-associated vasculitis—treatment standard.md",
     "CLAUDE.md",
-    "Untitled.canvas",
-    "Clippings/ANCA-associated vasculitis—treatment standard.md",
+    "Clippings",
+    "raw/Clippings",
+    "Untitled",
     "OBSIDIAN_SETUP.md",
-    "Clippings"
+    "README.md",
+    "plan.md",
+    "raw/test-source.md",
+    "Users/drdileepunni/github_/llm_wiki/raw",
+    "Users/drdileepunni/github_/llm_wiki",
+    "Users/drdileepunni/github_",
+    "Users/drdileepunni",
+    "Users",
+    "Untitled 1.canvas",
+    "2026-04-04.md",
+    "Untitled.canvas"
   ]
 }
