@@ -4,21 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "5f21198e111cfcf2",
+        "id": "5d5f153602dddcb9",
         "type": "tabs",
         "children": [
           {
-            "id": "1e9f8bae8ad11519",
+            "id": "987dbfd189aaa7b7",
             "type": "leaf",
             "state": {
-              "type": "markdown",
-              "state": {
-                "file": "OBSIDIAN_SETUP.md",
-                "mode": "source",
-                "source": false
-              },
+              "type": "empty",
+              "state": {},
               "icon": "lucide-file",
-              "title": "OBSIDIAN_SETUP"
+              "title": "New tab"
             }
           }
         ]
@@ -94,7 +90,6 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "OBSIDIAN_SETUP.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +99,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for OBSIDIAN_SETUP"
+              "title": "Backlinks"
             }
           },
           {
@@ -113,12 +108,11 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "OBSIDIAN_SETUP.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from OBSIDIAN_SETUP"
+              "title": "Outgoing links"
             }
           },
           {
@@ -156,21 +150,30 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "OBSIDIAN_SETUP.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of OBSIDIAN_SETUP"
+              "title": "Outline"
+            }
+          },
+          {
+            "id": "1c4fac4be03d6bad",
+            "type": "leaf",
+            "state": {
+              "type": "git-view",
+              "state": {},
+              "icon": "git-pull-request",
+              "title": "Source Control"
             }
           }
-        ]
+        ],
+        "currentTab": 5
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -180,9 +183,17 @@
       "daily-notes:Open today's daily note": false,
       "templates:Insert template": false,
       "command-palette:Open command palette": false,
-      "bases:Create new base": false
+      "bases:Create new base": false,
+      "obsidian-git:Open Git source control": false
     }
   },
-  "active": "1e9f8bae8ad11519",
-  "lastOpenFiles": []
+  "active": "39942b5604bab66d",
+  "lastOpenFiles": [
+    "2026-04-04.md",
+    "CLAUDE.md",
+    "Untitled.canvas",
+    "Clippings/ANCA-associated vasculitis—treatment standard.md",
+    "OBSIDIAN_SETUP.md",
+    "Clippings"
+  ]
 }
