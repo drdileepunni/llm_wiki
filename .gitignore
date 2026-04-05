@@ -1,1 +1,7 @@
 raw/assets/
+app/.env
+app/wiki.db
+app/frontend/node_modules/
+app/frontend/dist/
+*.pyc
+__pycache__/

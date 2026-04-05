@@ -1,0 +1,14 @@
+[project]
+name = "llm-wiki-app"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "anthropic>=0.28.0",
+    "pymupdf>=1.24.0",
+    "sqlalchemy>=2.0.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+]
