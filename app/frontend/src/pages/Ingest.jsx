@@ -1,7 +1,99 @@
 import { useState, useRef } from 'react'
-import { ArrowUpTrayIcon, DocumentTextIcon } from '@heroicons/react/24/outline'
+import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
 import { ingestFile, ingestPubmed } from '../api'
 import CostBadge from '../components/CostBadge'
+
+// ── Diff viewer ────────────────────────────────────────────────────────────────
+
+function DiffLine({ line }) {
+  if (line.startsWith('+++') || line.startsWith('---')) {
+    return <div className="text-muted font-mono text-xs py-px px-3 select-none">{line}</div>
+  }
+  if (line.startsWith('@@')) {
+    return <div className="text-accent/70 font-mono text-xs py-px px-3 bg-accent/5 select-none">{line}</div>
+  }
+  if (line.startsWith('+')) {
+    return (
+      <div className="flex font-mono text-xs bg-green-950/40 border-l-2 border-green-500">
+        <span className="w-5 text-green-500/60 select-none flex-shrink-0 text-center">+</span>
+        <span className="text-green-300 py-px pr-3 whitespace-pre-wrap break-all">{line.slice(1)}</span>
+      </div>
+    )
+  }
+  if (line.startsWith('-')) {
+    return (
+      <div className="flex font-mono text-xs bg-red-950/40 border-l-2 border-red-500">
+        <span className="w-5 text-red-500/60 select-none flex-shrink-0 text-center">−</span>
+        <span className="text-red-300 py-px pr-3 whitespace-pre-wrap break-all">{line.slice(1)}</span>
+      </div>
+    )
+  }
+  return (
+    <div className="flex font-mono text-xs text-muted/60 border-l-2 border-transparent">
+      <span className="w-5 select-none flex-shrink-0"> </span>
+      <span className="py-px pr-3 whitespace-pre-wrap break-all">{line}</span>
+    </div>
+  )
+}
+
+function FileDiff({ diff }) {
+  const [open, setOpen] = useState(false)
+  const isNew = diff.is_new
+  const hasDiff = diff.diff && diff.diff.length > 0
+
+  const opLabel = isNew ? 'new' : diff.op
+  const opColor = isNew
+    ? 'text-green-400 bg-green-950/40 border-green-800/50'
+    : diff.op === 'append'
+      ? 'text-blue-400 bg-blue-950/40 border-blue-800/50'
+      : 'text-yellow-400 bg-yellow-950/40 border-yellow-800/50'
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden">
+      {/* Header row */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-4 py-3 bg-ink-800 hover:bg-ink-700 transition-colors text-left"
+      >
+        {open
+          ? <ChevronDownIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />
+          : <ChevronRightIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />
+        }
+
+        {/* Op badge */}
+        <span className={`px-1.5 py-0.5 text-xs font-mono rounded border ${opColor}`}>
+          {opLabel}
+        </span>
+
+        {/* Path */}
+        <span className="font-mono text-xs text-white/80 flex-1 truncate">{diff.path}</span>
+
+        {/* +/- counts */}
+        <span className="flex items-center gap-2 flex-shrink-0 ml-2">
+          {diff.added > 0 && (
+            <span className="font-mono text-xs text-green-400">+{diff.added}</span>
+          )}
+          {diff.removed > 0 && (
+            <span className="font-mono text-xs text-red-400">−{diff.removed}</span>
+          )}
+        </span>
+      </button>
+
+      {/* Diff body */}
+      {open && (
+        <div className="bg-ink-900 max-h-72 overflow-y-auto">
+          {hasDiff ? (
+            diff.diff.map((line, i) => <DiffLine key={i} line={line} />)
+          ) : (
+            <p className="text-xs text-muted font-mono px-4 py-3 italic">No diff available</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Ingest() {
   const [tab, setTab] = useState('file')
@@ -66,9 +158,7 @@ export default function Ingest() {
               key={t}
               onClick={() => setTab(t)}
               className={`px-4 py-1.5 text-sm rounded-md transition-all ${
-                tab === t
-                  ? 'bg-accent text-white'
-                  : 'text-muted hover:text-white'
+                tab === t ? 'bg-accent text-white' : 'text-muted hover:text-white'
               }`}
             >
               {t === 'file' ? 'Upload File' : 'PubMed ID'}
@@ -78,7 +168,6 @@ export default function Ingest() {
 
         {tab === 'file' ? (
           <div className="flex flex-col gap-4">
-            {/* Drop zone */}
             <div
               onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
               onDragLeave={() => setDragging(false)}
@@ -161,7 +250,7 @@ export default function Ingest() {
       </div>
 
       {/* Right: Results */}
-      <div className="w-1/2 p-8 flex flex-col gap-6">
+      <div className="w-1/2 p-8 overflow-y-auto flex flex-col gap-6">
         {result ? (
           <>
             <div>
@@ -175,34 +264,37 @@ export default function Ingest() {
               <p className="text-sm text-white/90 leading-relaxed">{result.summary}</p>
             </div>
 
-            {/* Files written */}
-            <div className="p-5 bg-surface border border-border rounded-xl">
-              <p className="text-xs font-mono text-accent uppercase tracking-wider mb-3">
-                Files Written ({result.files_written?.length || 0})
-              </p>
-              {result.files_written?.length === 0 && (
-                <p className="text-xs text-muted italic">No files written — Claude may have refused. Check the summary above.</p>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {result.files_written?.map(f => (
-                  <span key={f} className="px-2 py-1 bg-ink-800 border border-border rounded text-xs font-mono text-muted">
-                    {f}
-                  </span>
-                ))}
+            {/* Diff viewer */}
+            {result.diffs?.length > 0 && (
+              <div>
+                <p className="text-xs font-mono text-accent uppercase tracking-wider mb-3">
+                  Changes — {result.diffs.length} files
+                </p>
+                <div className="flex flex-col gap-2">
+                  {result.diffs.map((diff, i) => (
+                    <FileDiff key={i} diff={diff} />
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Errors (if any) */}
+            {result.files_written?.length === 0 && (
+              <div className="p-4 bg-yellow-950/40 border border-yellow-800/50 rounded-xl">
+                <p className="text-xs font-mono text-yellow-400 uppercase tracking-wider mb-1">No files written</p>
+                <p className="text-xs text-muted">Claude may have refused or the response was truncated. Check the summary.</p>
+              </div>
+            )}
+
+            {/* Errors */}
             {result.errors?.length > 0 && (
               <div className="p-4 bg-red-950/40 border border-red-800/50 rounded-xl">
-                <p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-2">Parse Errors</p>
+                <p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-2">Errors</p>
                 {result.errors.map((e, i) => (
                   <p key={i} className="text-xs font-mono text-red-300">{e}</p>
                 ))}
               </div>
             )}
 
-            {/* Cost */}
             <CostBadge
               inputTokens={result.input_tokens}
               outputTokens={result.output_tokens}

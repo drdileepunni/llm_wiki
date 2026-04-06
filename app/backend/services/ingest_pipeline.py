@@ -1,12 +1,11 @@
 import anthropic
-import json
+import difflib
 from datetime import date
 from ..config import ANTHROPIC_API_KEY, MODEL, CLAUDE_MD, WIKI_DIR, WIKI_ROOT
 from .token_tracker import log_call
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Tool schema — the API enforces valid JSON and handles all escaping
 WIKI_TOOL = {
     "name": "write_wiki_files",
     "description": "Write all wiki file operations resulting from ingesting a source.",
@@ -64,20 +63,16 @@ INGEST_PROMPT = f"""You are ingesting a new source into the wiki. Today's date i
    - Institution names → "the treating institution"
    - Geographic identifiers below state level → omit or generalise
    Keep: clinical findings, diagnoses, lab values, drug doses, imaging findings,
-   treatment decisions, outcomes, and relative timelines. The knowledge stays; the
-   patient identity does not.
+   treatment decisions, outcomes, and relative timelines.
 
 1. **Always proceed. Never refuse. Never ask for permission.**
    - Ingest regardless of topic: clinical cases, news, research, notes, anything.
    - Never write "should I proceed", "out of scope", or "I need to confirm".
-   - Every source contains knowledge worth capturing. Just ingest it.
 
 2. **Extract ALL knowledge, regardless of domain.**
    - Named entities: diseases, drugs, people, organizations, procedures, devices, trials, biomarkers
    - Concepts and mechanisms: how things work, why things happen
-   - Clinical findings: what was observed, measured, concluded
-   - Practical takeaways: what changes in practice
-   - Open questions: what remains unknown or debated
+   - Clinical findings, practical takeaways, open questions
 
 3. **Minimum file output per ingest:**
    - 1 source page (wiki/sources/[slug].md)
@@ -86,7 +81,6 @@ INGEST_PROMPT = f"""You are ingesting a new source into the wiki. Today's date i
    - 1 update to wiki/index.md (section: "Sources")
 
 4. **Every wiki page must have frontmatter:**
-   ```
    ---
    title: Page Title
    type: source | entity | concept | query
@@ -95,12 +89,53 @@ INGEST_PROMPT = f"""You are ingesting a new source into the wiki. Today's date i
    updated: {date.today().isoformat()}
    sources: [slug]
    ---
-   ```
 
 5. **Use [[wiki links]] for all cross-references between pages.**
 
+6. **Flag contradictions explicitly.** If any content contradicts an existing wiki page,
+   add a ## Contradictions section to the relevant page noting both positions and their sources.
+
 Call the `write_wiki_files` tool with your summary and all file operations.
 """
+
+def compute_diff(path, new_content: str, op: str) -> dict:
+    """Return a structured diff between old and new file content."""
+    full_path = WIKI_ROOT / path
+    is_new = not full_path.exists()
+
+    if is_new:
+        old_lines = []
+    else:
+        old_lines = full_path.read_text(encoding="utf-8").splitlines()
+
+    if op == "append":
+        # For append, diff is just the lines being added
+        new_lines = old_lines + new_content.splitlines()
+    elif op == "update":
+        # Approximate: treat as the final state after update
+        new_lines = new_content.splitlines()
+    else:
+        new_lines = new_content.splitlines()
+
+    added = sum(1 for l in new_lines if l not in old_lines)
+    removed = sum(1 for l in old_lines if l not in new_lines)
+
+    # Build unified diff lines for display
+    diff_lines = list(difflib.unified_diff(
+        old_lines,
+        new_lines,
+        lineterm="",
+        n=2,  # context lines around changes
+    ))
+
+    return {
+        "path": path,
+        "op": op,
+        "is_new": is_new,
+        "added": added,
+        "removed": removed,
+        "diff": diff_lines,
+    }
 
 def run_ingest(source_text: str, source_name: str, citation: str = "") -> dict:
     system_prompt = CLAUDE_MD.read_text()
@@ -116,10 +151,10 @@ Citation: {citation}
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=16000,  # increased — 8000 was causing truncation
         system=system_prompt,
         tools=[WIKI_TOOL],
-        tool_choice={"type": "any"},  # force tool use
+        tool_choice={"type": "any"},
         messages=[{"role": "user", "content": user_message}]
     )
 
@@ -130,7 +165,6 @@ Citation: {citation}
         output_tokens=response.usage.output_tokens,
     )
 
-    # Extract tool call result — API guarantees valid JSON
     tool_use_block = next(
         (b for b in response.content if b.type == "tool_use"),
         None
@@ -140,29 +174,34 @@ Citation: {citation}
         return {
             "summary": "Error: Claude did not call the write_wiki_files tool.",
             "files_written": [],
-            "errors": ["No tool_use block in response"],
+            "diffs": [],
+            "errors": ["No tool_use block in response — response may have been truncated"],
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "cost_usd": cost,
         }
 
-    args = tool_use_block.input  # already a dict — no JSON parsing needed
+    args = tool_use_block.input
     summary = args.get("summary", "")
     files = args.get("files", [])
 
     files_written = []
+    diffs = []
     errors = []
 
     for file_op in files:
         try:
+            diff = compute_diff(file_op["path"], file_op["content"], file_op["op"])
             execute_file_op(file_op)
             files_written.append(file_op["path"])
+            diffs.append(diff)
         except Exception as e:
             errors.append(f"Error writing {file_op.get('path', '?')}: {e}")
 
     return {
         "summary": summary,
         "files_written": files_written,
+        "diffs": diffs,
         "errors": errors,
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
