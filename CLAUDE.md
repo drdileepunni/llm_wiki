@@ -7,6 +7,19 @@ After reading, confirm: "Wiki loaded. [N] pages indexed. Last activity: [date fr
 
 ---
 
+## Core Principle: Ingest Everything
+
+**You accept ALL source types without exception.** There is no domain restriction.
+
+- Clinical case reports, academic papers, news articles, blog posts, book chapters
+- Any medical specialty, any scientific field, any topic
+- Personal notes, meeting transcripts, web clippings
+- A single patient case, a large trial, an opinion piece
+
+**Your job is always the same:** extract whatever knowledge can be inferred from the source and build it into the wiki. Never decline. Never ask for permission to proceed. Never say a source is out of scope. Every source contains knowledge worth capturing.
+
+---
+
 ## Conventions
 
 ### Page frontmatter (every wiki page must have this)
@@ -30,40 +43,72 @@ When you mention an entity or concept that has its own page, always link it.
 When you create or update a page, check index.md for related pages and add links bidirectionally.
 
 ### Page naming
-- sources/: slug derived from author + year + keyword, e.g. `rituximab-anca-2023.md`
-- entities/: lowercase hyphenated, e.g. `mpo-anca-vasculitis.md`
-- concepts/: lowercase hyphenated, e.g. `complement-activation.md`
-- queries/: date + short slug, e.g. `2026-04-04-mpo-vs-pr3-prognosis.md`
+- sources/: slug derived from author + year + keyword, e.g. `davis-2024-heart-failure.md`
+- entities/: lowercase hyphenated, e.g. `heart-failure-hfref.md`
+- concepts/: lowercase hyphenated, e.g. `fluid-overload-management.md`
+- queries/: date + short slug, e.g. `2026-04-06-sacubitril-dosing.md`
 
 ---
 
 ## Ingest Workflow
 
-When the human says "ingest [filename]", follow these steps exactly:
+When receiving a source to ingest, follow these steps exactly. **Always proceed — never ask whether to ingest.**
 
-1. **Read the source** from raw/. If it is a PDF, extract text. Note any images to review separately.
+1. **Read the source** in full. Note the source type (paper, case report, article, note, etc.).
 
-2. **Discuss** — summarize the 3-5 key takeaways and ask the human: "Anything to emphasize or flag before I file this?"
+2. **Extract all knowledge** — regardless of topic. Ask: what does this source teach us?
+   - Named entities (diseases, drugs, people, organizations, procedures, devices, biomarkers, trials)
+   - Concepts and mechanisms (how things work, why things happen)
+   - Clinical findings (what was observed, measured, concluded)
+   - Practical implications (what should change in practice)
+   - Open questions (what remains unknown or debated)
 
-3. **Write the source page** at wiki/sources/[slug].md. Include:
-   - Full citation
+3. **Write the source page** at `wiki/sources/[slug].md`. Include:
+   - Full citation (author, title, source, date, URL/PMID if available)
    - 3-5 sentence abstract in your own words
    - Key findings (bulleted)
    - Entities mentioned (linked)
    - Concepts mentioned (linked)
    - Open questions this raises
 
-4. **Update entity pages** — for each named entity mentioned, update or create its page in wiki/entities/. Add a section or sentence reflecting what this source says about the entity.
+4. **Update entity pages** — for each named entity mentioned, update or create its page in `wiki/entities/`. Add a section reflecting what this source says about the entity.
 
-5. **Update concept pages** — same for concepts in wiki/concepts/.
+5. **Update concept pages** — same for concepts/mechanisms in `wiki/concepts/`.
 
-6. **Flag contradictions** — if anything in this source contradicts an existing wiki page, add a `## Contradictions` section to the relevant page noting both positions and their sources.
+6. **Flag contradictions** — if anything contradicts an existing wiki page, add a `## Contradictions` section to the relevant page noting both positions and their sources.
 
 7. **Update index.md** — add the new source page and any new entity/concept pages to the catalog.
 
 8. **Append to log.md** — format: `## [YYYY-MM-DD] ingest | [Source Title]`
 
 A single source should typically touch 5-15 wiki pages. If it touches fewer than 5, you probably missed something.
+
+---
+
+## Entity Types to Always Extract
+
+Extract and page **any** of the following if mentioned:
+
+**Medical / Clinical**
+- Diseases and conditions (any specialty)
+- Drugs, biologics, devices, procedures
+- Clinical trials and studies
+- Biomarkers and diagnostic tests
+- Outcome measures and scoring tools
+- Guidelines and recommendations
+- Patient populations and demographics
+
+**Scientific / Research**
+- Mechanisms and pathophysiology
+- Genes, proteins, pathways
+- Research methodologies
+- Statistical concepts used
+
+**General Knowledge**
+- People (authors, clinicians, researchers)
+- Organizations and institutions
+- Technologies and tools
+- Events and timelines
 
 ---
 
@@ -74,9 +119,9 @@ When the human asks a question:
 1. Read index.md to identify the most relevant pages.
 2. Read those pages in full.
 3. Synthesize an answer with [[wiki links]] and inline citations to source slugs.
-4. Ask: "Should I file this answer?" If yes, save it to wiki/queries/[date]-[slug].md and update index.md.
+4. Ask: "Should I file this answer?" If yes, save it to `wiki/queries/[date]-[slug].md` and update index.md.
 
-Answers can take different forms depending on the question:
+Answer formats:
 - Narrative prose for explanatory questions
 - Comparison table for head-to-head questions
 - Timeline for historical questions
@@ -86,15 +131,15 @@ Answers can take different forms depending on the question:
 
 ## Lint Workflow
 
-When the human says "lint the wiki", do the following:
+When the human says "lint the wiki":
 
-1. **Orphan pages** — find pages in wiki/ with no inbound links from other wiki pages.
-2. **Stale claims** — look for assertions that are contradicted by newer sources (check log.md for order).
-3. **Missing pages** — find entity or concept names mentioned in [[links]] that don't have their own page yet. List them.
-4. **Missing cross-references** — find pages that mention the same entity/concept but don't link to each other.
-5. **Data gaps** — suggest 3-5 questions worth investigating that the current wiki can't answer well.
+1. **Orphan pages** — find pages with no inbound links from other wiki pages.
+2. **Stale claims** — assertions contradicted by newer sources (check log.md for order).
+3. **Missing pages** — entity/concept names in [[links]] that don't have their own page yet.
+4. **Missing cross-references** — pages that mention the same entity but don't link to each other.
+5. **Data gaps** — suggest 3-5 questions worth investigating that the wiki can't answer well.
 
-Output a lint report. Ask the human which issues to fix before acting.
+Output a lint report. Ask which issues to fix before acting.
 
 ---
 
@@ -110,21 +155,6 @@ Do not take any action until you have done this.
 
 ---
 
-## Domain: Rheumatology / Vasculitis Research
-
-### Key entity types to always extract and page:
-- Diseases (e.g. MPO-AAV, GPA, MPA, EGPA, SLE, APS)
-- Drugs / biologics (e.g. rituximab, avacopan, cyclophosphamide)
-- Clinical trials (e.g. RAVE, RITUXVAS, ADVOCATE)
-- Biomarkers (e.g. MPO-ANCA, PR3-ANCA, complement levels)
-- Outcome measures (e.g. BVAS, VDI, SLEDAI)
-- Guidelines (e.g. ACR/EULAR 2022 vasculitis guidelines)
-
-### Key concept types:
-- Pathophysiology mechanisms
-- Treatment controversies
-- Guideline gaps / open questions
-- Subgroup differences (e.g. MPO vs PR3 prognosis)
-
-### Citation format:
-Author et al., Journal, Year. PMID: [if available]
+## Citation Format
+Author(s). Title. Source/Journal. Date. PMID/URL if available.
+For case reports: Patient initials or anonymised ID. Clinical setting. Date.

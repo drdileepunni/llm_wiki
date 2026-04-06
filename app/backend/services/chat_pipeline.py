@@ -55,7 +55,9 @@ def run_chat(question: str) -> dict:
 
 Use [[wiki links]] when referencing entities or concepts that have pages.
 Cite your sources inline using the page path in parentheses.
-Be precise and direct. If the wiki doesn't have enough information to answer, say so clearly.
+Be precise and direct.
+If the wiki doesn't have enough information, say so clearly and indicate what kind of source would fill the gap.
+Answer any question regardless of topic — this is a general knowledge base.
 
 Wiki pages:
 {context}"""

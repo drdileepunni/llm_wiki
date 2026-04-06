@@ -180,6 +180,9 @@ export default function Ingest() {
               <p className="text-xs font-mono text-accent uppercase tracking-wider mb-3">
                 Files Written ({result.files_written?.length || 0})
               </p>
+              {result.files_written?.length === 0 && (
+                <p className="text-xs text-muted italic">No files written — Claude may have refused. Check the summary above.</p>
+              )}
               <div className="flex flex-wrap gap-2">
                 {result.files_written?.map(f => (
                   <span key={f} className="px-2 py-1 bg-ink-800 border border-border rounded text-xs font-mono text-muted">
@@ -188,6 +191,16 @@ export default function Ingest() {
                 ))}
               </div>
             </div>
+
+            {/* Errors (if any) */}
+            {result.errors?.length > 0 && (
+              <div className="p-4 bg-red-950/40 border border-red-800/50 rounded-xl">
+                <p className="text-xs font-mono text-red-400 uppercase tracking-wider mb-2">Parse Errors</p>
+                {result.errors.map((e, i) => (
+                  <p key={i} className="text-xs font-mono text-red-300">{e}</p>
+                ))}
+              </div>
+            )}
 
             {/* Cost */}
             <CostBadge
