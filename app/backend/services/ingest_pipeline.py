@@ -155,7 +155,7 @@ def run_ingest(source_text: str, source_name: str, citation: str = "") -> dict:
     # ── Step 1: Plan ──────────────────────────────────────────────────────────
     plan_response = client.messages.create(
         model=MODEL,
-        max_tokens=2000,   # plan is lightweight — just paths + bullet points
+        max_tokens=4000,   # plan needs room for 8-12 files × bullet points
         system=system_prompt,
         tools=[PLAN_TOOL],
         tool_choice={"type": "any"},
