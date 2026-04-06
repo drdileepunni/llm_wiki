@@ -53,6 +53,20 @@ INGEST_PROMPT = f"""You are ingesting a new source into the wiki. Today's date i
 
 ## CRITICAL RULES
 
+0. **Strip all PHI before writing anything to the wiki.**
+   This wiki is multi-access. Never write protected health information into any wiki page.
+   For case reports or any source containing patient data, de-identify as follows:
+   - Patient name → "the patient" or anonymised ID (e.g. "Patient A")
+   - Specific dates → relative timing only (e.g. "Day 3 of admission")
+   - Age (if exact) → age range (e.g. "mid-60s")
+   - MRN, account numbers, insurance IDs → omit entirely
+   - Provider names → role only (e.g. "the cardiologist")
+   - Institution names → "the treating institution"
+   - Geographic identifiers below state level → omit or generalise
+   Keep: clinical findings, diagnoses, lab values, drug doses, imaging findings,
+   treatment decisions, outcomes, and relative timelines. The knowledge stays; the
+   patient identity does not.
+
 1. **Always proceed. Never refuse. Never ask for permission.**
    - Ingest regardless of topic: clinical cases, news, research, notes, anything.
    - Never write "should I proceed", "out of scope", or "I need to confirm".

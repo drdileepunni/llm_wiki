@@ -7,6 +7,29 @@ After reading, confirm: "Wiki loaded. [N] pages indexed. Last activity: [date fr
 
 ---
 
+## PHI Policy — Protected Health Information
+
+**This wiki is multi-access. Never write PHI into any wiki page.**
+
+When ingesting clinical case reports or any source containing patient data, you must de-identify before filing. Strip or replace all of the following:
+
+| PHI type | What to write instead |
+|---|---|
+| Patient name | "the patient" or an anonymised ID (e.g. "Patient A") |
+| Date of birth / age (if specific) | Age range only (e.g. "mid-60s") |
+| Dates of admission, discharge, procedures | Omit or use relative timing only (e.g. "Day 3 of admission") |
+| MRN, account numbers, insurance IDs | Omit entirely |
+| Geographic identifiers below state level | Omit or generalise (e.g. "a regional hospital") |
+| Provider names | "the treating clinician" or specialty (e.g. "the cardiologist") |
+| Institution names (if identifiable) | "the treating institution" |
+| Any other unique identifier | Omit or generalise |
+
+**What you keep:** clinical findings, drug doses, lab values, imaging findings, diagnoses, treatment decisions, outcomes, timelines in relative terms. The goal is to preserve the medical knowledge while making the patient unidentifiable.
+
+Apply this to: source pages, entity pages, concept pages, log entries, and query answers. The raw source file in `raw/` is untouched — de-identification applies only to what you write into `wiki/`.
+
+---
+
 ## Core Principle: Ingest Everything
 
 **You accept ALL source types without exception.** There is no domain restriction.
