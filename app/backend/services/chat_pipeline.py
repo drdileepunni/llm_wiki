@@ -87,6 +87,7 @@ Wiki pages:
         "input_tokens": total_input,
         "output_tokens": total_output,
         "cost_usd": cost,
+        "model": MODEL,
     }
 
 def file_answer(question: str, answer: str) -> str:

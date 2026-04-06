@@ -72,6 +72,7 @@ function Message({ msg }) {
             inputTokens={msg.input_tokens}
             outputTokens={msg.output_tokens}
             costUsd={msg.cost_usd}
+            model={msg.model}
           />
           <button
             onClick={handleFile}
@@ -123,6 +124,7 @@ export default function Chat() {
         input_tokens: data.input_tokens,
         output_tokens: data.output_tokens,
         cost_usd: data.cost_usd,
+        model: data.model,
         pages_consulted: data.pages_consulted,
       }])
     } catch (e) {

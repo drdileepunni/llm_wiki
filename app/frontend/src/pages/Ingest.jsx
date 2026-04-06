@@ -299,6 +299,7 @@ export default function Ingest() {
               inputTokens={result.input_tokens}
               outputTokens={result.output_tokens}
               costUsd={result.cost_usd}
+              model={result.model}
             />
           </>
         ) : (

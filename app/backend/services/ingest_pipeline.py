@@ -255,4 +255,5 @@ Citation: {citation}"""
         "input_tokens":  total_in,
         "output_tokens": total_out,
         "cost_usd":      cost,
+        "model":         MODEL,
     }
