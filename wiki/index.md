@@ -6,6 +6,7 @@ updated: 2026-04-04
 # Wiki Index
 
 ## Sources
+- [[Patient B 2026 — ADHF Conservative Diuresis Case]] — cardiorenal HF management, conservative diuresis, tolvaptan, sacubitril-valsartan withholding
 
 - [[chalkia-jayne-aav-treatment-2024]] — ANCA-associated vasculitis—treatment standard (comprehensive clinical review)
 - [[stone-mpo-anca-overview-2024]] — MPO-ANCA Vasculitis Overview (disease-focused)
@@ -54,7 +55,7 @@ updated: 2026-04-04
 - [[Remission Definition]] — (linked, page not yet created)
 
 ## Queries
-(none yet)
+- [[I just heard adding Uztekinumab to the Mepolizumab regimen i]] — 2026-04-06
 
 ---
 

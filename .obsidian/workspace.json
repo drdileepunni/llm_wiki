@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "a2501dbc5dd47919",
+        "id": "4dbe129715221e7c",
         "type": "tabs",
         "children": [
           {
-            "id": "38225a4fdd0e7f3f",
+            "id": "a08d52b5e9a620c6",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "raw/ANCA-associated vasculitis—treatment standard.md",
+                "file": "wiki/entities/heart-failure-hfref.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "ANCA-associated vasculitis—treatment standard"
+              "title": "heart-failure-hfref"
             }
           }
         ]
@@ -53,7 +53,7 @@
             "state": {
               "type": "search",
               "state": {
-                "query": "",
+                "query": "sacubitril/val",
                 "matchingCase": false,
                 "explainSearch": false,
                 "collapseAll": false,
@@ -74,7 +74,8 @@
               "title": "Bookmarks"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "horizontal",
@@ -154,13 +155,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "raw/ANCA-associated vasculitis—treatment standard.md",
+                "file": "wiki/index.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of ANCA-associated vasculitis—treatment standard"
+              "title": "Outline of index"
             }
           }
         ],
@@ -179,40 +180,55 @@
       "daily-notes:Open today's daily note": false,
       "templates:Insert template": false,
       "command-palette:Open command palette": false,
-      "bases:Create new base": false,
-      "obsidian-git:Open Git source control": false
+      "bases:Create new base": false
     }
   },
-  "active": "39942b5604bab66d",
+  "active": "a08d52b5e9a620c6",
   "lastOpenFiles": [
-    "wiki/entities/advocate-trial.md",
-    "wiki/entities/pexivas-trial.md",
-    "wiki/concepts/interleukin-5-inhibition.md",
-    "wiki/concepts/complement-inhibition.md",
-    "wiki/concepts/maintenance-therapy.md",
-    "wiki/entities/mepolizumab.md",
-    "wiki/entities/avacopan.md",
-    "wiki/entities/eosinophilic-granulomatosis-with-polyangiitis-egpa.md",
-    "wiki/entities/granulomatosis-with-polyangiitis-gpa.md",
+    "wiki/concepts/neurohormonal-blockade-in-adhf.md",
+    "wiki/concepts/loop-diuretic-nephrotoxicity.md",
+    "wiki/concepts/aquaretic-therapy.md",
+    "wiki/concepts/conservative-diuresis-strategy.md",
+    "wiki/entities/cardiorenal-syndrome.md",
+    "wiki/entities/furosemide.md",
+    "wiki/entities/sacubitril-valsartan.md",
+    "wiki/entities/tolvaptan.md",
+    "wiki/sources/patient-b-2026-adhf-conservative-diuresis.md",
+    "wiki/sources/davis-2026-adhf-case.md",
+    "raw/case-adhf-conservative-diuresis.md",
+    "raw/case-adhf-aggressive-diuresis.md",
     "wiki/sources/chalkia-jayne-aav-treatment-2024.md",
-    "ANCA-AAV-treatment-structured.json",
-    "wiki/concepts/induction-therapy.md",
-    "raw/ANCA-associated vasculitis—treatment standard.md",
-    "CLAUDE.md",
+    "wiki/entities/acute-decompensated-heart-failure.md",
+    "wiki/index.md",
+    "raw/trial.md",
+    "wiki/entities/rituximab.md",
+    "wiki/queries/2026-04-06-i-just-heard-adding-uztekinumab-to-the-mepolizumab.md",
+    "wiki/concepts/hierarchical-convergence.md",
+    "wiki/concepts/computational-depth.md",
+    "wiki/entities/arc-agi-challenge.md",
+    "wiki/entities/hierarchical-reasoning-model.md",
+    "wiki/sources/wang-hrm-2025.md",
+    "raw/heirarchical_reasoning.pdf",
+    "wiki/log.md",
+    "Clippings/Anthropic Update Lets You Control Claude Cowork With Your Phone.md",
+    "Untitled 1.md",
     "Clippings",
-    "raw/Clippings",
-    "Untitled",
-    "OBSIDIAN_SETUP.md",
-    "README.md",
-    "plan.md",
-    "raw/test-source.md",
-    "Users/drdileepunni/github_/llm_wiki/raw",
-    "Users/drdileepunni/github_/llm_wiki",
-    "Users/drdileepunni/github_",
-    "Users/drdileepunni",
-    "Users",
+    "app/wiki.db",
+    "app/backend/routers/__pycache__/dashboard.cpython-314.pyc",
+    "app/backend/services/__pycache__/chat_pipeline.cpython-314.pyc",
+    "app/backend/routers/__pycache__/chat.cpython-314.pyc",
+    "app/backend/services/__pycache__/token_tracker.cpython-314.pyc",
+    "app/backend/services/__pycache__/ingest_pipeline.cpython-314.pyc",
+    "app/backend/services/__pycache__/extractor.cpython-314.pyc",
+    "app/backend/services/__pycache__/__init__.cpython-314.pyc",
+    "app/frontend/dist/icons.svg",
+    "app/frontend/dist/favicon.svg",
+    "app/frontend/src/assets/vite.svg",
+    "app/frontend/src/assets/react.svg",
+    "app/frontend/src/assets/hero.png",
+    "app/frontend/public/icons.svg",
+    "app/frontend/public/favicon.svg",
     "Untitled 1.canvas",
-    "2026-04-04.md",
     "Untitled.canvas"
   ]
 }

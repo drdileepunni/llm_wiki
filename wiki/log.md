@@ -30,3 +30,19 @@ System validation: PASSED ✓
 
 ## 2026-04-04 init | Wiki initialized
 Scaffolded directory structure. CLAUDE.md written. Ready for first ingest.
+
+## 2026-04-06 | ingest | Patient B 2026 — ADHF Conservative Diuresis Case
+
+Ingested clinical case report documenting conservative diuresis strategy in acute decompensated heart failure with advanced CKD (eGFR 31). Key management: furosemide 80 mg IV BD (conservative dosing), tolvaptan 15 mg daily as aquaretic adjunct, sacubitril-valsartan withheld during acute phase then reintroduced Day 7. Outcome: successful decongestion with renal preservation (creatinine 162→174→130 µmol/L), no dialysis required, no 30-day readmission.
+
+**Pages created:**
+- Source page: patient-b-2026-adhf-conservative-diuresis.md
+- Entity pages: tolvaptan.md, sacubitril-valsartan.md, furosemide.md, cardiorenal-syndrome.md
+- Concept pages: conservative-diuresis-strategy.md, aquaretic-therapy.md, loop-diuretic-nephrotoxicity.md, neurohormonal-blockade-in-adhf.md
+
+**Key clinical principles extracted:**
+1. Conservative diuresis in eGFR <35 preserves renal function
+2. Rising creatinine during diuresis in CKD signals need to reduce, not escalate, diuretics
+3. Tolvaptan valuable as aquaretic adjunct in CKD with inadequate loop diuretic response
+4. Sacubitril-valsartan should be withheld during ADHF with hypotension or significant AKI
+5. Primary target in cardiorenal patients: renal preservation alongside decongestion, not decongestion at any cost
