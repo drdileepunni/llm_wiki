@@ -16,6 +16,14 @@ export async function ingestPubmed(pmid) {
   return res.json()
 }
 
+export async function ingestUrl(url) {
+  const form = new FormData()
+  form.append('url', url)
+  const res = await fetch(`${BASE}/ingest/url`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function sendChat(question) {
   const res = await fetch(`${BASE}/chat/`, {
     method: 'POST',
@@ -46,4 +54,26 @@ export async function getLog() {
 
 export async function getTimeseries() {
   return fetch(`${BASE}/dashboard/timeseries`).then(r => r.json())
+}
+
+export async function getWikiTree() {
+  return fetch(`${BASE}/wiki/tree`).then(r => r.json())
+}
+
+export async function getWikiFile(path) {
+  return fetch(`${BASE}/wiki/file?path=${encodeURIComponent(path)}`).then(r => r.json())
+}
+
+export async function searchWiki(q) {
+  return fetch(`${BASE}/wiki/search?q=${encodeURIComponent(q)}`).then(r => r.json())
+}
+
+export async function saveWikiFile(path, content) {
+  const res = await fetch(`${BASE}/wiki/file`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }

@@ -3,14 +3,16 @@
   "configurations": [
     {
       "name": "LLM Wiki Backend",
-      "runtimeExecutable": "uv",
+      "runtimeExecutable": "/Users/drdileepunni/Library/Python/3.9/bin/uv",
       "runtimeArgs": ["run", "uvicorn", "backend.main:app", "--reload", "--port", "8000"],
+      "cwd": "/Users/drdileepunni/github_/llm_wiki/app",
       "port": 8000
     },
     {
       "name": "LLM Wiki Frontend",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "/Users/drdileepunni/.nvm/versions/node/v22.14.0/bin/node",
+      "runtimeArgs": ["node_modules/.bin/vite", "--port", "5173"],
+      "cwd": "/Users/drdileepunni/github_/llm_wiki/app/frontend",
       "port": 5173
     }
   ]

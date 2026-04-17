@@ -1,38 +1,79 @@
 import { useState, useRef, useEffect } from 'react'
 import { PaperAirplaneIcon, ArrowTopRightOnSquareIcon, CheckIcon } from '@heroicons/react/24/outline'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { sendChat, fileAnswer } from '../api'
 import CostBadge from '../components/CostBadge'
+import { useAppState } from '../AppStateContext'
 
 const VAULT_NAME = import.meta.env.VITE_VAULT_NAME || 'llm_wiki'
+const WIKI_LINK_PREFIX = 'obsidian-wiki://'
 
-function obsidianLink(title) {
-  // Convert title to likely file path
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-  return `obsidian://open?vault=${VAULT_NAME}&file=wiki/entities/${slug}`
+/** Pre-process [[Page Title]] → a markdown link with a special obsidian-wiki:// scheme
+ *  so react-markdown can render them and we can intercept with a custom <a> component. */
+function preprocessWikiLinks(text) {
+  return text.replace(/\[\[(.+?)\]\]/g, (_, title) => {
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const obsidianUrl = `obsidian://open?vault=${VAULT_NAME}&file=wiki/entities/${slug}`
+    // Encode the obsidian URL into our marker scheme so it survives markdown parsing
+    return `[${title}](${WIKI_LINK_PREFIX}${encodeURIComponent(obsidianUrl)})`
+  })
 }
 
-function renderAnswer(text) {
-  // Replace [[wiki links]] with clickable badges
-  const parts = text.split(/(\[\[.+?\]\])/g)
-  return parts.map((part, i) => {
-    const match = part.match(/^\[\[(.+?)\]\]$/)
-    if (match) {
-      const title = match[1]
+/** Custom component map for react-markdown */
+const mdComponents = {
+  // Wiki links rendered as purple badges
+  a({ href, children }) {
+    if (href?.startsWith(WIKI_LINK_PREFIX)) {
+      const obsidianUrl = decodeURIComponent(href.slice(WIKI_LINK_PREFIX.length))
       return (
         <a
-          key={i}
-          href={obsidianLink(title)}
+          href={obsidianUrl}
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 bg-accent/20 border border-accent/40 rounded text-accent text-xs font-mono hover:bg-accent/30 transition-colors"
         >
-          {title}
-          <ArrowTopRightOnSquareIcon className="w-3 h-3" />
+          {children}
+          <ArrowTopRightOnSquareIcon className="w-3 h-3 inline-block" />
         </a>
       )
     }
-    return <span key={i}>{part}</span>
-  })
+    return (
+      <a href={href} target="_blank" rel="noreferrer"
+        className="text-accent underline underline-offset-2 hover:text-accent/80">
+        {children}
+      </a>
+    )
+  },
+  p({ children })         { return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p> },
+  ul({ children })        { return <ul className="list-disc list-outside ml-5 mb-3 space-y-1">{children}</ul> },
+  ol({ children })        { return <ol className="list-decimal list-outside ml-5 mb-3 space-y-1">{children}</ol> },
+  li({ children })        { return <li className="leading-relaxed">{children}</li> },
+  strong({ children })    { return <strong className="font-semibold text-white">{children}</strong> },
+  em({ children })        { return <em className="italic text-white/75">{children}</em> },
+  h1({ children })        { return <h1 className="text-base font-bold text-white mt-4 mb-2">{children}</h1> },
+  h2({ children })        { return <h2 className="text-sm font-bold text-white mt-3 mb-1.5">{children}</h2> },
+  h3({ children })        { return <h3 className="text-sm font-semibold text-white/90 mt-2 mb-1">{children}</h3> },
+  code({ inline, children }) {
+    return inline
+      ? <code className="px-1 py-0.5 bg-ink-900 rounded text-xs font-mono text-accent/80">{children}</code>
+      : <pre className="p-3 my-2 bg-ink-900 rounded-lg text-xs font-mono text-white/80 overflow-x-auto"><code>{children}</code></pre>
+  },
+  blockquote({ children }) {
+    return <blockquote className="border-l-2 border-accent/40 pl-3 italic text-white/60 mb-3">{children}</blockquote>
+  },
+  table({ children })     { return <div className="overflow-x-auto mb-3"><table className="text-xs border-collapse w-full">{children}</table></div> },
+  thead({ children })     { return <thead className="bg-ink-800">{children}</thead> },
+  th({ children })        { return <th className="border border-border px-3 py-1.5 text-left font-semibold text-white">{children}</th> },
+  td({ children })        { return <td className="border border-border px-3 py-1.5 text-white/80">{children}</td> },
+}
+
+function AnswerBody({ text }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+      {preprocessWikiLinks(text)}
+    </ReactMarkdown>
+  )
 }
 
 function Message({ msg }) {
@@ -64,8 +105,8 @@ function Message({ msg }) {
   return (
     <div className="flex justify-start mb-4">
       <div className="max-w-2xl w-full">
-        <div className="px-5 py-4 bg-surface border-l-2 border-accent rounded-2xl rounded-tl-sm text-sm text-white/90 leading-relaxed whitespace-pre-wrap">
-          {renderAnswer(msg.answer)}
+        <div className="px-5 py-4 bg-surface border-l-2 border-accent rounded-2xl rounded-tl-sm text-sm text-white/90">
+          <AnswerBody text={msg.answer} />
         </div>
         <div className="flex items-center gap-4 mt-2 px-1">
           <CostBadge
@@ -98,8 +139,11 @@ function Message({ msg }) {
 }
 
 export default function Chat() {
-  const [messages, setMessages] = useState([])
-  const [input, setInput] = useState('')
+  const { chat, setChat } = useAppState()
+  const { messages, input } = chat
+  const setMessages = fn => setChat(prev => ({ ...prev, messages: typeof fn === 'function' ? fn(prev.messages) : fn }))
+  const setInput    = val => setChat(prev => ({ ...prev, input: val }))
+
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef()
   const textareaRef = useRef()

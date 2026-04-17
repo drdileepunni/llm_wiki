@@ -1,12 +1,30 @@
 from ..database import Session, TokenLog
-from ..config import PRICING, MODEL
+from ..config import get_pricing, MODEL
 from datetime import datetime
 
+
 def calculate_cost(input_tokens: int, output_tokens: int, model: str = MODEL) -> float:
-    pricing = PRICING.get(model, PRICING["claude-sonnet-4-5"])
+    """
+    Calculate cost in USD.  Passes input_tokens to get_pricing so that
+    context-length-tiered models (e.g. gemini-2.5-pro) use the correct tier.
+    """
+    pricing = get_pricing(model, input_tokens=input_tokens)
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
-def log_call(operation: str, source_name: str, input_tokens: int, output_tokens: int, model: str = MODEL):
+
+def log_call(
+    operation: str,
+    source_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    model: str = MODEL,
+) -> float:
+    """
+    Compute cost and persist a TokenLog row.  Returns cost in USD.
+
+    Always pass `model` explicitly — the default is only a last-resort
+    fallback for callers that genuinely don't know which model was used.
+    """
     cost = calculate_cost(input_tokens, output_tokens, model)
     with Session() as session:
         entry = TokenLog(

@@ -4,12 +4,14 @@ import {
   ArrowUpTrayIcon,
   ChatBubbleLeftRightIcon,
   ChartBarIcon,
+  BookOpenIcon,
 } from '@heroicons/react/24/outline'
 import { getStats } from '../api'
 
 const navItems = [
-  { to: '/ingest', label: 'Ingest', icon: ArrowUpTrayIcon },
-  { to: '/chat', label: 'Chat', icon: ChatBubbleLeftRightIcon },
+  { to: '/ingest',    label: 'Ingest',    icon: ArrowUpTrayIcon },
+  { to: '/chat',      label: 'Chat',      icon: ChatBubbleLeftRightIcon },
+  { to: '/wiki',      label: 'Wiki',      icon: BookOpenIcon },
   { to: '/dashboard', label: 'Dashboard', icon: ChartBarIcon },
 ]
 

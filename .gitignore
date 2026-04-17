@@ -5,3 +5,7 @@ app/frontend/node_modules/
 app/frontend/dist/
 *.pyc
 __pycache__/
+app/.cache/*
+.DS_Store
+raw/
+wiki/

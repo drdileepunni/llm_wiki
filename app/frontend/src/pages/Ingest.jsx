@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react'
 import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
-import { ingestFile, ingestPubmed } from '../api'
+import { ingestFile, ingestUrl } from '../api'
 import CostBadge from '../components/CostBadge'
+import { useAppState } from '../AppStateContext'
 
 // ── Diff viewer ────────────────────────────────────────────────────────────────
 
@@ -96,13 +97,16 @@ function FileDiff({ diff }) {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Ingest() {
-  const [tab, setTab] = useState('file')
+  const { ingest, setIngest } = useAppState()
+  const { tab, file, pmid: urlInput, result, error } = ingest
+  const setTab      = val => setIngest(prev => ({ ...prev, tab: val }))
+  const setFile     = val => setIngest(prev => ({ ...prev, file: val }))
+  const setUrlInput = val => setIngest(prev => ({ ...prev, pmid: val }))
+  const setResult   = val => setIngest(prev => ({ ...prev, result: val }))
+  const setError    = val => setIngest(prev => ({ ...prev, error: val }))
+
   const [dragging, setDragging] = useState(false)
-  const [file, setFile] = useState(null)
-  const [pmid, setPmid] = useState('')
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
-  const [error, setError] = useState(null)
   const inputRef = useRef()
 
   const handleDrop = (e) => {
@@ -127,13 +131,13 @@ export default function Ingest() {
     }
   }
 
-  const handleIngestPubmed = async () => {
-    if (!pmid.trim()) return
+  const handleIngestUrl = async () => {
+    if (!urlInput.trim()) return
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      const data = await ingestPubmed(pmid.trim())
+      const data = await ingestUrl(urlInput.trim())
       setResult(data)
     } catch (e) {
       setError(e.message)
@@ -153,7 +157,7 @@ export default function Ingest() {
 
         {/* Tab switcher */}
         <div className="flex gap-1 p-1 bg-ink-800 rounded-lg w-fit">
-          {['file', 'pubmed'].map(t => (
+          {['file', 'url'].map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -161,7 +165,7 @@ export default function Ingest() {
                 tab === t ? 'bg-accent text-white' : 'text-muted hover:text-white'
               }`}
             >
-              {t === 'file' ? 'Upload File' : 'PubMed ID'}
+              {t === 'file' ? 'Upload File' : 'From URL'}
             </button>
           ))}
         </div>
@@ -217,16 +221,23 @@ export default function Ingest() {
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <input
-              type="text"
-              value={pmid}
-              onChange={e => setPmid(e.target.value)}
-              placeholder="e.g. 34567890"
-              className="px-4 py-2.5 bg-ink-800 border border-border rounded-lg text-white font-mono text-sm placeholder:text-muted focus:outline-none focus:border-accent transition-colors"
-            />
+            <div>
+              <input
+                type="url"
+                value={urlInput}
+                onChange={e => setUrlInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleIngestUrl()}
+                placeholder="https://www.ncbi.nlm.nih.gov/books/NBK470195/"
+                className="w-full px-4 py-2.5 bg-ink-800 border border-border rounded-lg text-white text-sm placeholder:text-muted focus:outline-none focus:border-accent transition-colors"
+              />
+              <p className="text-xs text-muted mt-1.5">
+                Any public URL — NCBI bookshelf, Wikipedia, journal articles, blog posts, guidelines…
+                Images on the page will be vision-transcribed automatically.
+              </p>
+            </div>
             <button
-              onClick={handleIngestPubmed}
-              disabled={!pmid.trim() || loading}
+              onClick={handleIngestUrl}
+              disabled={!urlInput.trim() || loading}
               className="px-6 py-2.5 bg-accent hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
             >
               {loading ? (
