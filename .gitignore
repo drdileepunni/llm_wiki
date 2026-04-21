@@ -9,3 +9,4 @@ app/.cache/*
 .DS_Store
 raw/
 wiki/
+kbs/agent_school/.cache/*

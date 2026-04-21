@@ -1,11 +1,14 @@
 from pathlib import Path
 from dotenv import load_dotenv
+from dataclasses import dataclass
 import os
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY", "")
+ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
+GOOGLE_API_KEY         = os.getenv("GOOGLE_API_KEY", "")
+BROWSERBASE_API_KEY    = os.getenv("BROWSERBASE_API_KEY", "")
+BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
 WIKI_ROOT = Path(os.environ["WIKI_ROOT"])
 MODEL = os.getenv("MODEL", "claude-haiku-4-5")
 
@@ -14,6 +17,45 @@ WIKI_DIR  = WIKI_ROOT / "wiki"
 CLAUDE_MD = WIKI_ROOT / "CLAUDE.md"
 DB_PATH   = WIKI_ROOT / "app" / "wiki.db"
 CACHE_DIR = WIKI_ROOT / "app" / ".cache"
+
+KB_DIR = WIKI_ROOT / "kbs"  # Every KB (including "default") lives here
+
+
+@dataclass
+class KBConfig:
+    name: str
+    wiki_root: Path   # prefix for all relative paths (e.g. "wiki/sources/foo.md")
+    wiki_dir: Path
+    raw_dir: Path
+    claude_md: Path
+    cache_dir: Path
+
+
+def _default_kb() -> "KBConfig":
+    """Convenience alias used by service defaults before a request context exists."""
+    return get_kb("agent_school")
+
+
+def get_kb(name: str) -> "KBConfig":
+    if not name:
+        name = "default"
+    kb_root = KB_DIR / name
+    if not kb_root.exists():
+        raise ValueError(f"Knowledge base '{name}' does not exist")
+    return KBConfig(
+        name=name,
+        wiki_root=kb_root,
+        wiki_dir=kb_root / "wiki",
+        raw_dir=kb_root / "raw",
+        claude_md=kb_root / "CLAUDE.md",
+        cache_dir=kb_root / ".cache",
+    )
+
+
+def list_kbs() -> list[str]:
+    if not KB_DIR.exists():
+        return []
+    return sorted(d.name for d in KB_DIR.iterdir() if d.is_dir())
 
 # ── Flat pricing (per million tokens) ─────────────────────────────────────────
 # Used for models with no context-length tier.

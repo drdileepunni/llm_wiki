@@ -1,12 +1,15 @@
-import { Outlet, NavLink } from 'react-router-dom'
+import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
   ArrowUpTrayIcon,
   ChatBubbleLeftRightIcon,
   ChartBarIcon,
   BookOpenIcon,
+  Cog6ToothIcon,
+  PlusIcon,
 } from '@heroicons/react/24/outline'
-import { getStats } from '../api'
+import { getStats, createKB, listKBs } from '../api'
+import { useAppState } from '../AppStateContext'
 
 const navItems = [
   { to: '/ingest',    label: 'Ingest',    icon: ArrowUpTrayIcon },
@@ -17,10 +20,25 @@ const navItems = [
 
 export default function Layout() {
   const [todaySpend, setTodaySpend] = useState(null)
+  const { activeKB, switchKB, kbList, setKbList } = useAppState()
+  const navigate = useNavigate()
 
   useEffect(() => {
     getStats().then(s => setTodaySpend(s.total_cost_usd)).catch(() => {})
   }, [])
+
+  async function handleNewKB() {
+    const name = window.prompt('New knowledge base name (e.g. "philosophy"):')
+    if (!name) return
+    try {
+      await createKB(name.trim())
+      const data = await listKBs()
+      setKbList(data.kbs || kbList)
+      switchKB(name.trim().toLowerCase().replace(/ /g, '-'))
+    } catch (e) {
+      alert(`Failed to create KB: ${e.message}`)
+    }
+  }
 
   return (
     <div className="flex h-screen w-full bg-ink-950">
@@ -31,6 +49,38 @@ export default function Layout() {
           <span className="font-display text-xl font-semibold text-accent tracking-tight">
             llm·wiki
           </span>
+        </div>
+
+        {/* KB selector */}
+        <div className="px-3 pt-3 pb-2 border-b border-border">
+          <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5 px-1">
+            Knowledge Base
+          </p>
+          <div className="flex items-center gap-1">
+            <select
+              value={activeKB}
+              onChange={e => switchKB(e.target.value)}
+              className="flex-1 bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent truncate"
+            >
+              {kbList.map(kb => (
+                <option key={kb} value={kb}>{kb}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleNewKB}
+              title="New knowledge base"
+              className="p-1.5 rounded text-muted hover:text-white hover:bg-ink-700 transition-colors"
+            >
+              <PlusIcon className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => navigate('/kb-settings')}
+              title="Edit KB prompt"
+              className="p-1.5 rounded text-muted hover:text-white hover:bg-ink-700 transition-colors"
+            >
+              <Cog6ToothIcon className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Nav */}

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from datetime import datetime
 from .config import DB_PATH
@@ -19,6 +19,14 @@ class TokenLog(Base):
     output_tokens = Column(Integer)
     cost_usd = Column(Float)
     model = Column(String)
+    kb_name = Column(String, default="default")
 
 def init_db():
     Base.metadata.create_all(engine)
+    # Migration: add kb_name to existing databases that predate this column
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE token_log ADD COLUMN kb_name VARCHAR DEFAULT 'default'"))
+            conn.commit()
+        except Exception:
+            pass  # Column already exists

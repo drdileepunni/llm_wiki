@@ -1,7 +1,9 @@
 import logging
 import difflib
 from datetime import date
-from ..config import MODEL, CLAUDE_MD, WIKI_DIR, WIKI_ROOT
+from pathlib import Path
+from ..config import MODEL, KBConfig, _default_kb
+from ..cancellation import shutdown_event
 from .token_tracker import log_call
 from .llm_client import get_llm_client
 
@@ -30,12 +32,30 @@ PLAN_TOOL = {
                         "path":    {"type": "string", "description": "e.g. wiki/sources/foo.md"},
                         "section": {"type": "string", "description": "For update ops only"},
                         "key_points": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Bullet points of what this file should contain"
+                            "type": "string",
+                            "description": "Newline-separated bullet points of what THIS SOURCE explicitly says about this file's topic. Do not include background knowledge."
                         }
                     },
                     "required": ["op", "path", "key_points"]
+                }
+            },
+            "knowledge_gaps": {
+                "type": "array",
+                "description": "Standard knowledge areas NOT addressed by this source. List per entity/concept.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "page": {
+                            "type": "string",
+                            "description": "The entity/concept page path (e.g. wiki/entities/furosemide.md)"
+                        },
+                        "missing_sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Standard sections this source does not cover (e.g. ['Epidemiology', 'Dosing', 'Adverse effects'])"
+                        }
+                    },
+                    "required": ["page", "missing_sections"]
                 }
             }
         },
@@ -82,11 +102,18 @@ RULES:
 - Minimum plan: 1 source page + at least 3 entity/concept pages + log.md append + index.md update.
 - Flag contradictions with existing wiki content explicitly in your plan.
 - Use [[wiki links]] for cross-references.
-- For each entity/concept page, list key_points that cover the FULL clinical picture:
-  definition, epidemiology, pathophysiology, clinical features, diagnosis, treatment/management, prognosis, complications — whatever applies.
-  Do not limit key_points to only what the source explicitly mentions; include all clinically important topics for that entity.
+- For each entity/concept page, key_points MUST contain ONLY information explicitly stated in this source.
+  Do NOT add background knowledge, textbook facts, or anything not in the source text.
+- For standard sections that apply to an entity/concept (e.g. Epidemiology, Pathophysiology, Treatment,
+  Dosing, Prognosis) but are NOT addressed by this source, list them in knowledge_gaps instead.
 
-Call plan_wiki_files with your summary and the list of files to create.
+KNOWLEDGE GAP AWARENESS:
+- Existing gap files (wiki/gaps/*.md) will be provided below if any exist.
+- Use them to understand what's already known to be missing — so you can prioritise those areas
+  when planning entity/concept pages for this source.
+- Do NOT include wiki/gaps/ files in your file plan. Gap files are managed automatically.
+
+Call plan_wiki_files with your summary, files, and knowledge_gaps.
 """
 
 WRITE_PROMPT = f"""You are writing a single wiki page. Today: {date.today().isoformat()}.
@@ -100,17 +127,16 @@ PAGE TYPE RULES:
   - Sections: Citation, Abstract, Key Findings, Entities Mentioned, Concepts Mentioned, Open Questions.
 
 **entity and concept pages** (wiki/entities/..., wiki/concepts/...):
-  - Write a COMPREHENSIVE specialist reference on this topic using your full knowledge.
-  - The source file provides context for WHICH entity/concept to write about and may contribute specific findings — but the page must cover the complete clinical/scientific picture regardless of how much the source says.
-  - MANDATORY sections for medical entities/concepts (include all that apply):
-    Definition | Epidemiology | Pathophysiology | Clinical Presentation | Diagnosis |
-    Treatment & Management | Special Populations | Complications | Prognosis | Key References
-  - Include specific values: drug names + doses + durations, lab cut-offs, scoring thresholds,
-    sensitivity/specificity of tests, resistance rates, guideline recommendations.
-  - Longer is better than shorter. A thin page is a failure. Aim for ≥600 words of substantive content.
+  - Write ONLY what this source explicitly states about the entity/concept.
+  - DO NOT add background knowledge, textbook content, or anything not in the source text.
+  - Use the standard section headings (Definition, Epidemiology, Pathophysiology, Clinical Presentation,
+    Diagnosis, Treatment & Management, Complications, Prognosis) but ONLY populate a section if the
+    source addresses it. For sections the source does not cover, omit them entirely — they will be
+    tracked as knowledge gaps in the plan step.
+  - Specific values (doses, lab cut-offs, thresholds) are welcome IF they come from the source.
 
 GENERAL:
-- DO NOT summarise. Write at depth. Use ## sections to organise, not to replace content.
+- DO NOT summarise. Write only source-derived content. Use ## sections to organise.
 - Use [[wiki links]] for all cross-references.
 - If flagging a contradiction, include a ## Contradictions section.
 
@@ -129,8 +155,8 @@ Call write_wiki_file with the complete file content.
 
 # ── Diff helper ─────────────────────────────────────────────────────────────────
 
-def compute_diff(path: str, new_content: str, op: str) -> dict:
-    full_path = WIKI_ROOT / path
+def compute_diff(path: str, new_content: str, op: str, kb: "KBConfig") -> dict:
+    full_path = kb.wiki_root / path
     is_new = not full_path.exists()
     old_lines = [] if is_new else full_path.read_text(encoding="utf-8").splitlines()
 
@@ -148,8 +174,8 @@ def compute_diff(path: str, new_content: str, op: str) -> dict:
 
 # ── File executor ───────────────────────────────────────────────────────────────
 
-def execute_file_op(path: str, content: str, op: str, section: str = ""):
-    full_path = WIKI_ROOT / path
+def execute_file_op(path: str, content: str, op: str, kb: "KBConfig", section: str = ""):
+    full_path = kb.wiki_root / path
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
     if op == "write":
@@ -163,6 +189,148 @@ def execute_file_op(path: str, content: str, op: str, section: str = ""):
         # LLM has already merged existing + new content — just write it
         full_path.write_text(content, encoding="utf-8")
 
+# ── Gap file helpers ────────────────────────────────────────────────────────────
+
+def _parse_gap_missing(text: str) -> set[str]:
+    """Extract missing section names from an existing gap file."""
+    sections: set[str] = set()
+    in_block = False
+    for line in text.splitlines():
+        if line.strip() == "## Missing Sections":
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith("##"):
+                break
+            if line.startswith("- "):
+                sections.add(line[2:].strip())
+    return sections
+
+
+def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> list[str]:
+    """Write or merge gap files into wiki/gaps/ from the plan's knowledge_gaps output."""
+    gaps_dir = kb.wiki_dir / "gaps"
+    gaps_dir.mkdir(parents=True, exist_ok=True)
+    today = date.today().isoformat()
+    written: list[str] = []
+
+    for gap in knowledge_gaps:
+        page = gap.get("page", "")
+        raw_ms  = gap.get("missing_sections", "")
+        missing = set(
+            s.strip("- •").strip()
+            for s in (raw_ms.splitlines() if isinstance(raw_ms, str) else raw_ms)
+            if s.strip()
+        )
+        if not page or not missing:
+            continue
+
+        stem = Path(page).stem
+        gap_path = gaps_dir / f"{stem}.md"
+        created = today
+
+        existing_missing: set[str] = set()
+        if gap_path.exists():
+            existing_text = gap_path.read_text(encoding="utf-8")
+            existing_missing = _parse_gap_missing(existing_text)
+            for line in existing_text.splitlines():
+                if line.startswith("created:"):
+                    created = line.split(":", 1)[1].strip().strip('"')
+                    break
+
+        merged = sorted(existing_missing | missing)
+        if not merged:
+            continue
+
+        title = stem.replace("-", " ").title()
+        rel_gap = f"wiki/gaps/{stem}.md"
+        content = (
+            f"---\n"
+            f'title: "Knowledge Gap \u2014 {title}"\n'
+            f"type: gap\n"
+            f"referenced_page: {page}\n"
+            f"tags: [gap]\n"
+            f"created: {created}\n"
+            f"updated: {today}\n"
+            f"---\n\n"
+            f"## Missing Sections\n\n"
+            + "\n".join(f"- {s}" for s in merged)
+            + f"\n\n## Suggested Sources\n\n"
+            f"- Ingest a reference document, guideline, or monograph that covers the above sections for: **{title}**\n"
+            f"\n_Last updated by ingest of: {source_name}_\n"
+        )
+        gap_path.write_text(content, encoding="utf-8")
+        written.append(rel_gap)
+        log.info("  gap file written: %s  (%d missing sections)", rel_gap, len(merged))
+
+    return written
+
+
+def resolve_gap_sections(gap_file_rel: str, resolved_sections: list[str], kb: "KBConfig") -> None:
+    """Remove resolved sections from a gap file; delete the file if nothing remains."""
+    gap_path = kb.wiki_root / gap_file_rel
+    if not gap_path.exists():
+        return
+    existing = _parse_gap_missing(gap_path.read_text(encoding="utf-8"))
+    resolved_set = {s.removeprefix("RESOLVED: ").strip() for s in resolved_sections}
+    remaining = existing - resolved_set
+    if not remaining:
+        gap_path.unlink()
+        log.info("  gap file fully resolved and deleted: %s", gap_file_rel)
+    else:
+        # Rewrite with remaining sections only
+        text = gap_path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        new_lines = []
+        in_missing = False
+        for line in lines:
+            if line.strip() == "## Missing Sections":
+                in_missing = True
+                new_lines.append(line)
+                new_lines.extend(f"- {s}" for s in sorted(remaining))
+                continue
+            if in_missing:
+                if line.startswith("##"):
+                    in_missing = False
+                    new_lines.append(line)
+                # skip old "- " lines inside the block
+                elif not line.startswith("- "):
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+        gap_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        log.info("  gap file updated: %s  (%d sections remain)", gap_file_rel, len(remaining))
+
+
+def _parse_written_sections(content: str) -> set[str]:
+    """Return the set of ## section headings present in written markdown content."""
+    sections: set[str] = set()
+    for line in content.splitlines():
+        if line.startswith("## "):
+            sections.add(line[3:].strip())
+    return sections
+
+
+def load_existing_gaps_context(kb: "KBConfig", max_files: int = 30) -> str:
+    """Read wiki/gaps/ and return a context block for the plan prompt."""
+    gaps_dir = kb.wiki_dir / "gaps"
+    if not gaps_dir.exists():
+        return ""
+    gap_files = sorted(gaps_dir.glob("*.md"))[:max_files]
+    if not gap_files:
+        return ""
+    blocks = []
+    for f in gap_files:
+        rel = f"wiki/gaps/{f.name}"
+        blocks.append(f"--- {rel} ---\n{f.read_text(encoding='utf-8')}")
+    return (
+        "\n\nEXISTING KNOWLEDGE GAPS (wiki/gaps/):\n"
+        + "\n\n".join(blocks)
+        + "\n\nIf this source resolves any listed missing sections, include those gap files as "
+          "update ops and prefix the resolved section names with 'RESOLVED: ' in key_points.\n"
+    )
+
+
 # ── Main pipeline ───────────────────────────────────────────────────────────────
 
 def run_ingest(
@@ -170,16 +338,21 @@ def run_ingest(
     source_name: str,
     citation: str = "",
     source_path: str = "",   # local file path (or GCP URI later)
+    kb: "KBConfig | None" = None,
 ) -> dict:
+    if kb is None:
+        kb = _default_kb()
     llm           = get_llm_client()
-    system_prompt = CLAUDE_MD.read_text()
+    system_prompt = kb.claude_md.read_text()
     source_chars  = len(source_text)
     log.info("=== INGEST START  source=%r  chars=%d  model=%s ===", source_name, source_chars, MODEL)
 
     source_ref = source_path or source_name   # what gets stored in frontmatter
 
     # ── Step 1: Plan ──────────────────────────────────────────────────────────
-    log.info("Step 1: planning  max_tokens=8000")
+    existing_gaps = load_existing_gaps_context(kb)
+    log.info("Step 1: planning  max_tokens=16000  existing_gap_files=%s",
+             "yes" if existing_gaps else "none")
     plan_response = llm.create_message(
         messages=[{
             "role": "user",
@@ -190,12 +363,12 @@ Source file: {source_ref}
 ---SOURCE TEXT START---
 {source_text[:50000]}
 ---SOURCE TEXT END---
-
+{existing_gaps}
 {PLAN_PROMPT}"""
         }],
         tools=[PLAN_TOOL],
         system=system_prompt,
-        max_tokens=8000,
+        max_tokens=16000,
     )
 
     log.info(
@@ -234,30 +407,45 @@ Source file: {source_ref}
             "cost_usd": 0,
         }
 
-    plan      = plan_block.input
-    summary   = plan.get("summary", "")
-    file_plan = plan.get("files", [])
+    plan           = plan_block.input
+    summary        = plan.get("summary", "")
+    file_plan      = plan.get("files", [])
+    knowledge_gaps = plan.get("knowledge_gaps", [])
     log.info("Plan received: %d files to write  summary=%r", len(file_plan), summary[:120])
     for i, f in enumerate(file_plan):
-        log.info("  [%d] %s  op=%s  points=%d", i + 1, f.get("path"), f.get("op"), len(f.get("key_points", [])))
+        raw_kp = f.get("key_points", "")
+        pt_count = len([l for l in (raw_kp.splitlines() if isinstance(raw_kp, str) else raw_kp) if l.strip()])
+        log.info("  [%d] %s  op=%s  points=%d", i + 1, f.get("path"), f.get("op"), pt_count)
 
     # ── Step 2: Write each file individually ──────────────────────────────────
-    files_written = []
-    diffs         = []
-    errors        = []
-    total_in      = plan_response.usage.input_tokens
-    total_out     = plan_response.usage.output_tokens
+    files_written    = []
+    diffs            = []
+    errors           = []
+    gap_files_written: list[str] = []
+    total_in         = plan_response.usage.input_tokens
+    total_out        = plan_response.usage.output_tokens
 
     for idx, file_spec in enumerate(file_plan):
         path     = file_spec.get("path", "")
         op       = file_spec.get("op", "write")
         section  = file_spec.get("section", "")
-        points   = file_spec.get("key_points", [])
+        raw_pts  = file_spec.get("key_points", "")
+        points   = [p.strip("- •").strip() for p in (raw_pts.splitlines() if isinstance(raw_pts, str) else raw_pts) if p.strip()]
+
+        # Gap files are managed purely in Python — never let the LLM write them
+        if path.startswith("wiki/gaps/"):
+            log.info("Step 2 [%d/%d]: skipping gap file %s (managed by pipeline)", idx + 1, len(file_plan), path)
+            continue
+
+        if shutdown_event.is_set():
+            log.info("Step 2 [%d/%d]: shutdown requested — stopping write loop", idx + 1, len(file_plan))
+            errors.append("Ingest cancelled: server shutting down")
+            break
 
         log.info("Step 2 [%d/%d]: writing %s  op=%s", idx + 1, len(file_plan), path, op)
 
         try:
-            full_path_for_op = WIKI_ROOT / path
+            full_path_for_op = kb.wiki_root / path
             existing_content = ""
             if op in ("update", "append") and full_path_for_op.exists():
                 existing_content = full_path_for_op.read_text(encoding="utf-8")
@@ -288,16 +476,15 @@ Source: {source_name}
 Citation: {citation}
 Source file path: {source_ref}
 
-REMINDER for entity/concept pages: use the source as a signal for what to write about,
-but write a full reference-quality page using your complete knowledge of the topic.
-The source may be brief — your page must not be.
+IMPORTANT: Write ONLY what this source explicitly states. Do NOT add background knowledge.
+A page that only covers what the source says is correct — gaps are tracked separately.
 
 Include `source_file: "{source_ref}"` in the frontmatter.
 Return the COMPLETE file content — never truncate."""
                 }],
                 tools=[WRITE_TOOL],
                 system=system_prompt,
-                max_tokens=8000,
+                max_tokens=16000,
             )
 
             log.info(
@@ -324,35 +511,49 @@ Return the COMPLETE file content — never truncate."""
 
             content = write_block.input.get("content", "")
             log.info("  Content length: %d chars → executing op=%s", len(content), op)
-            diff    = compute_diff(path, content, op)
-            execute_file_op(path, content, op, section)
+            diff    = compute_diff(path, content, op, kb)
+            execute_file_op(path, content, op, kb, section)
             files_written.append(path)
             diffs.append(diff)
             log.info("  ✓ Written: %s  (+%d/-%d lines)", path, diff["added"], diff["removed"])
+
+            # Resolve gap file for this entity/concept page in pure Python
+            p = Path(path)
+            if len(p.parts) >= 2 and p.parts[-2] in ("entities", "concepts"):
+                gap_rel = f"wiki/gaps/{p.stem}.md"
+                if (kb.wiki_root / gap_rel).exists():
+                    written_sections = _parse_written_sections(content)
+                    resolve_gap_sections(gap_rel, list(written_sections), kb)
+                    log.info("  gap resolution: checked %s against %d written sections", gap_rel, len(written_sections))
 
         except Exception as e:
             log.exception("  Exception writing %s: %s", path, e)
             errors.append(f"Error writing {path}: {e}")
 
-    cost = log_call("ingest", source_name, total_in, total_out, model=MODEL)
+    # ── Write new gap files for sections not covered by this source ───────────
+    gap_files_written = write_gap_files(knowledge_gaps, kb, source_name)
+
+    cost = log_call("ingest", source_name, total_in, total_out, model=MODEL, kb_name=kb.name)
 
     log.info(
-        "=== INGEST END  files_written=%d  errors=%d  total_in=%d  total_out=%d  cost=$%.4f ===",
-        len(files_written), len(errors), total_in, total_out, cost,
+        "=== INGEST END  files_written=%d  gap_files=%d  errors=%d  total_in=%d  total_out=%d  cost=$%.4f ===",
+        len(files_written), len(gap_files_written), len(errors), total_in, total_out, cost,
     )
     if errors:
         for err in errors:
             log.warning("  error: %s", err)
 
     return {
-        "summary":       summary,
-        "files_written": files_written,
-        "diffs":         diffs,
-        "errors":        errors,
-        "input_tokens":  total_in,
-        "output_tokens": total_out,
-        "cost_usd":      cost,
-        "model":         MODEL,
+        "summary":          summary,
+        "files_written":    files_written,
+        "diffs":            diffs,
+        "errors":           errors,
+        "knowledge_gaps":   knowledge_gaps,
+        "gap_files_written": gap_files_written,
+        "input_tokens":     total_in,
+        "output_tokens":    total_out,
+        "cost_usd":         cost,
+        "model":            MODEL,
     }
 
 
@@ -366,6 +567,7 @@ def run_ingest_chunked(
     source_name: str,
     citation: str = "",
     source_path: str = "",
+    kb: "KBConfig | None" = None,
 ) -> dict:
     """
     Ingest a source, automatically splitting large documents into sequential
@@ -377,8 +579,10 @@ def run_ingest_chunked(
 
     Small documents (≤ CHUNK_SIZE chars) pass straight through to run_ingest().
     """
+    if kb is None:
+        kb = _default_kb()
     if len(source_text) <= CHUNK_SIZE:
-        return run_ingest(source_text, source_name, citation, source_path)
+        return run_ingest(source_text, source_name, citation, source_path, kb)
 
     # Split on whitespace boundaries near each CHUNK_SIZE boundary
     chunks: list[str] = []
@@ -404,15 +608,25 @@ def run_ingest_chunked(
         "files_written": [],
         "diffs": [],
         "errors": [],
+        "knowledge_gaps": [],
+        "gap_files_written": [],
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_usd": 0.0,
         "model": MODEL,
     }
     seen_files: set[str] = set()
+    seen_gap_files: set[str] = set()
+    # Deduplicate knowledge gaps across chunks by page path
+    gaps_by_page: dict[str, set[str]] = {}
     running_summary = ""
 
     for i, chunk in enumerate(chunks, 1):
+        if shutdown_event.is_set():
+            log.info("--- Chunk %d/%d: shutdown requested — stopping chunked ingest ---", i, total_chunks)
+            combined["errors"].append(f"Ingest cancelled at chunk {i}/{total_chunks}: server shutting down")
+            break
+
         log.info("--- Chunk %d/%d  chars=%d ---", i, total_chunks, len(chunk))
 
         # Prepend prior-chunk context so the planner can issue update ops
@@ -432,6 +646,7 @@ def run_ingest_chunked(
             source_name=f"{source_name} [part {i}/{total_chunks}]",
             citation=citation,
             source_path=source_path,
+            kb=kb,
         )
 
         # Accumulate totals
@@ -450,6 +665,18 @@ def run_ingest_chunked(
                 seen_files.add(f)
                 combined["files_written"].append(f)
 
+        # Track unique gap files written
+        for gf in result.get("gap_files_written", []):
+            if gf not in seen_gap_files:
+                seen_gap_files.add(gf)
+                combined["gap_files_written"].append(gf)
+
+        # Merge knowledge gaps — union missing sections per page
+        for gap in result.get("knowledge_gaps", []):
+            page = gap.get("page", "")
+            if page:
+                gaps_by_page.setdefault(page, set()).update(gap.get("missing_sections", []))
+
         # Set overall summary from first chunk; append subsequent summaries
         chunk_summary = result.get("summary", "")
         if chunk_summary:
@@ -462,8 +689,13 @@ def run_ingest_chunked(
             i, total_chunks, len(result.get("files_written", [])), len(result.get("errors", [])),
         )
 
+    combined["knowledge_gaps"] = [
+        {"page": page, "missing_sections": sorted(sections)}
+        for page, sections in sorted(gaps_by_page.items())
+    ]
     log.info(
-        "=== CHUNKED INGEST COMPLETE  total_files=%d  total_errors=%d  total_cost=$%.4f ===",
+        "=== CHUNKED INGEST COMPLETE  total_files=%d  total_errors=%d  total_cost=$%.4f  gaps=%d ===",
         len(combined["files_written"]), len(combined["errors"]), combined["cost_usd"],
+        len(combined["knowledge_gaps"]),
     )
     return combined

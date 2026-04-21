@@ -3,17 +3,19 @@ import json
 import re
 from pathlib import Path
 from datetime import date
-from ..config import MODEL, CLAUDE_MD, WIKI_DIR, WIKI_ROOT
+from ..config import MODEL, KBConfig, _default_kb
 from .token_tracker import log_call
 from .llm_client import get_llm_client
 
 log = logging.getLogger("wiki.chat_pipeline")
 
-def run_chat(question: str) -> dict:
-    log.info("=== CHAT START  question=%r  model=%s ===", question[:120], MODEL)
+def run_chat(question: str, kb: "KBConfig | None" = None) -> dict:
+    if kb is None:
+        kb = _default_kb()
+    log.info("=== CHAT START  question=%r  model=%s  kb=%s ===", question[:120], MODEL, kb.name)
     llm           = get_llm_client()
-    system_prompt = CLAUDE_MD.read_text()
-    index_content = (WIKI_DIR / "index.md").read_text()
+    system_prompt = kb.claude_md.read_text()
+    index_content = (kb.wiki_dir / "index.md").read_text()
 
     total_input = 0
     total_output = 0
@@ -25,7 +27,7 @@ def run_chat(question: str) -> dict:
     step1 = llm.create_message(
         messages=[{
             "role": "user",
-            "content": f"""Here is the wiki index:\n\n{index_content}\n\nQuestion: {question}\n\nList the 3-5 most relevant wiki page paths to answer this question. Output only a JSON array of paths, e.g. ["wiki/entities/foo.md", "wiki/concepts/bar.md"]. Nothing else."""
+            "content": f"""Here is the wiki index:\n\n{index_content}\n\nQuestion: {question}\n\nList the 3-5 most relevant wiki page paths to answer this question. Output only a JSON array of paths exactly as they appear in the index, e.g. ["entities/foo.md", "concepts/bar.md"]. Nothing else."""
         }],
         tools=[{
             "name": "return_page_list",
@@ -64,7 +66,7 @@ def run_chat(question: str) -> dict:
     # Read pages
     page_contents = []
     for page_path in pages:
-        full_path = WIKI_ROOT / page_path
+        full_path = kb.wiki_dir / page_path
         if full_path.exists():
             content = full_path.read_text()
             page_contents.append(f"### {page_path}\n\n{content}")
@@ -127,6 +129,7 @@ Wiki pages:
         input_tokens=total_input,
         output_tokens=total_output,
         model=MODEL,
+        kb_name=kb.name,
     )
 
     # Extract wiki links for Obsidian deep link rendering
@@ -145,11 +148,13 @@ Wiki pages:
         "model": MODEL,
     }
 
-def file_answer(question: str, answer: str) -> str:
+def file_answer(question: str, answer: str, kb: "KBConfig | None" = None) -> str:
     """Write a query answer back to the wiki."""
+    if kb is None:
+        kb = _default_kb()
     slug = re.sub(r'[^a-z0-9]+', '-', question[:50].lower()).strip('-')
     filename = f"{date.today().isoformat()}-{slug}.md"
-    path = WIKI_DIR / "queries" / filename
+    path = kb.wiki_dir / "queries" / filename
     path.parent.mkdir(exist_ok=True)
 
     content = f"""---
@@ -165,7 +170,7 @@ created: {date.today().isoformat()}
     path.write_text(content)
 
     # Update index
-    index_path = WIKI_DIR / "index.md"
+    index_path = kb.wiki_dir / "index.md"
     if index_path.exists():
         text = index_path.read_text()
         entry = f"- [[{question[:60]}]] — {date.today().isoformat()}"

@@ -6,16 +6,13 @@ import { sendChat, fileAnswer } from '../api'
 import CostBadge from '../components/CostBadge'
 import { useAppState } from '../AppStateContext'
 
-const VAULT_NAME = import.meta.env.VITE_VAULT_NAME || 'llm_wiki'
+const DEFAULT_VAULT = import.meta.env.VITE_VAULT_NAME || 'llm_wiki'
 const WIKI_LINK_PREFIX = 'obsidian-wiki://'
 
-/** Pre-process [[Page Title]] → a markdown link with a special obsidian-wiki:// scheme
- *  so react-markdown can render them and we can intercept with a custom <a> component. */
-function preprocessWikiLinks(text) {
+function preprocessWikiLinks(text, vaultName) {
   return text.replace(/\[\[(.+?)\]\]/g, (_, title) => {
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const obsidianUrl = `obsidian://open?vault=${VAULT_NAME}&file=wiki/entities/${slug}`
-    // Encode the obsidian URL into our marker scheme so it survives markdown parsing
+    const obsidianUrl = `obsidian://open?vault=${vaultName}&file=wiki/entities/${slug}`
     return `[${title}](${WIKI_LINK_PREFIX}${encodeURIComponent(obsidianUrl)})`
   })
 }
@@ -68,22 +65,23 @@ const mdComponents = {
   td({ children })        { return <td className="border border-border px-3 py-1.5 text-white/80">{children}</td> },
 }
 
-function AnswerBody({ text }) {
+function AnswerBody({ text, vaultName }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-      {preprocessWikiLinks(text)}
+      {preprocessWikiLinks(text, vaultName)}
     </ReactMarkdown>
   )
 }
 
-function Message({ msg }) {
+function Message({ msg, vaultName }) {
+  const { activeKB } = useAppState()
   const [filed, setFiled] = useState(false)
   const [filing, setFiling] = useState(false)
 
   const handleFile = async () => {
     setFiling(true)
     try {
-      await fileAnswer(msg.question, msg.answer)
+      await fileAnswer(msg.question, msg.answer, activeKB)
       setFiled(true)
     } catch (e) {
       console.error(e)
@@ -106,7 +104,7 @@ function Message({ msg }) {
     <div className="flex justify-start mb-4">
       <div className="max-w-2xl w-full">
         <div className="px-5 py-4 bg-surface border-l-2 border-accent rounded-2xl rounded-tl-sm text-sm text-white/90">
-          <AnswerBody text={msg.answer} />
+          <AnswerBody text={msg.answer} vaultName={vaultName} />
         </div>
         <div className="flex items-center gap-4 mt-2 px-1">
           <CostBadge
@@ -139,10 +137,11 @@ function Message({ msg }) {
 }
 
 export default function Chat() {
-  const { chat, setChat } = useAppState()
+  const { chat, setChat, activeKB } = useAppState()
   const { messages, input } = chat
   const setMessages = fn => setChat(prev => ({ ...prev, messages: typeof fn === 'function' ? fn(prev.messages) : fn }))
   const setInput    = val => setChat(prev => ({ ...prev, input: val }))
+  const vaultName   = activeKB === 'default' ? DEFAULT_VAULT : activeKB
 
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef()
@@ -160,7 +159,7 @@ export default function Chat() {
     setLoading(true)
 
     try {
-      const data = await sendChat(q)
+      const data = await sendChat(q, activeKB)
       setMessages(prev => [...prev, {
         role: 'assistant',
         question: q,
@@ -212,7 +211,7 @@ export default function Chat() {
             </p>
           </div>
         ) : (
-          messages.map((msg, i) => <Message key={i} msg={msg} />)
+          messages.map((msg, i) => <Message key={i} msg={msg} vaultName={vaultName} />)
         )}
         {loading && (
           <div className="flex justify-start mb-4">

@@ -1,7 +1,8 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
-import { ingestFile, ingestUrl } from '../api'
+import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus } from '../api'
 import CostBadge from '../components/CostBadge'
+import ResolveModal from '../components/ResolveModal'
 import { useAppState } from '../AppStateContext'
 
 // ── Diff viewer ────────────────────────────────────────────────────────────────
@@ -94,6 +95,59 @@ function FileDiff({ diff }) {
   )
 }
 
+// ── Job status card ────────────────────────────────────────────────────────────
+
+function JobCard({ job, onUpdate }) {
+  useEffect(() => {
+    if (job.status !== 'running') return
+    const iv = setInterval(async () => {
+      try {
+        const data = await resolveJobStatus(job.job_id)
+        if (data.status !== 'running') {
+          onUpdate(job.job_id, data)
+          clearInterval(iv)
+        }
+      } catch { clearInterval(iv) }
+    }, 3000)
+    return () => clearInterval(iv)
+  }, [job.status])
+
+  const colors = {
+    running: 'bg-blue-950/20 border-blue-800/30 text-blue-300',
+    done:    'bg-green-950/20 border-green-800/30 text-green-300',
+    error:   'bg-red-950/20 border-red-800/30 text-red-300',
+  }
+  const spinnerColors = { running: 'text-blue-400', done: '', error: '' }
+
+  return (
+    <div className={`p-3 rounded-lg border text-xs ${colors[job.status] || colors.error}`}>
+      <div className="flex items-center gap-2 mb-0.5">
+        {job.status === 'running' && (
+          <svg className={`animate-spin w-3 h-3 flex-shrink-0 ${spinnerColors.running}`} fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        )}
+        {job.status === 'done'  && <span className="text-green-400 flex-shrink-0">✓</span>}
+        {job.status === 'error' && <span className="text-red-400 flex-shrink-0">✗</span>}
+        <p className="font-medium truncate">{job.title}</p>
+      </div>
+      {job.status === 'running' && (
+        <p className="text-muted ml-5">Fetching article + running ingest pipeline…</p>
+      )}
+      {job.status === 'done' && job.result && (
+        <p className="text-muted ml-5">
+          {job.result.files_written?.length || 0} files written
+          {job.result.cost_usd != null ? ` · $${job.result.cost_usd.toFixed(4)}` : ''}
+        </p>
+      )}
+      {job.status === 'error' && (
+        <p className="text-red-400/70 ml-5 truncate">{job.error}</p>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Ingest() {
@@ -106,7 +160,7 @@ export default function Ingest() {
   const setError    = val => setIngest(prev => ({ ...prev, error: val }))
 
   const [dragging, setDragging] = useState(false)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading]   = useState(false)
   const inputRef = useRef()
 
   const handleDrop = (e) => {
@@ -116,14 +170,38 @@ export default function Ingest() {
     if (f) setFile(f)
   }
 
+  const { activeKB } = useAppState()
+
+  const [gaps, setGaps]               = useState([])
+  const [resolveGap, setResolveGap]   = useState(null)   // gap being resolved (modal open)
+  const [jobs, setJobs]               = useState([])     // [{job_id, title, pmc_id, status, result, error}]
+
+  useEffect(() => {
+    getWikiGaps(activeKB).then(d => setGaps(d.gaps || [])).catch(() => setGaps([]))
+  }, [activeKB])
+
+  const refreshGaps = () => {
+    getWikiGaps(activeKB).then(d => setGaps(d.gaps || [])).catch(() => {})
+  }
+
+  const handleJobsStarted = (newJobs) => {
+    setJobs(prev => [...newJobs, ...prev])
+  }
+
+  const handleJobUpdate = (jobId, data) => {
+    setJobs(prev => prev.map(j => j.job_id === jobId ? { ...j, ...data } : j))
+    if (data.status === 'done') refreshGaps()
+  }
+
   const handleIngestFile = async () => {
     if (!file) return
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      const data = await ingestFile(file)
+      const data = await ingestFile(file, activeKB)
       setResult(data)
+      refreshGaps()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -137,8 +215,9 @@ export default function Ingest() {
     setError(null)
     setResult(null)
     try {
-      const data = await ingestUrl(urlInput.trim())
+      const data = await ingestUrl(urlInput.trim(), activeKB)
       setResult(data)
+      refreshGaps()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -147,6 +226,7 @@ export default function Ingest() {
   }
 
   return (
+    <>
     <div className="h-full flex">
       {/* Left: Input */}
       <div className="w-1/2 border-r border-border p-8 flex flex-col gap-6">
@@ -296,6 +376,43 @@ export default function Ingest() {
               </div>
             )}
 
+            {/* Gap files written */}
+            {result.gap_files_written?.length > 0 && (
+              <div className="p-4 bg-amber-950/20 border border-amber-800/40 rounded-xl">
+                <p className="text-xs font-mono text-amber-400/80 uppercase tracking-wider mb-2">
+                  Gap Files Updated — {result.gap_files_written.length} files in wiki/gaps/
+                </p>
+                <div className="flex flex-col gap-0.5">
+                  {result.gap_files_written.map((f, i) => (
+                    <p key={i} className="text-xs font-mono text-amber-300/60">{f}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Knowledge Gaps */}
+            {result.knowledge_gaps?.length > 0 && (
+              <div className="p-4 bg-amber-950/30 border border-amber-800/50 rounded-xl">
+                <p className="text-xs font-mono text-amber-400 uppercase tracking-wider mb-3">
+                  Knowledge Gaps — {result.knowledge_gaps.length} pages need more sources
+                </p>
+                <div className="flex flex-col gap-2">
+                  {result.knowledge_gaps.map((gap, i) => (
+                    <div key={i}>
+                      <p className="text-xs font-mono text-amber-300/80 mb-1">{gap.page}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {gap.missing_sections.map((s, j) => (
+                          <span key={j} className="px-1.5 py-0.5 text-xs bg-amber-900/40 border border-amber-800/40 rounded text-amber-400/80 font-mono">
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Errors */}
             {result.errors?.length > 0 && (
               <div className="p-4 bg-red-950/40 border border-red-800/50 rounded-xl">
@@ -314,14 +431,75 @@ export default function Ingest() {
             />
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 rounded-full bg-ink-800 flex items-center justify-center mb-4">
-              <DocumentTextIcon className="w-7 h-7 text-muted" />
-            </div>
-            <p className="text-sm text-muted">Results will appear here after ingestion</p>
+          <div className="flex-1 flex flex-col gap-4">
+            {/* Active resolve jobs — always at top */}
+            {jobs.length > 0 && (
+              <div>
+                <p className="text-xs font-mono text-blue-400 uppercase tracking-wider mb-2">
+                  Active Resolutions — {jobs.length}
+                </p>
+                <div className="flex flex-col gap-2">
+                  {jobs.map(job => (
+                    <JobCard key={job.job_id} job={job} onUpdate={handleJobUpdate} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {gaps.length > 0 ? (
+              <>
+                <div>
+                  <p className="text-xs font-mono text-amber-400 uppercase tracking-wider mb-1">
+                    Pending Knowledge Gaps — {gaps.length} pages
+                  </p>
+                  <p className="text-xs text-muted">
+                    These sections are missing from your wiki. Ingest a relevant source to fill them.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-3 overflow-y-auto">
+                  {gaps.map((gap, i) => (
+                    <div key={i} className="p-4 bg-amber-950/20 border border-amber-800/30 rounded-xl">
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <p className="text-sm font-semibold text-amber-300">{gap.title}</p>
+                        <button
+                          onClick={() => setResolveGap(gap)}
+                          className="flex-shrink-0 px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium"
+                        >
+                          Resolve
+                        </button>
+                      </div>
+                      <p className="text-xs text-muted font-mono mb-2">{gap.referenced_page}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {gap.missing_sections.map((s, j) => (
+                          <span key={j} className="px-1.5 py-0.5 text-xs bg-amber-900/30 border border-amber-800/30 rounded text-amber-400/80 font-mono">
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-center">
+                <div className="w-16 h-16 rounded-full bg-ink-800 flex items-center justify-center mb-4">
+                  <DocumentTextIcon className="w-7 h-7 text-muted" />
+                </div>
+                <p className="text-sm text-muted">Results will appear here after ingestion</p>
+              </div>
+            )}
           </div>
         )}
       </div>
     </div>
+
+    {resolveGap && (
+      <ResolveModal
+        gap={resolveGap}
+        onClose={() => setResolveGap(null)}
+        onJobsStarted={handleJobsStarted}
+      />
+    )}
+    </>
   )
 }

@@ -18,6 +18,7 @@ def log_call(
     input_tokens: int,
     output_tokens: int,
     model: str = MODEL,
+    kb_name: str = "default",
 ) -> float:
     """
     Compute cost and persist a TokenLog row.  Returns cost in USD.
@@ -35,6 +36,7 @@ def log_call(
             output_tokens=output_tokens,
             cost_usd=cost,
             model=model,
+            kb_name=kb_name,
         )
         session.add(entry)
         session.commit()

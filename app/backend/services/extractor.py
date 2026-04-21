@@ -26,9 +26,11 @@ class PdfPageCache:
     Cache entries are plain UTF-8 text files — trivially inspectable.
     """
 
-    def __init__(self):
-        from ..config import CACHE_DIR
-        self._root = CACHE_DIR / "pdf_pages"
+    def __init__(self, cache_dir: "Path | None" = None):
+        if cache_dir is None:
+            from ..config import CACHE_DIR
+            cache_dir = CACHE_DIR
+        self._root = cache_dir / "pdf_pages"
         self._root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -62,7 +64,7 @@ class PdfPageCache:
         }
 
 
-_pdf_cache = PdfPageCache()   # module-level singleton
+_pdf_cache: "PdfPageCache | None" = None  # lazy singleton for default KB
 
 
 def extract_pdf_text(path: Path) -> str:
@@ -71,7 +73,7 @@ def extract_pdf_text(path: Path) -> str:
     return "\n\n".join(page.get_text() for page in doc)
 
 
-def extract_pdf_vision(path: Path) -> str:
+def extract_pdf_vision(path: Path, cache_dir: "Path | None" = None) -> str:
     """
     Render every page of the PDF to a 144 DPI PNG and pass each one to the
     active LLM for faithful transcription.
@@ -89,12 +91,17 @@ def extract_pdf_vision(path: Path) -> str:
     from .token_tracker import log_call
     from ..config import MODEL
 
+    global _pdf_cache
+    cache = PdfPageCache(cache_dir) if cache_dir else (_pdf_cache or PdfPageCache())
+    if not cache_dir and _pdf_cache is None:
+        _pdf_cache = cache
+
     doc         = fitz.open(str(path))
     total_pages = len(doc)
 
     # Compute file hash once for cache lookups
-    file_hash     = _pdf_cache.file_hash(path)
-    already_cached = _pdf_cache.cached_pages(file_hash)
+    file_hash     = cache.file_hash(path)
+    already_cached = cache.cached_pages(file_hash)
 
     log.info(
         "PDF vision extraction: %s  pages=%d  model=%s  cache_key=%s  cached_pages=%d",
@@ -119,7 +126,7 @@ def extract_pdf_vision(path: Path) -> str:
     for page_num, page in enumerate(doc, 1):
 
         # ── Cache hit ────────────────────────────────────────────────────────
-        cached_text = _pdf_cache.get(file_hash, page_num)
+        cached_text = cache.get(file_hash, page_num)
         if cached_text is not None:
             log.info("  Page %d/%d [cache hit]", page_num, total_pages)
             pages_text.append(f"--- Page {page_num} ---\n{cached_text}")
@@ -129,7 +136,7 @@ def extract_pdf_vision(path: Path) -> str:
         if page_num > MAX_VISION_PAGES:
             fallback = page.get_text()
             pages_text.append(f"--- Page {page_num} (text fallback) ---\n{fallback}")
-            _pdf_cache.put(file_hash, page_num, fallback)   # cache fallback too
+            cache.put(file_hash, page_num, fallback)   # cache fallback too
             continue
 
         # ── Vision transcription ─────────────────────────────────────────────
@@ -138,7 +145,7 @@ def extract_pdf_vision(path: Path) -> str:
             pix         = page.get_pixmap(matrix=render_matrix)
             image_bytes = pix.tobytes("png")
             page_text, usage = llm.transcribe_page(image_bytes, page_num, total_pages)
-            _pdf_cache.put(file_hash, page_num, page_text)   # persist immediately
+            cache.put(file_hash, page_num, page_text)   # persist immediately
             pages_text.append(f"--- Page {page_num} ---\n{page_text}")
             total_in  += usage.input_tokens
             total_out += usage.output_tokens
@@ -163,10 +170,51 @@ def extract_pdf_vision(path: Path) -> str:
 
     return "\n\n".join(pages_text)
 
+MAX_EMBEDDED_IMAGES = 15
+
+
+def _transcribe_embedded_images(
+    image_blobs: list[tuple[str, bytes]],   # [(label, bytes), ...]
+    source_name: str,
+    operation: str,
+) -> str:
+    """
+    Vision-transcribe a list of embedded images and return a markdown ## Images block.
+    Images smaller than 2 KB (icons, bullets) are skipped.
+    Returns an empty string if nothing was transcribed.
+    """
+    from .llm_client import get_llm_client
+    from .token_tracker import log_call
+    from ..config import MODEL
+
+    llm = get_llm_client()
+    parts: list[str] = []
+    total_in = total_out = 0
+
+    for i, (label, blob) in enumerate(image_blobs[:MAX_EMBEDDED_IMAGES]):
+        if len(blob) < 2048:
+            continue
+        try:
+            log.info("  Transcribing embedded image %d: %s (%d bytes)", i + 1, label or "unlabelled", len(blob))
+            description, usage = llm.transcribe_page(blob, i + 1, None)
+            total_in  += usage.input_tokens
+            total_out += usage.output_tokens
+            parts.append(f"[Image: {label}]\n{description}" if label else f"[Image]\n{description}")
+        except Exception as exc:
+            log.warning("  Could not transcribe image %s: %s", label, exc)
+            if label:
+                parts.append(f"[Image: {label}]")
+
+    if parts:
+        log_call(operation, source_name, total_in, total_out, model=MODEL)
+        log.info("Embedded image transcription done: %d images  in=%d  out=%d", len(parts), total_in, total_out)
+        return "\n\n## Images\n\n" + "\n\n".join(parts)
+    return ""
+
+
 def extract_docx(path: Path) -> str:
-    """Extract text from a Word .docx file, preserving headings and paragraphs."""
+    """Extract text from a Word .docx file, preserving headings, tables, and embedded images."""
     from docx import Document
-    from docx.oxml.ns import qn
 
     doc = Document(str(path))
     lines = []
@@ -174,7 +222,6 @@ def extract_docx(path: Path) -> str:
         text = para.text.strip()
         if not text:
             continue
-        # Render Word heading styles as markdown headings
         style = para.style.name if para.style else ""
         if style.startswith("Heading 1"):
             lines.append(f"# {text}")
@@ -185,17 +232,54 @@ def extract_docx(path: Path) -> str:
         else:
             lines.append(text)
 
-    # Also pull text from tables
     for table in doc.tables:
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if cells:
                 lines.append(" | ".join(cells))
 
-    return "\n\n".join(lines)
+    base_text = "\n\n".join(lines)
+
+    # Extract embedded images via relationship map
+    image_blobs: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for rel_id, rel in doc.part.rels.items():
+        if "image" not in rel.reltype.lower():
+            continue
+        if rel_id in seen:
+            continue
+        seen.add(rel_id)
+        try:
+            blob = rel.target_part.blob
+            image_blobs.append((rel.target_part.partname.split("/")[-1], blob))
+        except Exception as exc:
+            log.warning("  Could not read DOCX image rel %s: %s", rel_id, exc)
+
+    return base_text + _transcribe_embedded_images(image_blobs, path.name, "extract_docx_images")
+
 
 def extract_markdown(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    """Extract text from a Markdown file, vision-transcribing locally referenced images."""
+    import re
+
+    text = path.read_text(encoding="utf-8")
+
+    # Collect local image references: ![alt](path) — skip http(s) and data URIs
+    img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+    image_blobs: list[tuple[str, bytes]] = []
+    for m in img_pattern.finditer(text):
+        alt, src = m.group(1).strip(), m.group(2).strip()
+        if src.startswith(("http://", "https://", "data:")):
+            continue
+        img_path = (path.parent / src).resolve()
+        if not img_path.exists():
+            continue
+        try:
+            image_blobs.append((alt or img_path.name, img_path.read_bytes()))
+        except Exception as exc:
+            log.warning("  Could not read markdown image %s: %s", img_path, exc)
+
+    return text + _transcribe_embedded_images(image_blobs, path.name, "extract_markdown_images")
 
 def extract_pubmed(pmid: str) -> dict:
     """Fetch abstract + metadata from NCBI E-utilities. Returns dict with title, authors, abstract, citation."""
@@ -222,6 +306,110 @@ def extract_pubmed(pmid: str) -> dict:
         "text": abstract_text,
         "pmid": pmid,
     }
+
+def extract_url_browserbase(url: str) -> dict:
+    """
+    Fetch a JS-rendered web page via Browserbase + Playwright.
+
+    Stagehand creates a remote Browserbase browser session; Playwright connects
+    over CDP to get the fully-rendered HTML; our existing LLM pipeline then
+    extracts clean text — same as the httpx path but with a real browser.
+    """
+    from stagehand import Stagehand
+    from playwright.sync_api import sync_playwright
+    from bs4 import BeautifulSoup
+    from .llm_client import get_llm_client
+    from .token_tracker import log_call
+    from ..config import BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, ANTHROPIC_API_KEY, MODEL
+
+    log.info("Browserbase fetch: %s", url)
+
+    # 1. Start a Browserbase session via Stagehand to get the CDP WebSocket URL
+    stagehand = Stagehand(
+        browserbase_api_key=BROWSERBASE_API_KEY,
+        browserbase_project_id=BROWSERBASE_PROJECT_ID,
+        model_api_key=ANTHROPIC_API_KEY,
+        server="remote",
+    )
+    session_resp = stagehand.sessions.start(model_name="gpt-4o")
+    session_id = session_resp.data.session_id
+    cdp_url = session_resp.data.cdp_url
+    log.info("Browserbase session: %s", session_id)
+
+    try:
+        # 2. Connect Playwright to the remote browser over CDP and get rendered HTML
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            page = browser.contexts[0].pages[0] if browser.contexts[0].pages else browser.contexts[0].new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            title = page.title() or urlparse(url).path
+            html = page.content()
+            final_url = page.url
+            browser.close()
+
+        log.info("Browserbase rendered %d bytes for %r", len(html), title)
+
+        # 3. Strip noise tags and pass HTML to our LLM — same pipeline as extract_url
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all(["script", "style", "noscript"]):
+            tag.decompose()
+        clean_html = str(soup)
+
+        EXTRACT_TOOL = {
+            "name": "extracted_page_text",
+            "description": "Return the full extracted text of the web page.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "All substantive content from the page as clean plain text. "
+                            "Preserve all headings (use # ## ### markdown), paragraphs, "
+                            "lists, tables. Remove navigation menus, cookie banners, "
+                            "ads, and other chrome."
+                        )
+                    }
+                },
+                "required": ["text"]
+            }
+        }
+
+        llm = get_llm_client()
+        extract_response = llm.create_message(
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Extract the COMPLETE text content from this HTML page. "
+                    f"URL: {final_url}\n\n"
+                    f"Include every section, every paragraph, all data tables. "
+                    f"Remove only navigation menus, ads, cookie notices, and footer boilerplate.\n\n"
+                    f"HTML (may be truncated):\n{clean_html[:150000]}"
+                )
+            }],
+            tools=[EXTRACT_TOOL],
+            system="You are a precise HTML-to-text extractor. Never summarise. Extract everything.",
+            max_tokens=8000,
+        )
+
+        extract_block = next(
+            (b for b in extract_response.content if b.type == "tool_use"), None
+        )
+        full_text = extract_block.input.get("text", "") if extract_block else soup.get_text(separator="\n")
+        log_call("extract_url_browserbase", title,
+                 extract_response.usage.input_tokens, extract_response.usage.output_tokens, model=MODEL)
+        log.info("Browserbase LLM extraction done: %d chars", len(full_text))
+
+    finally:
+        try:
+            stagehand.sessions.end(session_id)
+        except Exception:
+            pass
+        stagehand.close()
+
+    citation = f"{title}. Retrieved from: {final_url}"
+    return {"title": title, "text": full_text, "citation": citation, "url": final_url}
+
 
 def extract_url(url: str) -> dict:
     """
@@ -252,11 +440,36 @@ def extract_url(url: str) -> dict:
     }
 
     log.info("Fetching URL: %s", url)
-    with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        html = resp.text
-        final_url = str(resp.url)
+    try:
+        with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            final_url = str(resp.url)
+    except Exception as exc:
+        log.warning("httpx fetch failed (%s) — falling back to Browserbase", exc)
+        return extract_url_browserbase(url)
+
+    # If the server returned a PDF, delegate to vision extraction
+    content_type = resp.headers.get("content-type", "")
+    if "application/pdf" in content_type or final_url.lower().endswith(".pdf"):
+        import tempfile, os
+        log.info("URL returned PDF — routing to vision extractor")
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(resp.content)
+            tmp_path = Path(tmp.name)
+        try:
+            text = extract_pdf_vision(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+        parsed_title = urlparse(final_url).path.split("/")[-1] or final_url
+        return {
+            "title": parsed_title,
+            "text": text,
+            "citation": f"{parsed_title}. Retrieved from: {final_url}",
+            "url": final_url,
+        }
+
+    html = resp.text
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -387,11 +600,10 @@ def extract_url(url: str) -> dict:
     }
 
 
-def extract_text(path: Path) -> str:
+def extract_text(path: Path, cache_dir: "Path | None" = None) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return extract_pdf_vision(path)   # vision-based: handles scans, tables, diagrams
+        return extract_pdf_vision(path, cache_dir=cache_dir)
     if suffix == ".docx":
         return extract_docx(path)
-    # Treat everything else (.md, .txt, .csv, …) as plain text
     return path.read_text(encoding="utf-8", errors="replace")

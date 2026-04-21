@@ -208,7 +208,7 @@ function SearchResults({ results, total, query, onSelect }) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Wiki() {
-  const { wiki, setWiki } = useAppState()
+  const { wiki, setWiki, activeKB } = useAppState()
   const { tree, selectedPath, content, savedContent, mode, searchQuery, searchResults, searchTotal } = wiki
 
   const setTree         = val => setWiki(prev => ({ ...prev, tree: val }))
@@ -232,19 +232,17 @@ export default function Wiki() {
   // Slug index for wikilink resolution
   const slugIndex = useMemo(() => buildSlugIndex(tree), [tree])
 
-  // Load tree once (skip if already cached in context)
+  // Load tree when active KB changes (or on mount)
   useEffect(() => {
-    if (tree.length === 0) {
-      getWikiTree().then(d => setTree(d.tree)).catch(console.error)
-    }
-  }, [])
+    getWikiTree(activeKB).then(d => setTree(d.tree)).catch(console.error)
+  }, [activeKB])
 
   // Load file when selection changes
   useEffect(() => {
     if (!selectedPath) return
     setLoading(true)
     setSearchParams({ file: selectedPath })
-    getWikiFile(selectedPath)
+    getWikiFile(selectedPath, activeKB)
       .then(d => { setContent(d.content); setSavedContent(d.content); setSaveStatus(null) })
       .catch(console.error)
       .finally(() => setLoading(false))
@@ -267,7 +265,7 @@ export default function Wiki() {
     clearTimeout(searchTimerRef.current)
     setSearching(true)
     searchTimerRef.current = setTimeout(() => {
-      searchWiki(searchQuery.trim())
+      searchWiki(searchQuery.trim(), activeKB)
         .then(d => { setSearchResults(d.results); setSearchTotal(d.total) })
         .catch(console.error)
         .finally(() => setSearching(false))
@@ -279,7 +277,7 @@ export default function Wiki() {
     if (!selectedPath || !dirty) return
     setSaving(true); setSaveStatus(null)
     try {
-      await saveWikiFile(selectedPath, content)
+      await saveWikiFile(selectedPath, content, activeKB)
       setSavedContent(content); setSaveStatus('saved')
       setTimeout(() => setSaveStatus(null), 2500)
     } catch (e) {
