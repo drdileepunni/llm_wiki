@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { PaperAirplaneIcon, ArrowTopRightOnSquareIcon, CheckIcon } from '@heroicons/react/24/outline'
+import { PaperAirplaneIcon, ArrowTopRightOnSquareIcon, CheckIcon, PaperClipIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { sendChat, fileAnswer } from '../api'
@@ -93,8 +93,19 @@ function Message({ msg, vaultName }) {
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end mb-4">
-        <div className="max-w-xl px-4 py-3 bg-accent rounded-2xl rounded-tr-sm text-sm text-white leading-relaxed">
-          {msg.content}
+        <div className="max-w-xl flex flex-col items-end gap-2">
+          {msg.images?.length > 0 && (
+            <div className="flex flex-wrap gap-2 justify-end">
+              {msg.images.map((img, i) => (
+                <img key={i} src={img.dataUrl} alt="" className="max-h-40 max-w-xs rounded-lg border border-white/10 object-cover" />
+              ))}
+            </div>
+          )}
+          {msg.content && (
+            <div className="px-4 py-3 bg-accent rounded-2xl rounded-tr-sm text-sm text-white leading-relaxed">
+              {msg.content}
+            </div>
+          )}
         </div>
       </div>
     )
@@ -113,6 +124,16 @@ function Message({ msg, vaultName }) {
             costUsd={msg.cost_usd}
             model={msg.model}
           />
+          {msg.gap_registered && (
+            <span className="flex items-center gap-1.5 text-xs text-amber-500/70 font-mono" title={msg.gap_sections?.join(', ')}>
+              <span>&#9651;</span>
+              <span>gap registered:</span>
+              <span className="text-amber-400">{msg.gap_entity || msg.gap_registered}</span>
+              {msg.gap_sections?.length > 0 && (
+                <span className="text-amber-500/50">({msg.gap_sections.join(', ')})</span>
+              )}
+            </span>
+          )}
           <button
             onClick={handleFile}
             disabled={filed || filing}
@@ -144,22 +165,46 @@ export default function Chat() {
   const vaultName   = activeKB === 'default' ? DEFAULT_VAULT : activeKB
 
   const [loading, setLoading] = useState(false)
+  const [images, setImages] = useState([])
   const bottomRef = useRef()
   const textareaRef = useRef()
+  const fileInputRef = useRef()
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const addImageFile = (file) => {
+    if (!file.type.startsWith('image/')) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target.result
+      const base64 = dataUrl.split(',')[1]
+      setImages(prev => [...prev, { dataUrl, data: base64, media_type: file.type }])
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handlePaste = (e) => {
+    for (const item of e.clipboardData.items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        addImageFile(item.getAsFile())
+      }
+    }
+  }
+
   const handleSend = async () => {
     const q = input.trim()
-    if (!q || loading) return
+    if ((!q && images.length === 0) || loading) return
+    const sentImages = images
     setInput('')
-    setMessages(prev => [...prev, { role: 'user', content: q }])
+    setImages([])
+    setMessages(prev => [...prev, { role: 'user', content: q, images: sentImages }])
     setLoading(true)
 
+    const apiImages = sentImages.map(({ data, media_type }) => ({ data, media_type }))
     try {
-      const data = await sendChat(q, activeKB)
+      const data = await sendChat(q, activeKB, apiImages)
       setMessages(prev => [...prev, {
         role: 'assistant',
         question: q,
@@ -169,6 +214,9 @@ export default function Chat() {
         cost_usd: data.cost_usd,
         model: data.model,
         pages_consulted: data.pages_consulted,
+        gap_registered: data.gap_registered,
+        gap_entity: data.gap_entity,
+        gap_sections: data.gap_sections,
       }])
     } catch (e) {
       setMessages(prev => [...prev, {
@@ -188,6 +236,8 @@ export default function Chat() {
       handleSend()
     }
   }
+
+  const removeImage = (i) => setImages(prev => prev.filter((_, idx) => idx !== i))
 
   return (
     <div className="h-full flex flex-col">
@@ -229,12 +279,44 @@ export default function Chat() {
 
       {/* Input */}
       <div className="px-8 py-5 border-t border-border flex-shrink-0">
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-3">
+            {images.map((img, i) => (
+              <div key={i} className="relative group">
+                <img src={img.dataUrl} alt="" className="h-16 w-16 object-cover rounded-lg border border-border" />
+                <button
+                  onClick={() => removeImage(i)}
+                  className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-ink-900 border border-border rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <XMarkIcon className="w-2.5 h-2.5 text-muted" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex gap-3 items-end">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={e => { Array.from(e.target.files).forEach(addImageFile); e.target.value = '' }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            className="p-3 bg-ink-800 border border-border hover:border-accent disabled:opacity-40 text-muted hover:text-accent rounded-xl transition-colors flex-shrink-0"
+            title="Attach image"
+          >
+            <PaperClipIcon className="w-5 h-5" />
+          </button>
           <textarea
             ref={textareaRef}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             disabled={loading}
             placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"
             rows={1}
@@ -243,7 +325,7 @@ export default function Chat() {
           />
           <button
             onClick={handleSend}
-            disabled={!input.trim() || loading}
+            disabled={(!input.trim() && images.length === 0) || loading}
             className="p-3 bg-accent hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl transition-colors flex-shrink-0"
           >
             <PaperAirplaneIcon className="w-5 h-5" />

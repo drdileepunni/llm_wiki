@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
-import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus } from '../api'
+import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus, resolveAll, resolveBatchStatus } from '../api'
 import CostBadge from '../components/CostBadge'
 import ResolveModal from '../components/ResolveModal'
 import { useAppState } from '../AppStateContext'
@@ -173,8 +173,11 @@ export default function Ingest() {
   const { activeKB } = useAppState()
 
   const [gaps, setGaps]               = useState([])
-  const [resolveGap, setResolveGap]   = useState(null)   // gap being resolved (modal open)
-  const [jobs, setJobs]               = useState([])     // [{job_id, title, pmc_id, status, result, error}]
+  const [resolveGap, setResolveGap]   = useState(null)
+  const [jobs, setJobs]               = useState([])
+  const [batchId, setBatchId]         = useState(null)
+  const [batchInfo, setBatchInfo]     = useState(null)
+  const addedJobIds                   = useRef(new Set())
 
   useEffect(() => {
     getWikiGaps(activeKB).then(d => setGaps(d.gaps || [])).catch(() => setGaps([]))
@@ -191,6 +194,37 @@ export default function Ingest() {
   const handleJobUpdate = (jobId, data) => {
     setJobs(prev => prev.map(j => j.job_id === jobId ? { ...j, ...data } : j))
     if (data.status === 'done') refreshGaps()
+  }
+
+  useEffect(() => {
+    if (!batchId) return
+    const iv = setInterval(async () => {
+      try {
+        const data = await resolveBatchStatus(batchId)
+        setBatchInfo(data)
+        const newJobs = (data.jobs || []).filter(j => !addedJobIds.current.has(j.job_id))
+        if (newJobs.length > 0) {
+          newJobs.forEach(j => addedJobIds.current.add(j.job_id))
+          setJobs(prev => [...newJobs.map(j => ({ ...j, status: 'running' })), ...prev])
+        }
+        if (data.status === 'done') {
+          clearInterval(iv)
+          setBatchId(null)
+        }
+      } catch { clearInterval(iv) }
+    }, 3000)
+    return () => clearInterval(iv)
+  }, [batchId])
+
+  const handleResolveAll = async () => {
+    try {
+      addedJobIds.current = new Set()
+      const data = await resolveAll(activeKB)
+      setBatchId(data.batch_id)
+      setBatchInfo({ total_gaps: gaps.length, completed_gaps: 0, status: 'running' })
+    } catch (e) {
+      console.error('resolve-all failed:', e)
+    }
   }
 
   const handleIngestFile = async () => {
@@ -449,9 +483,20 @@ export default function Ingest() {
             {gaps.length > 0 ? (
               <>
                 <div>
-                  <p className="text-xs font-mono text-amber-400 uppercase tracking-wider mb-1">
-                    Pending Knowledge Gaps — {gaps.length} pages
-                  </p>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-xs font-mono text-amber-400 uppercase tracking-wider">
+                      Pending Knowledge Gaps — {gaps.length} pages
+                    </p>
+                    <button
+                      onClick={handleResolveAll}
+                      disabled={!!batchId}
+                      className="flex-shrink-0 px-2.5 py-1 text-xs bg-blue-900/20 hover:bg-blue-900/40 border border-blue-700/30 rounded-md text-blue-400 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {batchId
+                        ? `Resolving… ${batchInfo?.completed_gaps ?? 0}/${batchInfo?.total_gaps ?? gaps.length}`
+                        : 'Resolve All'}
+                    </button>
+                  </div>
                   <p className="text-xs text-muted">
                     These sections are missing from your wiki. Ingest a relevant source to fill them.
                   </p>

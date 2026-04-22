@@ -6,6 +6,8 @@ import Chat from './pages/Chat'
 import Dashboard from './pages/Dashboard'
 import Wiki from './pages/Wiki'
 import KBSettings from './pages/KBSettings'
+import Assess from './pages/Assess'
+import ClinicalAssess from './pages/ClinicalAssess'
 
 export default function App() {
   return (
@@ -19,6 +21,8 @@ export default function App() {
             <Route path="wiki" element={<Wiki />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="kb-settings" element={<KBSettings />} />
+            <Route path="assess" element={<Assess />} />
+            <Route path="clinical-assess" element={<ClinicalAssess />} />
           </Route>
         </Routes>
       </BrowserRouter>

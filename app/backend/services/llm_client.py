@@ -254,28 +254,45 @@ class GeminiLLMClient:
         from google.genai import types
 
         # ── tools ────────────────────────────────────────────────────────────
-        fn_decls    = [_anthropic_tool_to_gemini_decl(t) for t in tools]
-        gemini_tool = types.Tool(function_declarations=fn_decls)
+        fn_decls = [_anthropic_tool_to_gemini_decl(t) for t in tools]
 
-        # ── tool config (force vs auto) ──────────────────────────────────────
-        mode = "ANY" if force_tool else "AUTO"
-        tool_config = types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(mode=mode)
-        )
+        # ── tool config (skip entirely when no tools — Gemini rejects it) ────
+        if fn_decls:
+            mode = "ANY" if force_tool else "AUTO"
+            gemini_tools     = [types.Tool(function_declarations=fn_decls)]
+            gemini_tool_cfg  = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode=mode)
+            )
+        else:
+            gemini_tools    = []
+            gemini_tool_cfg = None
 
         # ── convert messages to Gemini format ────────────────────────────────
         gemini_contents = []
         for msg in messages:
             role = "model" if msg["role"] == "assistant" else "user"
-            gemini_contents.append(
-                types.Content(role=role, parts=[types.Part(text=msg["content"])])
-            )
+            content = msg["content"]
+            if isinstance(content, list):
+                import base64
+                parts = []
+                for block in content:
+                    if block.get("type") == "image":
+                        src = block["source"]
+                        img_bytes = base64.b64decode(src["data"])
+                        parts.append(types.Part.from_bytes(data=img_bytes, mime_type=src.get("media_type", "image/jpeg")))
+                    elif block.get("type") == "text":
+                        parts.append(types.Part(text=block["text"]))
+                gemini_contents.append(types.Content(role=role, parts=parts))
+            else:
+                gemini_contents.append(
+                    types.Content(role=role, parts=[types.Part(text=content)])
+                )
 
         # ── generate (with retry on MALFORMED_FUNCTION_CALL) ─────────────────
         config = types.GenerateContentConfig(
             system_instruction=system or None,
-            tools=[gemini_tool],
-            tool_config=tool_config,
+            tools=gemini_tools or None,
+            tool_config=gemini_tool_cfg,
             max_output_tokens=max_tokens,
         )
 

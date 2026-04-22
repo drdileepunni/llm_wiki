@@ -1,10 +1,12 @@
+import asyncio
 import logging
 import re
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends
 from pydantic import BaseModel
 from ..config import KBConfig
 from ..dependencies import resolve_kb
+from ..services import vector_store as vs_mod
 
 router = APIRouter(prefix="/api/wiki", tags=["wiki"])
 log = logging.getLogger("wiki.router")
@@ -166,9 +168,11 @@ def get_gaps(kb: KBConfig = Depends(resolve_kb)):
                 if line.startswith("##"):
                     break
                 if line.startswith("- "):
-                    missing.append(line[2:].strip())
+                    item = line[2:].strip()
+                    if not item.startswith("RESOLVED:"):
+                        missing.append(item)
 
-        if missing:
+        if missing and not f.stem.startswith("patient-"):
             stem = f.stem
             gaps.append({
                 "file": f"wiki/gaps/{f.name}",
@@ -179,6 +183,24 @@ def get_gaps(kb: KBConfig = Depends(resolve_kb)):
             })
 
     return {"gaps": gaps}
+
+
+@router.post("/vectors/rebuild")
+async def rebuild_vectors(background_tasks: BackgroundTasks, kb: KBConfig = Depends(resolve_kb)):
+    """Embed (or re-embed) every wiki page for semantic search. Runs in background."""
+    background_tasks.add_task(asyncio.to_thread, vs_mod.rebuild_all, kb.wiki_dir)
+    total = sum(
+        len(list((kb.wiki_dir / s).glob("*.md")))
+        for s in ("entities", "concepts", "sources", "queries")
+        if (kb.wiki_dir / s).exists()
+    )
+    return {"status": "started", "pages_to_embed": total}
+
+
+@router.get("/vectors/status")
+def vectors_status(kb: KBConfig = Depends(resolve_kb)):
+    """Return how many pages are currently embedded."""
+    return {"embedded": vs_mod.count(kb.wiki_dir)}
 
 
 @router.delete("/contents")

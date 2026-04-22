@@ -70,9 +70,15 @@ sources: [slug]
 
 Page naming:
 - sources/: author-year-keyword.md
-- entities/: lowercase-hyphenated.md
+- entities/: lowercase-hyphenated.md — **except patients** (see rule below)
 - concepts/: lowercase-hyphenated.md
 - queries/: YYYY-MM-DD-short-slug.md
+
+**Patient entity naming rule:**
+Patient entity files must be named `<CPMRN>_<date-of-first-timestamp>.md` using the date in `YYYY_MM_DD` format, e.g. `INASDBR459102_2025_12_23.md`. The title in frontmatter should match: `INASDBR459102 — 2025-12-23`.
+
+**No-duplicate rule for patient entities:**
+Before creating a patient entity file, search `wiki/entities/` for any existing file whose name starts with the same CPMRN. If one exists, update it — do not create a new file. This prevents duplicate patient pages when the same timeline is ingested in parts or re-ingested.
 
 **STRICT RULE: ONLY create files inside these four directories: `sources/`, `entities/`, `concepts/`, `queries/`. Never create any other subdirectory under `wiki/`. Medications, labs, procedures, vitals, symptoms, diagnoses — all go into `entities/` or `concepts/`. No exceptions.**
 

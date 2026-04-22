@@ -1,13 +1,33 @@
 import logging
 import difflib
+import re
 from datetime import date
 from pathlib import Path
 from ..config import MODEL, KBConfig, _default_kb
 from ..cancellation import shutdown_event
 from .token_tracker import log_call
 from .llm_client import get_llm_client
+from .index_sync import sync_index
+from . import vector_store as vs_mod
 
 log = logging.getLogger("wiki.ingest_pipeline")
+
+
+def _embed_page(page_path: str, content: str, kb: "KBConfig") -> None:
+    """Embed a single wiki page into the vector store. Errors are non-fatal."""
+    # Only embed entity/concept/source/query pages (not gaps, index, log, etc.)
+    from pathlib import Path as _Path
+    parts = _Path(page_path).parts
+    if not parts or parts[0] not in ("wiki",) or len(parts) < 3:
+        return
+    section = parts[1] if len(parts) >= 2 else ""
+    if section not in ("entities", "concepts", "sources", "queries"):
+        return
+    rel = "/".join(parts[1:])  # strip leading "wiki/"
+    try:
+        vs_mod.upsert(rel, content, kb.wiki_dir)
+    except Exception as exc:
+        log.warning("Vector upsert skipped for %s: %s", page_path, exc)
 
 # ── Tool definitions ────────────────────────────────────────────────────────────
 
@@ -106,6 +126,9 @@ RULES:
   Do NOT add background knowledge, textbook facts, or anything not in the source text.
 - For standard sections that apply to an entity/concept (e.g. Epidemiology, Pathophysiology, Treatment,
   Dosing, Prognosis) but are NOT addressed by this source, list them in knowledge_gaps instead.
+- Do NOT add knowledge_gaps for patient-specific entity pages (paths like wiki/entities/patient-*.md).
+  Those are individual patient records — missing fields (Demographics, Allergies, Family History, etc.)
+  are PHI that will never be found by a literature search.
 
 KNOWLEDGE GAP AWARENESS:
 - Existing gap files (wiki/gaps/*.md) will be provided below if any exist.
@@ -172,9 +195,87 @@ def compute_diff(path: str, new_content: str, op: str, kb: "KBConfig") -> dict:
     return {"path": path, "op": op, "is_new": is_new,
             "added": added, "removed": removed, "diff": diff_lines}
 
+# ── Mop-up: enforce allowed wiki structure ───────────────────────────────────────
+
+_WIKI_SECTIONS = {"entities", "concepts", "sources", "queries", "gaps"}
+
+# Map rogue directory names to the correct allowed section.
+# Anything not listed defaults to "entities" (named things).
+_ROGUE_DIR_MAP: dict[str, str] = {
+    "procedures": "entities",
+    "medications": "entities",
+    "drugs": "entities",
+    "labs": "entities",
+    "devices": "entities",
+    "vitals": "entities",
+    "symptoms": "concepts",
+    "diagnoses": "concepts",
+    "conditions": "concepts",
+    "mechanisms": "concepts",
+    "pathophysiology": "concepts",
+}
+
+
+def mop_up_wiki_structure(kb: "KBConfig") -> list[str]:
+    """
+    Move any .md files sitting outside the four allowed wiki directories into
+    the correct directory. Returns a list of moves performed as log strings.
+    """
+    wiki_dir = kb.wiki_dir
+    moves: list[str] = []
+
+    for child in sorted(wiki_dir.iterdir()):
+        if not child.is_dir() or child.name in _WIKI_SECTIONS:
+            continue
+        target_section = _ROGUE_DIR_MAP.get(child.name, "entities")
+        target_dir = wiki_dir / target_section
+        target_dir.mkdir(exist_ok=True)
+
+        for md_file in sorted(child.glob("*.md")):
+            dest = target_dir / md_file.name
+            if dest.exists():
+                # Avoid clobbering — append a suffix
+                dest = target_dir / f"{md_file.stem}--from-{child.name}.md"
+            md_file.rename(dest)
+            rel_from = f"wiki/{child.name}/{md_file.name}"
+            rel_to   = f"wiki/{target_section}/{dest.name}"
+            moves.append(f"{rel_from} → {rel_to}")
+            log.info("mop_up: moved %s → %s", rel_from, rel_to)
+
+            # Fix vector_store paths
+            try:
+                vs_mod.rename_path(rel_from.removeprefix("wiki/"), rel_to.removeprefix("wiki/"), kb.wiki_dir)
+            except Exception:
+                pass
+
+        # Remove the now-empty rogue directory
+        try:
+            child.rmdir()
+            log.info("mop_up: removed empty directory wiki/%s/", child.name)
+        except OSError:
+            log.warning("mop_up: could not remove wiki/%s/ (not empty?)", child.name)
+
+    return moves
+
+
 # ── File executor ───────────────────────────────────────────────────────────────
 
+def _normalise_path(path: str) -> str:
+    """
+    Ensure the path starts with wiki/.
+    The LLM occasionally omits the prefix (e.g. returns "concepts/foo.md"
+    instead of "wiki/concepts/foo.md"), which would create files outside wiki/.
+    """
+    parts = Path(path).parts
+    if parts and parts[0] in _WIKI_SECTIONS:
+        return "wiki/" + path
+    if parts and parts[0] in ("log.md", "index.md"):
+        return "wiki/" + path
+    return path
+
+
 def execute_file_op(path: str, content: str, op: str, kb: "KBConfig", section: str = ""):
+    path = _normalise_path(path)
     full_path = kb.wiki_root / path
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -225,6 +326,12 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         if not page or not missing:
             continue
 
+        # Patient entity pages are individual records — their missing fields are PHI,
+        # not resolvable by literature search.
+        if Path(page).stem.startswith("patient-"):
+            log.debug("write_gap_files: skipping patient entity page %s", page)
+            continue
+
         stem = Path(page).stem
         gap_path = gaps_dir / f"{stem}.md"
         created = today
@@ -266,14 +373,19 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
     return written
 
 
+def _norm_section(s: str) -> str:
+    """Normalize a section name for fuzzy matching: lowercase, strip parentheticals."""
+    return re.sub(r'\s*\(.*?\)', '', s).strip().lower()
+
+
 def resolve_gap_sections(gap_file_rel: str, resolved_sections: list[str], kb: "KBConfig") -> None:
     """Remove resolved sections from a gap file; delete the file if nothing remains."""
     gap_path = kb.wiki_root / gap_file_rel
     if not gap_path.exists():
         return
     existing = _parse_gap_missing(gap_path.read_text(encoding="utf-8"))
-    resolved_set = {s.removeprefix("RESOLVED: ").strip() for s in resolved_sections}
-    remaining = existing - resolved_set
+    resolved_normalized = {_norm_section(s.removeprefix("RESOLVED: ")) for s in resolved_sections}
+    remaining = {s for s in existing if _norm_section(s) not in resolved_normalized}
     if not remaining:
         gap_path.unlink()
         log.info("  gap file fully resolved and deleted: %s", gap_file_rel)
@@ -516,6 +628,8 @@ Return the COMPLETE file content — never truncate."""
             files_written.append(path)
             diffs.append(diff)
             log.info("  ✓ Written: %s  (+%d/-%d lines)", path, diff["added"], diff["removed"])
+            # Embed the page for semantic search
+            _embed_page(path, content, kb)
 
             # Resolve gap file for this entity/concept page in pure Python
             p = Path(path)
@@ -532,6 +646,11 @@ Return the COMPLETE file content — never truncate."""
 
     # ── Write new gap files for sections not covered by this source ───────────
     gap_files_written = write_gap_files(knowledge_gaps, kb, source_name)
+
+    # ── Mop-up: move any files the LLM placed in rogue directories ────────────
+    moved = mop_up_wiki_structure(kb)
+    if moved:
+        log.info("mop_up: %d file(s) relocated: %s", len(moved), moved)
 
     cost = log_call("ingest", source_name, total_in, total_out, model=MODEL, kb_name=kb.name)
 
@@ -582,7 +701,9 @@ def run_ingest_chunked(
     if kb is None:
         kb = _default_kb()
     if len(source_text) <= CHUNK_SIZE:
-        return run_ingest(source_text, source_name, citation, source_path, kb)
+        result = run_ingest(source_text, source_name, citation, source_path, kb)
+        sync_index(kb.wiki_dir)
+        return result
 
     # Split on whitespace boundaries near each CHUNK_SIZE boundary
     chunks: list[str] = []
@@ -693,6 +814,9 @@ def run_ingest_chunked(
         {"page": page, "missing_sections": sorted(sections)}
         for page, sections in sorted(gaps_by_page.items())
     ]
+
+    sync_index(kb.wiki_dir)
+
     log.info(
         "=== CHUNKED INGEST COMPLETE  total_files=%d  total_errors=%d  total_cost=$%.4f  gaps=%d ===",
         len(combined["files_written"]), len(combined["errors"]), combined["cost_usd"],

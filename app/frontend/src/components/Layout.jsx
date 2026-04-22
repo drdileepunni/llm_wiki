@@ -5,6 +5,8 @@ import {
   ChatBubbleLeftRightIcon,
   ChartBarIcon,
   BookOpenIcon,
+  ClipboardDocumentCheckIcon,
+  BeakerIcon,
   Cog6ToothIcon,
   PlusIcon,
 } from '@heroicons/react/24/outline'
@@ -15,7 +17,9 @@ const navItems = [
   { to: '/ingest',    label: 'Ingest',    icon: ArrowUpTrayIcon },
   { to: '/chat',      label: 'Chat',      icon: ChatBubbleLeftRightIcon },
   { to: '/wiki',      label: 'Wiki',      icon: BookOpenIcon },
-  { to: '/dashboard', label: 'Dashboard', icon: ChartBarIcon },
+  { to: '/assess',         label: 'Assess',    icon: ClipboardDocumentCheckIcon },
+  { to: '/clinical-assess', label: 'Clinical',   icon: BeakerIcon },
+  { to: '/dashboard',      label: 'Dashboard', icon: ChartBarIcon },
 ]
 
 export default function Layout() {

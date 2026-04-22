@@ -1,17 +1,65 @@
 import asyncio
 import logging
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+import re
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPException, Depends
 import shutil
 from ..services.extractor import extract_text, extract_pubmed, extract_url
 from ..services.ingest_pipeline import run_ingest_chunked as run_ingest
+from ..services.assess_pipeline import generate_assessment
 from ..config import KBConfig
 from ..dependencies import resolve_kb
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 log = logging.getLogger("wiki.ingest")
 
+
+def _slugify(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', name[:80].lower()).strip('-')
+
+
+async def _generate_assessment_safe(
+    source_slug: str,
+    source_name: str,
+    summary: str,
+    knowledge_gaps: list,
+    files_written: list,
+    kb: KBConfig,
+):
+    try:
+        await asyncio.to_thread(
+            generate_assessment, source_slug, source_name, summary, knowledge_gaps, files_written, kb
+        )
+    except Exception as exc:
+        log.error("Background assessment generation failed for %r: %s", source_slug, exc)
+
+
+def _trigger_assessment(
+    background_tasks: BackgroundTasks,
+    source_slug: str,
+    source_name: str,
+    result: dict,
+    kb: KBConfig,
+):
+    if not result.get("files_written"):
+        return
+    background_tasks.add_task(
+        _generate_assessment_safe,
+        source_slug,
+        source_name,
+        result.get("summary", ""),
+        result.get("knowledge_gaps", []),
+        result.get("files_written", []),
+        kb,
+    )
+    log.info("Assessment generation queued for %r", source_slug)
+
+
 @router.post("/file")
-async def ingest_file(file: UploadFile = File(...), kb: KBConfig = Depends(resolve_kb)):
+async def ingest_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    kb: KBConfig = Depends(resolve_kb),
+):
     log.info("File ingest requested: %s  (content_type=%s)  kb=%s", file.filename, file.content_type, kb.name)
 
     dest = kb.raw_dir / file.filename
@@ -33,10 +81,17 @@ async def ingest_file(file: UploadFile = File(...), kb: KBConfig = Depends(resol
         len(result.get("errors", [])),
         result.get("cost_usd", 0),
     )
+
+    _trigger_assessment(background_tasks, _slugify(file.filename), file.filename, result, kb)
     return result
 
+
 @router.post("/pubmed")
-async def ingest_pubmed(pmid: str = Form(...), kb: KBConfig = Depends(resolve_kb)):
+async def ingest_pubmed(
+    background_tasks: BackgroundTasks,
+    pmid: str = Form(...),
+    kb: KBConfig = Depends(resolve_kb),
+):
     log.info("PubMed ingest requested: PMID=%s  kb=%s", pmid, kb.name)
     try:
         data = extract_pubmed(pmid)
@@ -56,11 +111,17 @@ async def ingest_pubmed(pmid: str = Form(...), kb: KBConfig = Depends(resolve_kb
         len(result.get("errors", [])),
         result.get("cost_usd", 0),
     )
+
+    _trigger_assessment(background_tasks, _slugify(data["title"]), data["title"], result, kb)
     return result
 
 
 @router.post("/url")
-async def ingest_url(url: str = Form(...), kb: KBConfig = Depends(resolve_kb)):
+async def ingest_url(
+    background_tasks: BackgroundTasks,
+    url: str = Form(...),
+    kb: KBConfig = Depends(resolve_kb),
+):
     log.info("URL ingest requested: %s  kb=%s", url, kb.name)
     try:
         data = extract_url(url)
@@ -80,4 +141,6 @@ async def ingest_url(url: str = Form(...), kb: KBConfig = Depends(resolve_kb)):
         len(result.get("errors", [])),
         result.get("cost_usd", 0),
     )
+
+    _trigger_assessment(background_tasks, _slugify(data["title"]), data["title"], result, kb)
     return result

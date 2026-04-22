@@ -46,7 +46,11 @@ export default function ResolveModal({ gap, onClose, onJobsStarted }) {
     const jobs = []
     for (const article of toIngest) {
       try {
-        const { job_id } = await resolveIngest(article.pmc_id, article.title, article.citation, activeKB)
+        const { job_id } = await resolveIngest(
+          article.pmc_id, article.title, article.citation,
+          gap.file, gap.referenced_page, gap.missing_sections, gap.title,
+          activeKB,
+        )
         jobs.push({ job_id, title: article.title, pmc_id: article.pmc_id, status: 'running' })
       } catch {
         // collect remaining jobs even if one fails

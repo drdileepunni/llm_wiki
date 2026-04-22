@@ -6,67 +6,39 @@ from datetime import date
 from ..config import MODEL, KBConfig, _default_kb
 from .token_tracker import log_call
 from .llm_client import get_llm_client
+from .ingest_pipeline import write_gap_files
+from . import vector_store as vs_mod
 
 log = logging.getLogger("wiki.chat_pipeline")
 
-def run_chat(question: str, kb: "KBConfig | None" = None) -> dict:
+def run_chat(question: str, kb: "KBConfig | None" = None, images: list | None = None) -> dict:
     if kb is None:
         kb = _default_kb()
     log.info("=== CHAT START  question=%r  model=%s  kb=%s ===", question[:120], MODEL, kb.name)
     llm           = get_llm_client()
     system_prompt = kb.claude_md.read_text()
-    index_content = (kb.wiki_dir / "index.md").read_text()
 
     total_input = 0
     total_output = 0
 
-    # Step 1: identify relevant pages (plain text response — no tool needed)
-    # We use a lightweight direct call here via the raw underlying client
-    # since this step returns plain JSON text, not a tool call.
-    log.info("Step 1: identifying relevant pages  max_tokens=500")
-    step1 = llm.create_message(
-        messages=[{
-            "role": "user",
-            "content": f"""Here is the wiki index:\n\n{index_content}\n\nQuestion: {question}\n\nList the 3-5 most relevant wiki page paths to answer this question. Output only a JSON array of paths exactly as they appear in the index, e.g. ["entities/foo.md", "concepts/bar.md"]. Nothing else."""
-        }],
-        tools=[{
-            "name": "return_page_list",
-            "description": "Return the list of relevant wiki page paths.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Paths of relevant wiki pages"
-                    }
-                },
-                "required": ["paths"]
-            }
-        }],
-        system=system_prompt,
-        max_tokens=500,
-    )
+    # ── Step 1: page retrieval via vector search ──────────────────────────────
+    # Embed the question and rank all wiki pages by cosine similarity.
+    # No LLM call needed — instant, scales to any index size.
+    vec_hits = vs_mod.search(question, kb.wiki_dir, top_k=3)
+    pages = [h["path"] for h in vec_hits]
+    log.info("Vector retrieval: %d pages  %s", len(pages),
+             [(h["path"].split("/")[-1], round(h["score"], 3)) for h in vec_hits])
 
-    total_input  += step1.usage.input_tokens
-    total_output += step1.usage.output_tokens
-    log.info("Step 1 response: stop_reason=%s  in=%d  out=%d",
-             step1.stop_reason, step1.usage.input_tokens, step1.usage.output_tokens)
-
-    # Extract page list — prefer tool_use block, fall back to JSON in text
-    tool_block = next((b for b in step1.content if b.type == "tool_use"), None)
-    if tool_block:
-        pages = tool_block.input.get("paths", [])
-    else:
-        raw_text = next((b.text for b in step1.content if b.type == "text"), "")
-        match = re.search(r'\[.*?\]', raw_text, re.DOTALL)
-        pages = json.loads(match.group()) if match else []
-    log.info("Pages selected (%d): %s", len(pages), pages)
-
-    # Read pages
     page_contents = []
     for page_path in pages:
         full_path = kb.wiki_dir / page_path
+        if not full_path.exists():
+            for subdir in ("entities", "concepts", "sources", "queries"):
+                candidate = kb.wiki_dir / subdir / Path(page_path).name
+                if candidate.exists():
+                    full_path = candidate
+                    page_path = f"{subdir}/{Path(page_path).name}"
+                    break
         if full_path.exists():
             content = full_path.read_text()
             page_contents.append(f"### {page_path}\n\n{content}")
@@ -77,21 +49,30 @@ def run_chat(question: str, kb: "KBConfig | None" = None) -> dict:
     context = "\n\n---\n\n".join(page_contents)
 
     # Step 2: answer (plain text — use tool to get structured response)
-    log.info("Step 2: generating answer  max_tokens=2000  context_chars=%d", len(context))
-    step2 = llm.create_message(
-        messages=[{
-            "role": "user",
-            "content": f"""Using the following wiki pages, answer this question: {question}
+    log.info("Step 2: generating answer  max_tokens=2000  context_chars=%d  images=%d",
+             len(context), len(images) if images else 0)
+    prompt_text = f"""Using the following wiki pages, answer this question: {question}
 
 Use [[wiki links]] when referencing entities or concepts that have pages.
 Cite your sources inline using the page path in parentheses.
 Be precise and direct.
 If the wiki doesn't have enough information, say so clearly and indicate what kind of source would fill the gap.
+When the wiki lacks the information to answer the question, also populate gap_entity, gap_page_path, and gap_missing_sections so the gap can be tracked automatically.
 Answer any question regardless of topic — this is a general knowledge base.
 
 Wiki pages:
 {context}"""
-        }],
+
+    if images:
+        message_content = [
+            {"type": "image", "source": {"type": "base64", "media_type": img.get("media_type", "image/jpeg"), "data": img["data"]}}
+            for img in images
+        ] + [{"type": "text", "text": prompt_text}]
+    else:
+        message_content = prompt_text
+
+    step2 = llm.create_message(
+        messages=[{"role": "user", "content": message_content}],
         tools=[{
             "name": "return_answer",
             "description": "Return the answer to the user's question.",
@@ -101,13 +82,27 @@ Wiki pages:
                     "answer": {
                         "type": "string",
                         "description": "Full markdown answer with [[wiki links]] and inline citations."
+                    },
+                    "gap_entity": {
+                        "type": "string",
+                        "description": "If the wiki could not answer the question, the primary entity or concept that is missing (e.g. 'Severe Bradycardia'). Omit if the question was answered."
+                    },
+                    "gap_page_path": {
+                        "type": "string",
+                        "description": "Relative wiki path for the gap page, e.g. wiki/entities/severe-bradycardia.md. Omit if the question was answered."
+                    },
+                    "gap_missing_sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific section headings that would answer the question. Omit if the question was answered."
                     }
                 },
                 "required": ["answer"]
             }
         }],
         system=system_prompt,
-        max_tokens=2000,
+        max_tokens=4000,
+        force_tool=False,
     )
 
     total_input  += step2.usage.input_tokens
@@ -119,8 +114,27 @@ Wiki pages:
     answer_block = next((b for b in step2.content if b.type == "tool_use"), None)
     if answer_block:
         answer = answer_block.input.get("answer", "")
+        gap_entity   = answer_block.input.get("gap_entity", "")
+        gap_page     = answer_block.input.get("gap_page_path", "")
+        gap_sections = answer_block.input.get("gap_missing_sections") or []
     else:
         answer = next((b.text for b in step2.content if b.type == "text"), "")
+        gap_entity = gap_page = ""
+        gap_sections = []
+
+    # Auto-register gap if the model flagged one
+    gap_written = None
+    if gap_entity and gap_page and gap_sections:
+        try:
+            written = write_gap_files(
+                [{"page": gap_page, "missing_sections": gap_sections}],
+                kb,
+                source_name=f"unanswered query: {question[:80]}",
+            )
+            gap_written = written[0] if written else None
+            log.info("Auto-registered gap: %s  sections=%s", gap_written, gap_sections)
+        except Exception as exc:
+            log.warning("Failed to write gap from query: %s", exc)
 
     # Log combined cost
     cost = log_call(
@@ -146,6 +160,9 @@ Wiki pages:
         "output_tokens": total_output,
         "cost_usd": cost,
         "model": MODEL,
+        "gap_registered": gap_written,
+        "gap_entity": gap_entity or None,
+        "gap_sections": gap_sections or [],
     }
 
 def file_answer(question: str, answer: str, kb: "KBConfig | None" = None) -> str:

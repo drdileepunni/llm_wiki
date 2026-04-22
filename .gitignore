@@ -10,3 +10,5 @@ app/.cache/*
 raw/
 wiki/
 kbs/agent_school/.cache/*
+.DS_Store
+kbs/agent_school/assessments/*
