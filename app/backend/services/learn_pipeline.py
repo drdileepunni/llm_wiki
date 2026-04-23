@@ -20,7 +20,7 @@ from pathlib import Path
 from ..config import KBConfig, WIKI_ROOT
 from .assess_pipeline import generate_assessment, run_assessment
 from .chat_pipeline import run_chat
-from .clinical_assess_pipeline import _parse_answer_txt
+from .clinical_assess_pipeline import _clinical_assess_path, _load_qa_json, load_case
 from .ingest_pipeline import run_ingest_chunked
 from .resolve_service import resolve_all_gaps
 
@@ -115,8 +115,26 @@ def _update_phase(state: dict, phase: str, kb: KBConfig):
 
 # ── Clinical loop helper ──────────────────────────────────────────────────────
 
-def _run_clinical_via_chat(slug: str, kb: KBConfig) -> tuple[int, float]:
-    """Run each snapshot question through run_chat. Returns (new_kg_count, cost_usd)."""
+def _save_clinical_assessment(slug: str, run_id: str, snapshots_data: list, kb: KBConfig) -> None:
+    """Save clinical assessment results to assessments/clinical/{slug}/{run_id}.json"""
+    result = {
+        "patient_id": slug,
+        "run_id": run_id,
+        "patient_dir": str(_timeline_dir(slug)),
+        "run_at": datetime.utcnow().isoformat(),
+        "snapshots": snapshots_data,
+    }
+    out_path = _clinical_assess_path(slug, run_id, kb)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.info("Clinical assessment saved from learning loop: %s", out_path)
+
+
+def _run_clinical_via_chat(slug: str, kb: KBConfig, run_id: str, state: dict | None = None) -> tuple[int, float]:
+    """
+    Run each snapshot question through run_chat and save as a clinical assessment.
+    Returns (new_kg_count, cost_usd).
+    """
     snap_dirs = _snapshot_dirs(slug)
     if not snap_dirs:
         log.warning("No snapshot dirs found for %s", slug)
@@ -124,19 +142,29 @@ def _run_clinical_via_chat(slug: str, kb: KBConfig) -> tuple[int, float]:
 
     total_new_kgs = 0
     total_cost    = 0.0
-    for snap_dir in snap_dirs:
-        csv_path      = snap_dir / "snapshot.csv"
-        question_path = snap_dir / "question.txt"
-        answer_path   = snap_dir / "answer.txt"
+    snapshots_data = []
 
+    total_snaps = len(snap_dirs)
+    for snap_dir in snap_dirs:
+        csv_path = snap_dir / "snapshot.csv"
         if not csv_path.exists():
             log.warning("Missing snapshot.csv in %s — skipping", snap_dir)
             continue
 
-        csv_text  = csv_path.read_text(encoding="utf-8")
-        question  = question_path.read_text(encoding="utf-8").strip() if question_path.exists() else ""
-        answer_raw = answer_path.read_text(encoding="utf-8") if answer_path.exists() else ""
-        context   = _parse_answer_txt(answer_raw).get("clinical_context", "")
+        snap_num_m = re.search(r"snapshot_(\d+)", snap_dir.name)
+        snap_num = int(snap_num_m.group(1)) if snap_num_m else len(snapshots_data) + 1
+
+        # Emit progress before the (slow) run_chat call
+        if state is not None:
+            _log_entry(state, "clinical_loop",
+                       f"Snapshot {snap_num}/{total_snaps} — running chat…",
+                       sub_phase="assessing", iteration=snap_num)
+            _save_run(state, kb)
+
+        csv_text = csv_path.read_text(encoding="utf-8")
+        qa_data = _load_qa_json(snap_dir)
+        question = qa_data.get("question", "")
+        context = qa_data.get("clinical_context", "")
 
         prompt = (
             f"{csv_text}\n\n"
@@ -144,15 +172,40 @@ def _run_clinical_via_chat(slug: str, kb: KBConfig) -> tuple[int, float]:
             f"Question: {question}"
         )
 
+        snap_data = {
+            "snapshot_num": snap_num,
+            "csv_content": csv_text,
+            "question": question,
+            "phase": qa_data.get("phase", ""),
+            "difficulty": qa_data.get("difficulty", ""),
+            "clinical_context": context,
+            "expected_next_action": qa_data.get("expected_next_action", ""),
+            "immediate_actions": qa_data.get("immediate_actions", []),
+            "clinical_reasoning": qa_data.get("clinical_reasoning", []),
+            "monitoring_followup": qa_data.get("monitoring_followup", []),
+            "alternative_considerations": qa_data.get("alternative_considerations", []),
+            "agent_answer": None,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost_usd": 0.0,
+        }
+
         try:
             result = run_chat(prompt, kb)
-            total_cost += result.get("cost_usd", 0.0)
+            snap_data["agent_answer"] = result.get("answer", "")
+            snap_data["tokens_in"] = result.get("input_tokens", 0)
+            snap_data["tokens_out"] = result.get("output_tokens", 0)
+            snap_data["cost_usd"] = result.get("cost_usd", 0.0)
+            total_cost += snap_data["cost_usd"]
             if result.get("gap_registered"):
                 total_new_kgs += 1
                 log.info("Clinical snapshot %s registered new KG", snap_dir.name)
         except Exception as exc:
             log.warning("run_chat failed for %s: %s", snap_dir.name, exc)
 
+        snapshots_data.append(snap_data)
+
+    _save_clinical_assessment(slug, run_id, snapshots_data, kb)
     return total_new_kgs, total_cost
 
 
@@ -190,11 +243,15 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         timeline_path = _find_timeline(slug)
         timeline_text = timeline_path.read_text(encoding="utf-8")
 
+        _log_entry(state, "ingesting", f"Ingesting timeline for {slug}…")
+        _save_run(state, kb)
+
         ingest_result = run_ingest_chunked(
             source_text=timeline_text,
             source_name=slug,
             citation=f"Patient timeline: {slug}",
             kb=kb,
+            patient_dir=slug,
         )
         ingest_cost = ingest_result.get("cost_usd", 0.0)
         state["total_cost_usd"] += ingest_cost
@@ -229,7 +286,13 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         for i in range(1, MAX_ITER + 1):
             _update_phase(state, "resolving", kb)
 
-            resolve_stats = resolve_all_gaps(kb)
+            def _resolve_progress(idx, total, gap_title, articles, cost, _i=i):
+                _log_entry(state, "knowledge_loop",
+                           f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
+                           iteration=_i, sub_phase="resolving", cost_usd=cost)
+                _save_run(state, kb)
+
+            resolve_stats = resolve_all_gaps(kb, progress_callback=_resolve_progress)
             resolve_cost  = resolve_stats.get("cost_usd", 0.0)
             state["total_cost_usd"] += resolve_cost
 
@@ -246,6 +309,9 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
             _save_run(state, kb)
 
             _update_phase(state, "knowledge_assessing", kb)
+            _log_entry(state, "knowledge_loop", f"Iter {i} — running knowledge assessment…",
+                       iteration=i, sub_phase="assessing")
+            _save_run(state, kb)
 
             try:
                 assess = run_assessment(slug, kb)
@@ -300,7 +366,7 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
             _update_phase(state, "clinical_assessing", kb)
 
             gaps_before             = _current_gap_stems()
-            new_kgs, clinical_cost  = _run_clinical_via_chat(slug, kb)
+            new_kgs, clinical_cost  = _run_clinical_via_chat(slug, kb, state["run_id"], state=state)
             state["total_cost_usd"] += clinical_cost
             gaps_after              = _current_gap_stems()
 
@@ -334,7 +400,13 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
 
             _update_phase(state, "resolving", kb)
 
-            resolve_stats = resolve_all_gaps(kb)
+            def _clinical_resolve_progress(idx, total, gap_title, articles, cost, _i=i):
+                _log_entry(state, "clinical_loop",
+                           f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
+                           iteration=_i, sub_phase="resolving", cost_usd=cost)
+                _save_run(state, kb)
+
+            resolve_stats = resolve_all_gaps(kb, progress_callback=_clinical_resolve_progress)
             resolve_cost  = resolve_stats.get("cost_usd", 0.0)
             state["total_cost_usd"] += resolve_cost
             previously_resolved_gaps |= new_gap_stems  # mark as resolved

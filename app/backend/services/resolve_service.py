@@ -50,27 +50,37 @@ def _list_pending_gaps(kb: KBConfig) -> list[dict]:
     return results
 
 
-def resolve_all_gaps(kb: KBConfig, max_results: int = 3) -> dict:
+def resolve_all_gaps(kb: KBConfig, max_results: int = 3, progress_callback=None) -> dict:
     """
     Synchronously resolve all pending non-patient gap files.
     Returns stats: gaps_attempted, articles_ingested, cost_usd.
+
+    progress_callback(idx, total, gap_title, articles_this_gap, cost_this_gap) is
+    called after each gap is processed — use it to emit live progress updates.
 
     Safe to call from a thread (uses asyncio.run for the async search step).
     """
     gaps = _list_pending_gaps(kb)
     log.info("resolve_all_gaps: %d pending gaps", len(gaps))
+    total_gaps = len(gaps)
 
     gaps_attempted = 0
     articles_ingested = 0
     total_cost = 0.0
 
-    for gap in gaps:
+    for idx, gap in enumerate(gaps, 1):
         gaps_attempted += 1
+        gap_articles = 0
+        gap_cost = 0.0
+
         try:
             articles, search_cost = search_for_gap(gap["title"], gap["missing_sections"], max_results)
+            gap_cost += search_cost
             total_cost += search_cost
         except Exception as exc:
             log.warning("search_for_gap failed for '%s': %s", gap["title"], exc)
+            if progress_callback:
+                progress_callback(idx, total_gaps, gap["title"], 0, 0.0)
             continue
 
         for article in articles:
@@ -97,11 +107,17 @@ def resolve_all_gaps(kb: KBConfig, max_results: int = 3) -> dict:
                     gap["file"],
                     kb,
                 )
-                total_cost += result.get("cost_usd", 0.0)
+                c = result.get("cost_usd", 0.0)
+                gap_cost   += c
+                total_cost += c
+                gap_articles += 1
                 articles_ingested += 1
                 log.info("resolve_all_gaps: filled '%s' via '%s'", gap["title"], title)
             except Exception as exc:
                 log.warning("fill_sections failed for '%s': %s", title, exc)
+
+        if progress_callback:
+            progress_callback(idx, total_gaps, gap["title"], gap_articles, gap_cost)
 
     return {
         "gaps_attempted":  gaps_attempted,

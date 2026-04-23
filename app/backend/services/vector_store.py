@@ -116,11 +116,12 @@ def upsert(page_path: str, content: str, wiki_dir: Path) -> bool:
     return True
 
 
-def search(query: str, wiki_dir: Path, top_k: int = 8) -> list[dict]:
+def search(query: str, wiki_dir: Path, top_k: int = 8, include_patients: bool = False) -> list[dict]:
     """
     Return top_k pages most semantically similar to query.
     Each result: {"path": "concepts/aki.md", "score": 0.87}
     Returns [] if the store is empty or embedding fails.
+    Set include_patients=True to also search patient-specific pages.
     """
     records = _load(wiki_dir)
     if not records:
@@ -133,7 +134,11 @@ def search(query: str, wiki_dir: Path, top_k: int = 8) -> list[dict]:
         return []
 
     scored = sorted(
-        [{"path": r["path"], "score": _cosine(q_emb, r["embedding"])} for r in records],
+        [
+            {"path": r["path"], "score": _cosine(q_emb, r["embedding"])}
+            for r in records
+            if include_patients or not r["path"].startswith("patients/")
+        ],
         key=lambda x: x["score"],
         reverse=True,
     )
@@ -172,6 +177,8 @@ def rebuild_all(wiki_dir: Path) -> dict:
     ok = 0
     failed = 0
     for section in ("entities", "concepts", "sources", "queries"):
+        # "patients" is intentionally excluded — patient pages must not pollute
+        # the general-knowledge vector store
         section_dir = wiki_dir / section
         if not section_dir.exists():
             continue

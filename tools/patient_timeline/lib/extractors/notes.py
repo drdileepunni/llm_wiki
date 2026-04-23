@@ -183,7 +183,8 @@ Use an empty events array for notes with no discrete events.
 
 
 def extract_note_events(patient: dict, gemini_enabled: bool = True) -> list[TimelineEvent]:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    from ... import config
+    api_key = config.GEMINI_API_KEY
     use_gemini = gemini_enabled and bool(api_key)
 
     if gemini_enabled and not api_key:

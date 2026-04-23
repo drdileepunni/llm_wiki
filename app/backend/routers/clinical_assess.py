@@ -18,10 +18,12 @@ from pydantic import BaseModel
 from ..config import KBConfig
 from ..dependencies import resolve_kb
 from ..services.clinical_assess_pipeline import (
+    delete_clinical_assessment,
     list_available_patients,
     list_clinical_assessments,
     load_clinical_assessment,
     run_clinical_assessment,
+    save_run_comment,
     save_snapshot_rating,
 )
 
@@ -34,11 +36,17 @@ _jobs: dict[str, dict] = {}
 
 class RunRequest(BaseModel):
     patient_id: str
+    model: str | None = None
+    snapshot_num: int | None = None  # None = run all
+    use_patient_context: bool = False
 
 
 class RatingRequest(BaseModel):
     rating: int | None = None
     knowledge_gaps: list[str] | None = None
+
+class CommentRequest(BaseModel):
+    comment: str = ""
 
 
 @router.get("/available")
@@ -78,10 +86,32 @@ def rate_snapshot(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.patch("/{patient_id}/{run_id}/comment")
+def save_comment(
+    patient_id: str,
+    run_id: str,
+    req: CommentRequest,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    try:
+        return save_run_comment(patient_id, run_id, req.comment, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
+
+
 @router.get("/{patient_id}/{run_id}")
 def get_assessment(patient_id: str, run_id: str, kb: KBConfig = Depends(resolve_kb)):
     try:
         return load_clinical_assessment(patient_id, run_id, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
+
+
+@router.delete("/{patient_id}/{run_id}")
+def delete_assessment(patient_id: str, run_id: str, kb: KBConfig = Depends(resolve_kb)):
+    try:
+        delete_clinical_assessment(patient_id, run_id, kb)
+        return {"deleted": True}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
 
@@ -94,13 +124,13 @@ async def run_endpoint(
 ):
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {"status": "running", "patient_id": req.patient_id, "result": None, "error": None}
-    background_tasks.add_task(_do_run, job_id, req.patient_id, kb)
+    background_tasks.add_task(_do_run, job_id, req.patient_id, kb, req.model, req.snapshot_num, req.use_patient_context)
     return {"job_id": job_id}
 
 
-async def _do_run(job_id: str, patient_id: str, kb: KBConfig):
+async def _do_run(job_id: str, patient_id: str, kb: KBConfig, model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False):
     try:
-        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb)
+        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb, model, snapshot_num, use_patient_context)
         _jobs[job_id] = {"status": "done", "patient_id": patient_id, "result": result, "error": None}
     except Exception as exc:
         log.error("Clinical assessment failed for %r: %s", patient_id, exc)

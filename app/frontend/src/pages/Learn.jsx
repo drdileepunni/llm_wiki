@@ -258,7 +258,7 @@ export default function Learn() {
         clearInterval(interval)
         await fetchList()
       }
-    }, 5000)
+    }, 2000)
     return () => clearInterval(interval)
   }, [selectedId])
 

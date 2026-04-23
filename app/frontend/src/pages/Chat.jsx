@@ -73,6 +73,41 @@ function AnswerBody({ text, vaultName }) {
   )
 }
 
+const CDS_SECTIONS = [
+  { key: 'immediate_actions',          label: 'Immediate Actions',          color: 'text-red-400',    border: 'border-red-800/50',  bg: 'bg-red-950/20' },
+  { key: 'clinical_reasoning',         label: 'Clinical Reasoning',         color: 'text-amber-400',  border: 'border-amber-800/50',bg: 'bg-amber-950/20' },
+  { key: 'monitoring_followup',        label: 'Monitoring & Follow-up',     color: 'text-blue-400',   border: 'border-blue-800/50', bg: 'bg-blue-950/20' },
+  { key: 'alternative_considerations', label: 'Alternative Considerations', color: 'text-purple-400', border: 'border-purple-800/50',bg: 'bg-purple-950/20' },
+]
+
+function CdsBody({ msg, vaultName }) {
+  return (
+    <div className="space-y-3">
+      {CDS_SECTIONS.map(({ key, label, color, border, bg }) => {
+        const items = msg[key] || []
+        if (!items.length) return null
+        return (
+          <div key={key} className={`rounded-lg border ${border} ${bg} px-3 py-2.5`}>
+            <p className={`text-[10px] uppercase tracking-widest font-semibold ${color} mb-2`}>{label}</p>
+            <ul className="space-y-1.5">
+              {items.map((item, i) => (
+                <li key={i} className="flex gap-2 text-sm text-white/85 leading-snug">
+                  <span className={`${color} mt-0.5 flex-shrink-0`}>›</span>
+                  <span>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                      {preprocessWikiLinks(item, vaultName)}
+                    </ReactMarkdown>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function Message({ msg, vaultName }) {
   const { activeKB } = useAppState()
   const [filed, setFiled] = useState(false)
@@ -111,11 +146,16 @@ function Message({ msg, vaultName }) {
     )
   }
 
+  const isCds = msg.mode === 'cds'
+
   return (
     <div className="flex justify-start mb-4">
       <div className="max-w-2xl w-full">
         <div className="px-5 py-4 bg-surface border-l-2 border-accent rounded-2xl rounded-tl-sm text-sm text-white/90">
-          <AnswerBody text={msg.answer} vaultName={vaultName} />
+          {isCds
+            ? <CdsBody msg={msg} vaultName={vaultName} />
+            : <AnswerBody text={msg.answer} vaultName={vaultName} />
+          }
         </div>
         <div className="flex items-center gap-4 mt-2 px-1">
           <CostBadge
@@ -134,23 +174,25 @@ function Message({ msg, vaultName }) {
               )}
             </span>
           )}
-          <button
-            onClick={handleFile}
-            disabled={filed || filing}
-            className="ml-auto flex items-center gap-1 text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
-          >
-            {filed ? (
-              <>
-                <CheckIcon className="w-3 h-3 text-success" />
-                <span className="text-success">Filed</span>
-              </>
-            ) : (
-              <>
-                <ArrowTopRightOnSquareIcon className="w-3 h-3" />
-                {filing ? 'Filing...' : 'File this answer ↗'}
-              </>
-            )}
-          </button>
+          {!isCds && (
+            <button
+              onClick={handleFile}
+              disabled={filed || filing}
+              className="ml-auto flex items-center gap-1 text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
+            >
+              {filed ? (
+                <>
+                  <CheckIcon className="w-3 h-3 text-success" />
+                  <span className="text-success">Filed</span>
+                </>
+              ) : (
+                <>
+                  <ArrowTopRightOnSquareIcon className="w-3 h-3" />
+                  {filing ? 'Filing...' : 'File this answer ↗'}
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -165,6 +207,7 @@ export default function Chat() {
   const vaultName   = activeKB === 'default' ? DEFAULT_VAULT : activeKB
 
   const [loading, setLoading] = useState(false)
+  const [mode, setMode] = useState('qna')
   const [images, setImages] = useState([])
   const bottomRef = useRef()
   const textareaRef = useRef()
@@ -204,11 +247,16 @@ export default function Chat() {
 
     const apiImages = sentImages.map(({ data, media_type }) => ({ data, media_type }))
     try {
-      const data = await sendChat(q, activeKB, apiImages)
+      const data = await sendChat(q, activeKB, apiImages, mode)
       setMessages(prev => [...prev, {
         role: 'assistant',
         question: q,
+        mode: data.mode,
         answer: data.answer,
+        immediate_actions: data.immediate_actions,
+        clinical_reasoning: data.clinical_reasoning,
+        monitoring_followup: data.monitoring_followup,
+        alternative_considerations: data.alternative_considerations,
         input_tokens: data.input_tokens,
         output_tokens: data.output_tokens,
         cost_usd: data.cost_usd,
@@ -242,9 +290,31 @@ export default function Chat() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="px-8 py-5 border-b border-border flex-shrink-0">
-        <h1 className="font-display text-2xl font-semibold text-white">Chat</h1>
-        <p className="text-sm text-muted mt-0.5">Ask questions about your wiki</p>
+      <div className="px-8 py-5 border-b border-border flex-shrink-0 flex items-center justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-semibold text-white">Chat</h1>
+          <p className="text-sm text-muted mt-0.5">
+            {mode === 'cds' ? 'Clinical Decision Support — structured actions & reasoning' : 'Ask questions about your wiki'}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 bg-ink-800 border border-border rounded-lg p-1">
+          <button
+            onClick={() => setMode('qna')}
+            className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+              mode === 'qna' ? 'bg-accent text-white' : 'text-muted hover:text-white'
+            }`}
+          >
+            QnA
+          </button>
+          <button
+            onClick={() => setMode('cds')}
+            className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+              mode === 'cds' ? 'bg-accent text-white' : 'text-muted hover:text-white'
+            }`}
+          >
+            CDS
+          </button>
+        </div>
       </div>
 
       {/* Messages */}

@@ -1,0 +1,20 @@
+{
+  "run_id": "c5b77656",
+  "cpmrn": "INGJNADAAS1193",
+  "encounter": "1",
+  "slug": "INGJNADAAS1193_1",
+  "kb_name": "agent_school",
+  "status": "running",
+  "current_phase": "ingesting",
+  "log": [
+    {
+      "phase": "ingesting",
+      "message": "Ingesting timeline for INGJNADAAS1193_1…",
+      "timestamp": "2026-04-23T17:20:12.997803"
+    }
+  ],
+  "total_cost_usd": 0.0,
+  "started_at": "2026-04-23T17:20:12.995945",
+  "completed_at": null,
+  "error": null
+}

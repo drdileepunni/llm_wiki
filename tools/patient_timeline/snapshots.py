@@ -1,24 +1,23 @@
 """
 Step 3 – Generate five clinical decision-making evaluation snapshots.
 
-Two-phase design (Gemini calls are entirely separate from file I/O):
+Event-window design with Google structured output:
 
   Phase A – ask_gemini(df, api_key)
-      › One Gemini call: identify 5 cut-point rows (plain-text key-value format,
-        no JSON schema to avoid SDK truncation bugs).
-      › Five Gemini calls: generate a model answer per cut-point.
-      Returns a list of 5 snapshot dicts.
+      › One Gemini call: identify 5 event windows (start_row, end_row, phase, etc.)
+      › Five Gemini calls: generate structured answers per event window.
+      Returns a list of 5 snapshot dicts with start_row, end_row, and structured answer.
 
   Phase B – save_snapshots(df, snapshots, patient_dir)
       › Pure file I/O, no API calls.
       › Writes snapshot_1/ … snapshot_5/, each with:
-          snapshot.csv   – timeline rows 0 … row_index (inclusive)
-          question.txt   – fixed question shown to the evaluating agent
-          answer.txt     – model answer with phase/difficulty header
+          snapshot.csv   – timeline rows start_row … end_row (the event window)
+          q_and_a.json   – single JSON file with question, metadata, and structured answer
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -29,7 +28,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 QUESTION_TEXT = (
-    "Above is part of a patient event timeline. "
+    "Above is a focused window of patient events around a key clinical moment. "
     "What do you think is the most appropriate next action by a clinician?"
 )
 
@@ -49,15 +48,19 @@ def _call(
     thinking: bool = True,
     retries: int = 3,
 ) -> str:
+    """Call Gemini and return text response."""
     from google.genai import types
+
     config_kwargs: dict = dict(temperature=0, max_output_tokens=max_tokens)
+
     if not thinking:
-        # Disable thinking budget — saves tokens for structured extraction tasks.
         try:
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
         except Exception:
-            pass  # older SDK versions don't have ThinkingConfig; ignore
+            pass
+
     config = types.GenerateContentConfig(**config_kwargs)
+
     for attempt in range(retries):
         try:
             resp = client.models.generate_content(
@@ -74,7 +77,7 @@ def _call(
                 raise
 
 
-# ── Compact timeline representation (avoids JSON-breaking characters) ──────────
+# ── Compact timeline representation ────────────────────────────────────────────
 
 def _compact(df: pd.DataFrame, max_summary: int = 90) -> str:
     rows = ["row|time|category|event_type|summary"]
@@ -89,163 +92,169 @@ def _compact(df: pd.DataFrame, max_summary: int = 90) -> str:
 
 # ── Phase A: Gemini calls ──────────────────────────────────────────────────────
 
-def _parse_cut_points(raw: str, n: int) -> list[dict]:
+def _get_event_windows(df: pd.DataFrame, client) -> list[dict]:
     """
-    Parse Gemini's plain-text cut-point response line by line.
+    One Gemini call — identify 5 event-focused windows (start_row, end_row).
+    Returns list of dicts with: start_row, end_row, phase, difficulty, context, next_action
+    """
+    n = len(df)
+    tl = _compact(df)
 
-    Looks for KEY_N: value lines grouped by block number.  Tolerates
-    missing values, extra blank lines, and minor formatting variations.
-    Returns a list of dicts (one per cut point found).
-    """
+    prompt = f"""You are identifying 5 clinically significant event windows from an ICU timeline.
+
+TIMELINE ({n} rows, 0-indexed):
+{tl}
+
+For each event, identify:
+- START_ROW: where the event/concern begins
+- END_ROW: where the event resolves or requires action (typically 15-30 rows after start)
+- The clinical phase and severity
+
+Reply with EXACTLY this format and nothing else:
+
+WINDOW_1: <start_row>-<end_row>
+PHASE_1: <admission|evolving|deterioration|management|late>
+DIFFICULTY_1: <easy|medium|hard>
+CONTEXT_1: <one sentence about what's happening in this window>
+ACTION_1: <specific clinical action that should be taken>
+
+WINDOW_2: <start_row>-<end_row>
+PHASE_2: ...
+(continue for WINDOW_3, WINDOW_4, WINDOW_5)
+
+Rules:
+- Each window 15-40 rows (sufficient to assess response to clinical situation)
+- Windows must not overlap
+- Spread across the entire stay
+- Focus on distinct clinical moments (admission, deterioration, management, etc.)
+"""
+
+    raw = _call(client, prompt, max_tokens=2000, thinking=False)
+    return _parse_event_windows(raw, n)
+
+
+def _parse_event_windows(raw: str, n: int) -> list[dict]:
+    """Parse Gemini's event window response."""
     blocks: dict[int, dict] = {}
     key_re = re.compile(
-        r"^(CUT_POINT|PHASE|DIFFICULTY|CONTEXT|ACTION)_(\d+):\s*(.*)", re.IGNORECASE
+        r"^(WINDOW|PHASE|DIFFICULTY|CONTEXT|ACTION)_(\d+):\s*(.*)", re.IGNORECASE
     )
     current_block: int | None = None
-    current_key:   str | None = None
 
     for line in raw.splitlines():
         m = key_re.match(line.strip())
         if m:
             field, num_str, value = m.group(1).upper(), int(m.group(2)), m.group(3).strip()
-            if field == "CUT_POINT":
+            if field == "WINDOW":
                 current_block = num_str
-                current_key   = None
-                blocks.setdefault(current_block, {})["row_index"] = value
+                blocks.setdefault(current_block, {})
+                # Parse start-end format
+                if "-" in value:
+                    try:
+                        start, end = value.split("-")
+                        blocks[current_block]["start_row"] = int(start)
+                        blocks[current_block]["end_row"] = int(end)
+                    except (ValueError, IndexError):
+                        pass
             else:
                 if current_block is not None:
                     blocks.setdefault(current_block, {})[field] = value
-                    current_key = field
-        elif current_key == "ACTION" and current_block is not None and line.strip():
-            # ACTION can span multiple lines — append continuation
-            blocks[current_block]["ACTION"] = (
-                blocks[current_block].get("ACTION", "") + " " + line.strip()
-            )
+        elif current_block is not None and line.strip():
+            # Handle multi-line ACTION fields
+            if "ACTION" in blocks[current_block]:
+                blocks[current_block]["ACTION"] = (
+                    blocks[current_block]["ACTION"] + " " + line.strip()
+                )
 
-    pts = []
+    windows = []
     for num in sorted(blocks):
         b = blocks[num]
         try:
-            row = max(15, min(int(b.get("row_index", 15)), n - 5))
+            start = max(0, min(int(b.get("start_row", 0)), n - 20))
+            end = max(start + 15, min(int(b.get("end_row", start + 20)), n - 1))
         except (ValueError, TypeError):
             continue
-        pts.append({
-            "row_index":   row,
-            "phase":       b.get("PHASE", "unknown").lower(),
-            "difficulty":  b.get("DIFFICULTY", "medium").lower(),
-            "context":     b.get("CONTEXT", ""),
+
+        windows.append({
+            "start_row": start,
+            "end_row": end,
+            "phase": b.get("PHASE", "unknown").lower(),
+            "difficulty": b.get("DIFFICULTY", "medium").lower(),
+            "context": b.get("CONTEXT", ""),
             "next_action": b.get("ACTION", ""),
         })
-    return pts
+
+    return windows[:5]
 
 
-def _get_cut_points(df: pd.DataFrame, client) -> list[dict]:
-    """Single Gemini call — plain-text key-value format, no JSON schema."""
-    n  = len(df)
-    tl = _compact(df)
-
-    prompt = f"""You are picking 5 clinical decision cut-points from an ICU timeline.
-
-TIMELINE ({n} rows, 0-indexed):
-{tl}
-
-Reply with EXACTLY this format and nothing else:
-
-CUT_POINT_1: <row_index>
-PHASE_1: <admission|evolving|deterioration|management|late>
-DIFFICULTY_1: <easy|medium|hard>
-CONTEXT_1: <one sentence about patient state at this cut>
-ACTION_1: <specific next clinical action>
-
-CUT_POINT_2: <row_index>
-PHASE_2: ...
-DIFFICULTY_2: ...
-CONTEXT_2: ...
-ACTION_2: ...
-
-CUT_POINT_3: <row_index>
-PHASE_3: ...
-DIFFICULTY_3: ...
-CONTEXT_3: ...
-ACTION_3: ...
-
-CUT_POINT_4: <row_index>
-PHASE_4: ...
-DIFFICULTY_4: ...
-CONTEXT_4: ...
-ACTION_4: ...
-
-CUT_POINT_5: <row_index>
-PHASE_5: ...
-DIFFICULTY_5: ...
-CONTEXT_5: ...
-ACTION_5: ...
-
-Rules: row indices between 15 and {n - 5}, \
-spread across the stay, no two within 20 rows of each other."""
-
-    raw = _call(client, prompt, max_tokens=8192, thinking=False)
-    pts = _parse_cut_points(raw, n)
-
-    if len(pts) < 5:
-        raise ValueError(
-            f"Only parsed {len(pts)}/5 cut points from Gemini response:\n{raw[:600]}"
-        )
-
-    pts = pts[:5]
-    pts.sort(key=lambda x: x["row_index"])
-    return pts
-
-
-def _get_answer(
+def _get_structured_answer(
     snapshot_df: pd.DataFrame,
-    cut_point: dict,
+    window: dict,
     full_df: pd.DataFrame,
     client,
-) -> str:
-    """One Gemini call per snapshot — plain text, no JSON."""
-    snap_text  = _compact(snapshot_df)
-    cut        = cut_point["row_index"]
-    after_text = _compact(full_df.iloc[cut + 1: cut + 16])
+) -> dict:
+    """One Gemini call per snapshot — returns structured answer dict as JSON."""
+    snap_text = _compact(snapshot_df)
+    end = window["end_row"]
+    after_text = _compact(full_df.iloc[end + 1: min(end + 16, len(full_df))])
 
     prompt = f"""You are writing a model answer for an ICU clinical decision-making exam.
 
-A medical AI agent has been shown the timeline below and asked:
+A medical AI agent has been shown this timeline window and asked:
 "{QUESTION_TEXT}"
 
 --- PATIENT TIMELINE (what the agent sees) ---
 {snap_text}
 --- END ---
 
-For your reference ONLY (do NOT reveal these rows in your answer):
+For reference only (do NOT reveal these in your answer):
 --- SUBSEQUENT EVENTS ---
 {after_text}
 --- END ---
 
-Clinical situation: {cut_point['context']}
-Expected action:   {cut_point['next_action']}
-Difficulty:        {cut_point['difficulty']}
+Clinical situation: {window['context']}
+Expected action:   {window['next_action']}
+Difficulty:        {window['difficulty']}
 
-Write the model answer in this exact structure:
+Respond with ONLY valid JSON (no markdown, no code blocks, just raw JSON):
+{{
+  "immediate_actions": ["action 1 with specific drug/dose/route if applicable", "action 2 if multiple"],
+  "clinical_reasoning": ["timeline finding that drives this decision", "physiological rationale", "why this takes priority"],
+  "monitoring_followup": ["what to monitor and timeframe", "second parameter to track"],
+  "alternative_considerations": ["edge case where answer differs", "alternative consideration if applicable"]
+}}
 
-**IMMEDIATE ACTION**
-One sentence: the specific next action (include drug / dose / route / procedure).
+Write at senior-resident level. Be specific with numbers and drug names."""
 
-**CLINICAL REASONING**
-2-3 paragraphs:
-- Which timeline findings drive this decision (cite specific values or events)
-- Physiological or pharmacological rationale
-- Why this takes priority over other possible actions
+    result = _call(client, prompt, max_tokens=2000, thinking=False)
 
-**MONITORING & FOLLOW-UP**
-Bullet list: what to check after the action, with thresholds and timeframes.
+    # Parse JSON response
+    if isinstance(result, dict):
+        return result
 
-**ALTERNATIVE CONSIDERATIONS**
-1-2 sentences: edge cases or situations where the answer would differ.
+    try:
+        # Try to extract JSON from response
+        parsed = json.loads(result)
+        return parsed
+    except (json.JSONDecodeError, TypeError) as e:
+        # Try to extract JSON from markdown code block if present
+        import re as regex
+        json_match = regex.search(r'```(?:json)?\s*(.*?)\s*```', result, regex.DOTALL)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group(1))
+                return parsed
+            except json.JSONDecodeError:
+                pass
 
-Write at senior-resident level. Be specific with numbers."""
-
-    return _call(client, prompt, max_tokens=2000)
+        logger.warning("Failed to parse JSON response: %s", str(e)[:100])
+        logger.debug("Raw response: %s", result[:500])
+        return {
+            "immediate_actions": [],
+            "clinical_reasoning": [],
+            "monitoring_followup": [],
+            "alternative_considerations": []
+        }
 
 
 def ask_gemini(df: pd.DataFrame, api_key: str) -> list[dict]:
@@ -253,23 +262,27 @@ def ask_gemini(df: pd.DataFrame, api_key: str) -> list[dict]:
     Phase A — all Gemini interactions for one timeline.
 
     Returns a list of 5 dicts:
-      {row_index, phase, difficulty, context, next_action, answer}
+      {start_row, end_row, phase, difficulty, context, next_action, answer_items}
+      where answer_items contains structured fields directly from Gemini
     """
     client = _gemini_client(api_key)
 
-    logger.info("    Identifying 5 cut points …")
-    cut_points = _get_cut_points(df, client)
-    logger.info("    Cut-point rows: %s", [p["row_index"] for p in cut_points])
+    logger.info("    Identifying 5 event windows …")
+    windows = _get_event_windows(df, client)
+    logger.info(
+        "    Event windows: %s",
+        [f"[{w['start_row']}-{w['end_row']}]" for w in windows]
+    )
 
     results = []
-    for i, cp in enumerate(cut_points, 1):
+    for i, window in enumerate(windows, 1):
         logger.info(
-            "    Generating answer %d/5 (row %d, %s, %s) …",
-            i, cp["row_index"], cp["phase"], cp["difficulty"],
+            "    Generating answer %d/5 (rows %d-%d, %s, %s) …",
+            i, window["start_row"], window["end_row"], window["phase"], window["difficulty"],
         )
-        snap_df = df.iloc[: cp["row_index"] + 1]
-        answer  = _get_answer(snap_df, cp, df, client)
-        results.append({**cp, "answer": answer})
+        snap_df = df.iloc[window["start_row"]: window["end_row"] + 1]
+        answer_items = _get_structured_answer(snap_df, window, df, client)
+        results.append({**window, "answer_items": answer_items})
 
     return results
 
@@ -284,23 +297,33 @@ def save_snapshots(
     """
     Phase B — write snapshot_1/ … snapshot_5/ inside patient_dir.
     No API calls.
+
+    Each snapshot_i/ contains:
+      - snapshot.csv: timeline rows start_row…end_row (the event window)
+      - q_and_a.json: question, answer items, metadata
     """
     for i, snap in enumerate(snapshots, 1):
         snap_dir = patient_dir / f"snapshot_{i}"
         snap_dir.mkdir(exist_ok=True)
 
-        cut = snap["row_index"]
-        df.iloc[: cut + 1].to_csv(snap_dir / "snapshot.csv", index=False)
+        start = snap["start_row"]
+        end = snap["end_row"]
+        df.iloc[start: end + 1].to_csv(snap_dir / "snapshot.csv", index=False)
 
-        (snap_dir / "question.txt").write_text(QUESTION_TEXT + "\n")
+        q_and_a = {
+            "question": QUESTION_TEXT,
+            "window": {
+                "start_row": start,
+                "end_row": end,
+                "row_count": end - start + 1,
+            },
+            "phase": snap["phase"],
+            "difficulty": snap["difficulty"],
+            "clinical_context": snap["context"],
+            "expected_next_action": snap["next_action"],
+            **snap["answer_items"],  # Flattens immediate_actions, clinical_reasoning, etc.
+        }
 
-        answer_file = (
-            f"PHASE: {snap['phase'].upper()} | DIFFICULTY: {snap['difficulty'].upper()}\n\n"
-            f"CLINICAL CONTEXT:\n{snap['context']}\n\n"
-            f"EXPECTED NEXT ACTION:\n{snap['next_action']}\n\n"
-            f"{'=' * 60}\n\n"
-            f"{snap['answer']}\n"
-        )
-        (snap_dir / "answer.txt").write_text(answer_file)
+        (snap_dir / "q_and_a.json").write_text(json.dumps(q_and_a, indent=2))
 
     logger.info("    Saved 5 snapshot folders → %s", patient_dir)

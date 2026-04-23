@@ -248,6 +248,7 @@ class GeminiLLMClient:
         system: str = "",
         max_tokens: int = 4000,
         force_tool: bool = True,
+        thinking_budget: int | None = None,
         _retries: int = 3,
     ) -> LLMResponse:
         import time
@@ -288,12 +289,18 @@ class GeminiLLMClient:
                     types.Content(role=role, parts=[types.Part(text=content)])
                 )
 
+        # ── thinking config (Gemini 2.5 thinking tokens eat into max_output_tokens) ──
+        thinking_cfg = None
+        if thinking_budget is not None:
+            thinking_cfg = types.ThinkingConfig(thinking_budget=thinking_budget)
+
         # ── generate (with retry on MALFORMED_FUNCTION_CALL) ─────────────────
         config = types.GenerateContentConfig(
             system_instruction=system or None,
             tools=gemini_tools or None,
             tool_config=gemini_tool_cfg,
             max_output_tokens=max_tokens,
+            thinking_config=thinking_cfg,
         )
 
         raw = None
@@ -369,15 +376,16 @@ class GeminiLLMClient:
 # ── Factory ──────────────────────────────────────────────────────────────────
 
 
-def get_llm_client() -> AnthropicLLMClient | GeminiLLMClient:
-    """Return the right client based on the MODEL env var."""
+def get_llm_client(model: str | None = None) -> AnthropicLLMClient | GeminiLLMClient:
+    """Return the right client. Uses MODEL env var unless overridden by `model`."""
     from ..config import MODEL, ANTHROPIC_API_KEY, GOOGLE_API_KEY
 
-    if MODEL.startswith("gemini"):
+    resolved = model or MODEL
+    if resolved.startswith("gemini"):
         if not GOOGLE_API_KEY:
             raise RuntimeError("MODEL is a Gemini model but GOOGLE_API_KEY is not set in .env")
-        log.debug("Using Gemini client  model=%s", MODEL)
-        return GeminiLLMClient(api_key=GOOGLE_API_KEY, model=MODEL)
+        log.debug("Using Gemini client  model=%s", resolved)
+        return GeminiLLMClient(api_key=GOOGLE_API_KEY, model=resolved)
 
-    log.debug("Using Anthropic client  model=%s", MODEL)
-    return AnthropicLLMClient(api_key=ANTHROPIC_API_KEY, model=MODEL)
+    log.debug("Using Anthropic client  model=%s", resolved)
+    return AnthropicLLMClient(api_key=ANTHROPIC_API_KEY, model=resolved)

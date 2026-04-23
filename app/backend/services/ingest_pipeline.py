@@ -15,12 +15,20 @@ log = logging.getLogger("wiki.ingest_pipeline")
 
 def _embed_page(page_path: str, content: str, kb: "KBConfig") -> None:
     """Embed a single wiki page into the vector store. Errors are non-fatal."""
-    # Only embed entity/concept/source/query pages (not gaps, index, log, etc.)
     from pathlib import Path as _Path
     parts = _Path(page_path).parts
     if not parts or parts[0] not in ("wiki",) or len(parts) < 3:
         return
     section = parts[1] if len(parts) >= 2 else ""
+    # Patient pages (wiki/patients/{slug}/...) are indexed separately so they
+    # can be toggled in/out of search without rebuilding.
+    if section == "patients":
+        rel = "/".join(parts[1:])  # e.g. "patients/slug/entities/foo.md"
+        try:
+            vs_mod.upsert(rel, content, kb.wiki_dir)
+        except Exception as exc:
+            log.warning("Vector upsert skipped for %s: %s", page_path, exc)
+        return
     if section not in ("entities", "concepts", "sources", "queries"):
         return
     rel = "/".join(parts[1:])  # strip leading "wiki/"
@@ -451,6 +459,7 @@ def run_ingest(
     citation: str = "",
     source_path: str = "",   # local file path (or GCP URI later)
     kb: "KBConfig | None" = None,
+    patient_dir: str | None = None,  # if set, reroute all writes to wiki/patients/{patient_dir}/
 ) -> dict:
     if kb is None:
         kb = _default_kb()
@@ -623,12 +632,19 @@ Return the COMPLETE file content — never truncate."""
 
             content = write_block.input.get("content", "")
             log.info("  Content length: %d chars → executing op=%s", len(content), op)
+
+            # Reroute patient-specific pages to wiki/patients/{patient_dir}/
+            # so they never land in the general-knowledge wiki sections
+            if patient_dir and path.startswith("wiki/"):
+                path = f"wiki/patients/{patient_dir}/{path[len('wiki/'):]}"
+                log.info("  Patient page rerouted → %s", path)
+
             diff    = compute_diff(path, content, op, kb)
             execute_file_op(path, content, op, kb, section)
             files_written.append(path)
             diffs.append(diff)
             log.info("  ✓ Written: %s  (+%d/-%d lines)", path, diff["added"], diff["removed"])
-            # Embed the page for semantic search
+            # Embed the page for semantic search (_embed_page skips wiki/patients/ automatically)
             _embed_page(path, content, kb)
 
             # Resolve gap file for this entity/concept page in pure Python
@@ -687,6 +703,7 @@ def run_ingest_chunked(
     citation: str = "",
     source_path: str = "",
     kb: "KBConfig | None" = None,
+    patient_dir: str | None = None,
 ) -> dict:
     """
     Ingest a source, automatically splitting large documents into sequential
@@ -701,7 +718,7 @@ def run_ingest_chunked(
     if kb is None:
         kb = _default_kb()
     if len(source_text) <= CHUNK_SIZE:
-        result = run_ingest(source_text, source_name, citation, source_path, kb)
+        result = run_ingest(source_text, source_name, citation, source_path, kb, patient_dir)
         sync_index(kb.wiki_dir)
         return result
 
@@ -768,6 +785,7 @@ def run_ingest_chunked(
             citation=citation,
             source_path=source_path,
             kb=kb,
+            patient_dir=patient_dir,
         )
 
         # Accumulate totals

@@ -1,0 +1,98 @@
+{
+  "run_id": "50e857b1",
+  "cpmrn": "INASSVSSIU2594",
+  "encounter": "1",
+  "slug": "INASSVSSIU2594_1",
+  "kb_name": "agent_school",
+  "status": "complete",
+  "current_phase": "complete",
+  "log": [
+    {
+      "phase": "ingesting",
+      "message": "Ingested INASSVSSIU2594_1 — 105 pages, 17 KGs",
+      "timestamp": "2026-04-23T11:55:03.503045",
+      "pages_written": 105,
+      "kgs_found": 17,
+      "cost_usd": 0.47459175
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — resolved 10 gaps, ingested 22 articles",
+      "timestamp": "2026-04-23T12:09:24.497237",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "gaps_resolved": 10,
+      "articles_ingested": 22,
+      "cost_usd": 0.07391774999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — assessment in_progress · 4 new KGs",
+      "timestamp": "2026-04-23T12:10:08.758341",
+      "iteration": 1,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 4,
+      "cost_usd": 0.0104316
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — resolved 4 gaps, ingested 6 articles",
+      "timestamp": "2026-04-23T12:14:51.561850",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "gaps_resolved": 4,
+      "articles_ingested": 6,
+      "cost_usd": 0.025176299999999995
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — assessment in_progress · 1 new KGs",
+      "timestamp": "2026-04-23T12:15:30.896525",
+      "iteration": 2,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 1,
+      "cost_usd": 0.0102372
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — resolved 2 gaps, ingested 4 articles",
+      "timestamp": "2026-04-23T12:17:44.690496",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "gaps_resolved": 2,
+      "articles_ingested": 4,
+      "cost_usd": 0.0073564500000000005
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — assessment in_progress · 2 new KGs",
+      "timestamp": "2026-04-23T12:18:27.923045",
+      "iteration": 3,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 2,
+      "cost_usd": 0.00977595
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — 0 KGs registered, 0 genuinely new",
+      "timestamp": "2026-04-23T12:19:45.018824",
+      "iteration": 1,
+      "sub_phase": "assessing",
+      "new_kgs": 0,
+      "genuinely_new": 0,
+      "plateau": 0
+    },
+    {
+      "phase": "complete",
+      "message": "Learning loop complete — total cost $0.6420",
+      "timestamp": "2026-04-23T12:19:45.020297"
+    }
+  ],
+  "total_cost_usd": 0.6419975999999998,
+  "started_at": "2026-04-23T11:02:16.935477",
+  "completed_at": "2026-04-23T12:19:45.020275",
+  "error": null
+}

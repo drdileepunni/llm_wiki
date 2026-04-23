@@ -1,0 +1,14 @@
+{
+  "run_id": "2666196d",
+  "cpmrn": "INASSVSSIU2594",
+  "encounter": "1",
+  "slug": "INASSVSSIU2594_1",
+  "kb_name": "agent_school",
+  "status": "error",
+  "current_phase": "error",
+  "log": [],
+  "total_cost_usd": 0.0,
+  "started_at": "2026-04-23T11:01:07.251503",
+  "completed_at": "2026-04-23T11:01:07.259805",
+  "error": "Timeline not found: /Users/drdileepunni/github_/llm_wiki/timelines/INASSVSSIU2594_1/INASSVSSIU2594_1_timeline_truncated.csv\nRun: python -m tools.patient_timeline INASSVSSIU2594/1"
+}

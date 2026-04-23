@@ -40,11 +40,11 @@ export async function ingestUrl(url, kbName) {
   return res.json()
 }
 
-export async function sendChat(question, kbName, images = []) {
+export async function sendChat(question, kbName, images = [], mode = 'qna') {
   const res = await fetch(`${BASE}/chat/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
-    body: JSON.stringify({ question, images }),
+    body: JSON.stringify({ question, images, mode }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -240,11 +240,16 @@ export async function listAvailablePatients() {
   return fetch(`${BASE}/clinical-assess/available`).then(r => r.json())
 }
 
-export async function runClinicalAssessment(patientId, kbName) {
+export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false) {
   const res = await fetch(`${BASE}/clinical-assess/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
-    body: JSON.stringify({ patient_id: patientId }),
+    body: JSON.stringify({
+      patient_id: patientId,
+      model: model || undefined,
+      snapshot_num: snapshotNum || undefined,
+      use_patient_context: usePatientContext,
+    }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -263,6 +268,28 @@ export async function getClinicalAssessment(patientId, runId, kbName) {
     `${BASE}/clinical-assess/${encodeURIComponent(patientId)}/${encodeURIComponent(runId)}`,
     { headers: kbHeaders(kbName) }
   ).then(r => r.json())
+}
+
+export async function deleteClinicalAssessment(patientId, runId, kbName) {
+  const res = await fetch(
+    `${BASE}/clinical-assess/${encodeURIComponent(patientId)}/${encodeURIComponent(runId)}`,
+    { method: 'DELETE', headers: kbHeaders(kbName) }
+  )
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function saveRunComment(patientId, runId, comment, kbName) {
+  const res = await fetch(
+    `${BASE}/clinical-assess/${encodeURIComponent(patientId)}/${encodeURIComponent(runId)}/comment`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+      body: JSON.stringify({ comment }),
+    }
+  )
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 export async function rateSnapshotApi(patientId, runId, snapshotNum, { rating, knowledge_gaps } = {}, kbName) {

@@ -12,6 +12,7 @@ log = logging.getLogger("wiki.chat")
 class ChatRequest(BaseModel):
     question: str
     images: list[dict] = []
+    mode: str = "qna"  # "qna" | "cds"
 
 class FileRequest(BaseModel):
     question: str
@@ -20,7 +21,10 @@ class FileRequest(BaseModel):
 @router.post("/")
 async def chat(req: ChatRequest, kb: KBConfig = Depends(resolve_kb)):
     log.info("Chat question: %r  kb=%s", req.question[:120], kb.name)
-    return await asyncio.to_thread(run_chat, req.question, kb, req.images or None)
+    return await asyncio.to_thread(
+        run_chat, req.question, kb, req.images or None,
+        None, None, req.mode,
+    )
 
 @router.post("/file")
 async def file_query(req: FileRequest, kb: KBConfig = Depends(resolve_kb)):

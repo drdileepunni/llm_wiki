@@ -3,6 +3,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   PlayIcon,
+  ArrowTopRightOnSquareIcon,
 } from '@heroicons/react/24/outline'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -13,9 +14,58 @@ import {
   getClinicalAssessment,
   listAvailablePatients,
   rateSnapshotApi,
+  saveRunComment,
+  deleteClinicalAssessment,
 } from '../api'
 import CostBadge from '../components/CostBadge'
 import { useAppState } from '../AppStateContext'
+
+// ── Wiki link rendering (mirrors Chat.jsx) ────────────────────────────────────
+
+const DEFAULT_VAULT = import.meta.env.VITE_VAULT_NAME || 'llm_wiki'
+const WIKI_LINK_PREFIX = 'obsidian-wiki://'
+
+function preprocessWikiLinks(text, vaultName = DEFAULT_VAULT) {
+  if (!text) return ''
+  return text.replace(/\[\[(.+?)\]\]/g, (_, title) => {
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    const obsidianUrl = `obsidian://open?vault=${vaultName}&file=wiki/entities/${slug}`
+    return `[${title}](${WIKI_LINK_PREFIX}${encodeURIComponent(obsidianUrl)})`
+  })
+}
+
+const mdComponents = {
+  a({ href, children }) {
+    if (href?.startsWith(WIKI_LINK_PREFIX)) {
+      const obsidianUrl = decodeURIComponent(href.slice(WIKI_LINK_PREFIX.length))
+      return (
+        <a href={obsidianUrl} target="_blank" rel="noreferrer"
+          className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 bg-accent/20 border border-accent/40 rounded text-accent text-xs font-mono hover:bg-accent/30 transition-colors">
+          {children}
+          <ArrowTopRightOnSquareIcon className="w-3 h-3 inline-block" />
+        </a>
+      )
+    }
+    return <a href={href} target="_blank" rel="noreferrer" className="text-accent underline underline-offset-2 hover:text-accent/80">{children}</a>
+  },
+  p({ children })      { return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p> },
+  ul({ children })     { return <ul className="list-disc list-outside ml-5 mb-2 space-y-1">{children}</ul> },
+  ol({ children })     { return <ol className="list-decimal list-outside ml-5 mb-2 space-y-1">{children}</ol> },
+  li({ children })     { return <li className="leading-relaxed">{children}</li> },
+  strong({ children }) { return <strong className="font-semibold text-white">{children}</strong> },
+}
+
+// ── Available models ──────────────────────────────────────────────────────────
+
+const AVAILABLE_MODELS = [
+  { value: '', label: 'Default (env)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+  { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+]
 
 // ── CSV parser ────────────────────────────────────────────────────────────────
 
@@ -180,11 +230,35 @@ function fmtRunAt(iso) {
   return d.toLocaleString('en-IN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function RunCard({ run, isSelected, onSelect }) {
+function TruncBadge({ text, className }) {
+  if (!text) return null
   return (
-    <button
+    <span
+      title={text}
+      className={`inline-block max-w-[90px] truncate px-1.5 py-0.5 rounded border text-[9px] font-mono align-middle ${className}`}
+    >
+      {text}
+    </span>
+  )
+}
+
+function RunCard({ run, isSelected, onSelect, onDelete }) {
+  const [deleting, setDeleting] = useState(false)
+
+  const handleDelete = async (e) => {
+    e.stopPropagation()
+    setDeleting(true)
+    try {
+      await onDelete(run)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div
       onClick={() => onSelect(run)}
-      className={`w-full text-left pl-7 pr-4 py-2 border-b border-border/50 transition-colors ${
+      className={`relative w-full text-left pl-7 pr-8 py-2 border-b border-border/50 transition-colors cursor-pointer group ${
         isSelected ? 'bg-accent/10 border-l-2 border-l-accent' : 'hover:bg-ink-800'
       }`}
     >
@@ -196,11 +270,43 @@ function RunCard({ run, isSelected, onSelect }) {
         <span className="text-border">·</span>
         <span>{run.snapshot_count} snaps</span>
       </div>
-    </button>
+      {/* Badges row */}
+      <div className="flex flex-wrap gap-1 mt-1.5">
+        <TruncBadge
+          text={run.model}
+          className="text-purple-400 bg-purple-950/30 border-purple-800/40"
+        />
+        {run.avg_rating != null && (
+          <span
+            title={`Average rating: ${run.avg_rating}/10`}
+            className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[9px] font-mono ${
+              run.avg_rating >= 8 ? 'text-green-400 bg-green-950/30 border-green-800/40'
+              : run.avg_rating >= 5 ? 'text-amber-400 bg-amber-950/30 border-amber-800/40'
+              : 'text-red-400 bg-red-950/30 border-red-800/40'
+            }`}
+          >
+            ★ {run.avg_rating}
+          </span>
+        )}
+        <TruncBadge
+          text={run.comment || null}
+          className="text-amber-200/70 bg-amber-950/20 border-amber-800/30"
+        />
+      </div>
+      {/* Delete button */}
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        className="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 text-xs leading-none"
+        title="Delete run"
+      >
+        ×
+      </button>
+    </div>
   )
 }
 
-function PatientGroup({ patientId, runs, selectedRunId, onSelect }) {
+function PatientGroup({ patientId, runs, selectedRunId, onSelect, onDelete }) {
   return (
     <div>
       <div className="px-4 py-2 bg-ink-900 border-b border-border sticky top-0 z-10">
@@ -212,6 +318,7 @@ function PatientGroup({ patientId, runs, selectedRunId, onSelect }) {
           run={r}
           isSelected={selectedRunId === r.run_id}
           onSelect={onSelect}
+          onDelete={onDelete}
         />
       ))}
     </div>
@@ -222,6 +329,7 @@ function PatientGroup({ patientId, runs, selectedRunId, onSelect }) {
 
 function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle }) {
   const [saving, setSaving] = useState(false)
+  const [showRaw, setShowRaw] = useState(false)
   const [localRating, setLocalRating] = useState(snap.rating ?? null)
   const initGaps = Array.isArray(snap.knowledge_gaps)
     ? snap.knowledge_gaps
@@ -229,7 +337,7 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
   const [gaps, setGaps] = useState(initGaps)
   const [gapInput, setGapInput] = useState('')
   const [gapsSaving, setGapsSaving] = useState(false)
-  const hasAnswer = !!snap.agent_answer
+  const hasAnswer = !!(snap.agent_answer || snap.immediate_actions?.length)
 
   const handleRate = async (n) => {
     setSaving(true)
@@ -324,6 +432,18 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
             )}
           </div>
 
+          {/* Timeline summary (shown when available) */}
+          {snap.timeline_summary && (
+            <div className="mb-4">
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Clinical Summary</p>
+              <div className="text-xs text-white/75 bg-ink-900 border border-border rounded-lg p-3 leading-relaxed prose-sm">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                  {snap.timeline_summary}
+                </ReactMarkdown>
+              </div>
+            </div>
+          )}
+
           {!hasAnswer ? (
             <p className="text-sm text-muted italic">Run the assessment to get an answer.</p>
           ) : (
@@ -332,14 +452,73 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
               <div className="grid grid-cols-2 gap-4 mb-4">
                 {/* Agent answer */}
                 <div>
-                  <p className="text-xs font-semibold text-accent mb-2 uppercase tracking-wide">
-                    Agent Answer
-                  </p>
-                  <div className="prose-sm text-white/80 text-sm leading-relaxed bg-ink-900 rounded-lg p-3 border border-border">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {snap.agent_answer}
-                    </ReactMarkdown>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-accent uppercase tracking-wide">Agent Answer</p>
+                    <button
+                      onClick={() => setShowRaw(v => !v)}
+                      className="text-[10px] text-muted hover:text-white/60 border border-border rounded px-1.5 py-0.5 transition-colors"
+                    >
+                      {showRaw ? 'Rendered' : 'Raw JSON'}
+                    </button>
                   </div>
+                  {showRaw ? (
+                    <pre className="text-[11px] font-mono text-white/70 bg-ink-900 rounded-lg p-3 border border-border overflow-x-auto max-h-80 overflow-y-auto whitespace-pre-wrap">
+                      {JSON.stringify({
+                        immediate_actions: snap.immediate_actions,
+                        clinical_reasoning: snap.agent_clinical_reasoning,
+                        monitoring_followup: snap.monitoring_followup,
+                        alternative_considerations: snap.alternative_considerations,
+                        pages_consulted: snap.pages_consulted,
+                        wiki_links: snap.wiki_links,
+                        tokens_in: snap.tokens_in,
+                        tokens_out: snap.tokens_out,
+                      }, null, 2)}
+                    </pre>
+                  ) : (
+                    <div className="space-y-2">
+                      {[
+                        { key: 'immediate_actions',          data: snap.immediate_actions,          label: 'Immediate Actions',          color: 'text-red-400',    border: 'border-red-800/50',   bg: 'bg-red-950/20' },
+                        { key: 'clinical_reasoning',         data: snap.agent_clinical_reasoning,   label: 'Clinical Reasoning',         color: 'text-amber-400',  border: 'border-amber-800/50', bg: 'bg-amber-950/20' },
+                        { key: 'monitoring_followup',        data: snap.monitoring_followup,        label: 'Monitoring & Follow-up',     color: 'text-blue-400',   border: 'border-blue-800/50',  bg: 'bg-blue-950/20' },
+                        { key: 'alternative_considerations', data: snap.alternative_considerations, label: 'Alternative Considerations', color: 'text-purple-400', border: 'border-purple-800/50',bg: 'bg-purple-950/20' },
+                      ].map(({ key, data, label, color, border, bg }) => data?.length ? (
+                        <div key={key} className={`rounded-lg border ${border} ${bg} px-3 py-2`}>
+                          <p className={`text-[9px] uppercase tracking-widest font-semibold ${color} mb-1.5`}>{label}</p>
+                          <ul className="space-y-1">
+                            {data.map((item, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
+                                <span className={`${color} flex-shrink-0`}>›</span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null)}
+                      {/* Fallback for old runs without CDS fields */}
+                      {!snap.immediate_actions?.length && snap.agent_answer && (
+                        <div className="prose-sm text-white/80 text-sm leading-relaxed bg-ink-900 rounded-lg p-3 border border-border">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                            {preprocessWikiLinks(snap.agent_answer)}
+                          </ReactMarkdown>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Pages consulted */}
+                  {snap.pages_consulted?.length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Wiki pages consulted</p>
+                      <div className="flex flex-wrap gap-1">
+                        {snap.pages_consulted.map((p, i) => (
+                          <span key={i} className="inline-flex px-2 py-0.5 rounded bg-ink-800 border border-border text-[10px] font-mono text-white/50">
+                            {p.split('/').pop()}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Expected answer */}
@@ -439,6 +618,9 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
 function RunPanel({ activeKB, onRunDone }) {
   const [availablePatients, setAvailablePatients] = useState([])
   const [selectedPatient, setSelectedPatient] = useState('')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [selectedSnapshot, setSelectedSnapshot] = useState('')
+  const [usePatientContext, setUsePatientContext] = useState(false)
   const [running, setRunning] = useState(false)
   const [jobId, setJobId] = useState(null)
   const [error, setError] = useState(null)
@@ -458,7 +640,8 @@ function RunPanel({ activeKB, onRunDone }) {
     setRunning(true)
     setError(null)
     try {
-      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB)
+      const snapNum = selectedSnapshot ? parseInt(selectedSnapshot, 10) : null
+      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext)
       setJobId(job_id)
     } catch (err) {
       setError(err.message)
@@ -503,6 +686,43 @@ function RunPanel({ activeKB, onRunDone }) {
           ))}
         </select>
       )}
+      <select
+        value={selectedModel}
+        onChange={e => setSelectedModel(e.target.value)}
+        disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
+      >
+        {AVAILABLE_MODELS.map(m => (
+          <option key={m.value} value={m.value}>{m.label}</option>
+        ))}
+      </select>
+      <select
+        value={selectedSnapshot}
+        onChange={e => setSelectedSnapshot(e.target.value)}
+        disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
+      >
+        <option value="">All snapshots</option>
+        {[1, 2, 3, 4, 5].map(n => (
+          <option key={n} value={n}>Snapshot {n}</option>
+        ))}
+      </select>
+      {/* Patient context toggle */}
+      <button
+        onClick={() => setUsePatientContext(v => !v)}
+        disabled={running}
+        className={`w-full flex items-center justify-between px-3 py-2 rounded border text-xs font-mono mb-2 transition-colors disabled:opacity-40 ${
+          usePatientContext
+            ? 'bg-purple-950/40 border-purple-700/60 text-purple-300'
+            : 'bg-ink-800 border-border text-muted'
+        }`}
+      >
+        <span>Patient context in search</span>
+        <span className={`w-8 h-4 rounded-full relative transition-colors ${usePatientContext ? 'bg-purple-500' : 'bg-ink-600'}`}>
+          <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${usePatientContext ? 'left-4' : 'left-0.5'}`} />
+        </span>
+      </button>
+
       {error && (
         <p className="text-xs text-red-400 mb-2">{error}</p>
       )}
@@ -564,6 +784,8 @@ export default function ClinicalAssess() {
 
   const [openSnap, setOpenSnap] = useState(null)
   const [ratings, setRatings] = useState({})
+  const [comment, setComment] = useState('')
+  const [commentSaving, setCommentSaving] = useState(false)
 
   useEffect(() => {
     if (detail?.snapshots) {
@@ -572,10 +794,43 @@ export default function ClinicalAssess() {
       setRatings(initial)
       setOpenSnap(null)
     }
+    setComment(detail?.comment ?? '')
   }, [detail])
 
+  const handleSaveComment = async () => {
+    if (!detail) return
+    setCommentSaving(true)
+    try {
+      await saveRunComment(detail.patient_id, detail.run_id, comment, activeKB)
+      setAssessments(prev => prev.map(a =>
+        a.run_id === detail.run_id ? { ...a, comment } : a
+      ))
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setCommentSaving(false)
+    }
+  }
+
   const handleRated = (snapNum, rating) => {
-    setRatings(prev => ({ ...prev, [snapNum]: rating }))
+    const newRatings = { ...ratings, [snapNum]: rating }
+    setRatings(newRatings)
+    const values = Object.values(newRatings)
+    const avg = values.length > 0
+      ? Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10
+      : null
+    setAssessments(prev => prev.map(a =>
+      a.run_id === detail?.run_id ? { ...a, avg_rating: avg } : a
+    ))
+  }
+
+  const handleDelete = async (run) => {
+    await deleteClinicalAssessment(run.patient_id, run.run_id, activeKB)
+    setAssessments(prev => prev.filter(a => a.run_id !== run.run_id))
+    if (selectedRun?.run_id === run.run_id) {
+      setSelectedRun(null)
+      setDetail(null)
+    }
   }
 
   const totalCost = detail?.snapshots?.reduce((s, snap) => s + (snap.cost_usd || 0), 0) ?? 0
@@ -617,6 +872,7 @@ export default function ClinicalAssess() {
                 runs={runs}
                 selectedRunId={selectedRun?.run_id}
                 onSelect={setSelectedRun}
+                onDelete={handleDelete}
               />
             ))
           })()}
@@ -642,10 +898,18 @@ export default function ClinicalAssess() {
               <h1 className="text-lg font-semibold text-white font-mono mb-1">
                 {detail.patient_id}
               </h1>
-              <div className="flex items-center gap-3 text-xs text-muted">
+              <div className="flex items-center gap-3 text-xs text-muted flex-wrap">
                 <span className="font-mono text-white/40">{detail.run_id}</span>
                 <span className="text-border">·</span>
                 <span>{detail.snapshots?.length ?? 0} snapshots</span>
+                {detail.model && (
+                  <>
+                    <span className="text-border">·</span>
+                    <span className="font-mono text-purple-400/80 bg-purple-950/30 border border-purple-800/40 px-1.5 py-0.5 rounded text-[10px]">
+                      {detail.model}
+                    </span>
+                  </>
+                )}
                 {detail.run_at && (
                   <>
                     <span className="text-border">·</span>
@@ -666,6 +930,24 @@ export default function ClinicalAssess() {
                     </span>
                     <span className="text-muted">({ratedValues.length} rated)</span>
                   </>
+                )}
+              </div>
+            </div>
+
+            {/* Comment */}
+            <div className="mb-6">
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Run Notes</p>
+              <div className="relative">
+                <textarea
+                  value={comment}
+                  onChange={e => setComment(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSaveComment() } }}
+                  placeholder="Add notes about this run… (Enter to save, Shift+Enter for new line)"
+                  rows={3}
+                  className="w-full bg-ink-900 border border-border rounded-lg px-3 py-2 text-xs text-white/80 placeholder:text-muted/50 focus:outline-none focus:border-accent resize-none leading-relaxed"
+                />
+                {commentSaving && (
+                  <span className="absolute bottom-2 right-2 text-[10px] text-muted/60">saving…</span>
                 )}
               </div>
             </div>
