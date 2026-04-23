@@ -63,7 +63,7 @@ class ResolveAllRequest(BaseModel):
 @router.post("/search")
 async def resolve_search(req: SearchRequest, kb: KBConfig = Depends(resolve_kb)):
     """Search Google/PubMed for articles that would fill the gap. Takes ~20-30s."""
-    articles = await asyncio.to_thread(
+    articles, _ = await asyncio.to_thread(
         search_for_gap, req.gap_title, req.gap_sections, req.max_results
     )
     return {"articles": articles}
@@ -164,7 +164,7 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
 
     async def process_gap(gap):
         try:
-            articles = await asyncio.to_thread(
+            articles, _ = await asyncio.to_thread(
                 search_for_gap, gap["title"], gap["missing_sections"], max_results
             )
             # Run articles sequentially — each writes to the same referenced_page,

@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -39,6 +39,7 @@ app.include_router(kbs.router)
 app.include_router(resolve.router)
 app.include_router(assess.router)
 app.include_router(clinical_assess.router)
+app.include_router(learn.router)
 
 @app.on_event("startup")
 def startup():

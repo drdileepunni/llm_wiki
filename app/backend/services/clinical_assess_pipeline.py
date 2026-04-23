@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import MODEL, KBConfig
+
+TIMELINES_BASE = Path("/Users/drdileepunni/github_/llm_wiki/timelines")
 from .llm_client import get_llm_client
 from .token_tracker import calculate_cost, log_call
 
@@ -109,41 +111,85 @@ def load_case(patient_dir: str) -> dict:
     return {"patient_id": patient_id, "patient_dir": str(base), "snapshots": snapshots}
 
 
-def _clinical_assess_path(patient_id: str, kb: KBConfig) -> Path:
-    return kb.wiki_root / "assessments" / "clinical" / f"{patient_id}.json"
+def list_available_patients() -> list[str]:
+    """Return sorted list of patient slugs (subdirectory names) in TIMELINES_BASE."""
+    if not TIMELINES_BASE.exists():
+        return []
+    return sorted(p.name for p in TIMELINES_BASE.iterdir() if p.is_dir())
 
 
-def load_clinical_assessment(patient_id: str, kb: KBConfig) -> dict:
-    p = _clinical_assess_path(patient_id, kb)
+def _clinical_assess_dir(patient_id: str, kb: KBConfig) -> Path:
+    return kb.wiki_root / "assessments" / "clinical" / patient_id
+
+
+def _clinical_assess_path(patient_id: str, run_id: str, kb: KBConfig) -> Path:
+    return _clinical_assess_dir(patient_id, kb) / f"{run_id}.json"
+
+
+def load_clinical_assessment(patient_id: str, run_id: str, kb: KBConfig) -> dict:
+    p = _clinical_assess_path(patient_id, run_id, kb)
     if not p.exists():
-        raise FileNotFoundError(f"No clinical assessment for {patient_id!r}")
+        raise FileNotFoundError(f"No assessment {run_id!r} for {patient_id!r}")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def save_snapshot_rating(
+    patient_id: str,
+    run_id: str,
+    snapshot_num: int,
+    rating: int | None,
+    kb: KBConfig,
+    knowledge_gaps: list | None = None,
+) -> dict:
+    """Persist rating and/or knowledge_gaps for a single snapshot."""
+    p = _clinical_assess_path(patient_id, run_id, kb)
+    if not p.exists():
+        raise FileNotFoundError(f"No assessment {run_id!r} for {patient_id!r}")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    for snap in data.get("snapshots", []):
+        if snap["snapshot_num"] == snapshot_num:
+            if rating is not None:
+                snap["rating"] = rating
+            if knowledge_gaps is not None:
+                snap["knowledge_gaps"] = knowledge_gaps
+            break
+    else:
+        raise ValueError(f"Snapshot {snapshot_num} not found for {patient_id!r}")
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
 def list_clinical_assessments(kb: KBConfig) -> list[dict]:
+    """Return all runs across all patients, newest first."""
     clinical_dir = kb.wiki_root / "assessments" / "clinical"
     if not clinical_dir.exists():
         return []
     results = []
-    for f in sorted(clinical_dir.glob("*.json")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            results.append({
-                "patient_id":     data["patient_id"],
-                "patient_dir":    data.get("patient_dir", ""),
-                "run_at":         data.get("run_at"),
-                "snapshot_count": len(data.get("snapshots", [])),
-            })
-        except Exception as exc:
-            log.warning("Skipping corrupt clinical assessment %s: %s", f.name, exc)
+    for patient_dir in sorted(clinical_dir.iterdir()):
+        if not patient_dir.is_dir():
+            continue
+        for f in sorted(patient_dir.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                results.append({
+                    "patient_id":     data["patient_id"],
+                    "run_id":         data["run_id"],
+                    "run_at":         data.get("run_at"),
+                    "snapshot_count": len(data.get("snapshots", [])),
+                })
+            except Exception as exc:
+                log.warning("Skipping corrupt clinical assessment %s: %s", f.name, exc)
+    results.sort(key=lambda r: r.get("run_at") or "", reverse=True)
     return results
 
 
-def run_clinical_assessment(patient_dir: str, kb: KBConfig) -> dict:
+def run_clinical_assessment(patient_id: str, kb: KBConfig) -> dict:
     """
-    Run the clinical case assessment for all snapshots in patient_dir.
-    Calls the LLM for each snapshot and stores results in the wiki.
+    Run the clinical case assessment for all snapshots for patient_id.
+    Each call creates a new timestamped run under assessments/clinical/{patient_id}/.
     """
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    patient_dir = str(TIMELINES_BASE / patient_id)
     case = load_case(patient_dir)
     client = get_llm_client()
 
@@ -155,8 +201,8 @@ def run_clinical_assessment(patient_dir: str, kb: KBConfig) -> dict:
         )
 
         log.info(
-            "Clinical assess: patient=%s snapshot=%d",
-            case["patient_id"], snap["snapshot_num"]
+            "Clinical assess: patient=%s snapshot=%d run=%s",
+            case["patient_id"], snap["snapshot_num"], run_id,
         )
 
         response = client.create_message(
@@ -189,17 +235,16 @@ def run_clinical_assessment(patient_dir: str, kb: KBConfig) -> dict:
         snap["tokens_in"]    = tokens_in
         snap["tokens_out"]   = tokens_out
         snap["cost_usd"]     = cost
-        # remove raw csv from stored result to keep JSON lean
-        snap.pop("csv_content", None)
 
     result = {
         "patient_id": case["patient_id"],
+        "run_id":     run_id,
         "patient_dir": case["patient_dir"],
         "run_at": datetime.utcnow().isoformat(),
         "snapshots": case["snapshots"],
     }
 
-    out_path = _clinical_assess_path(case["patient_id"], kb)
+    out_path = _clinical_assess_path(case["patient_id"], run_id, kb)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info("Clinical assessment saved: %s", out_path)

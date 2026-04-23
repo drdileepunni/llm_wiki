@@ -8,6 +8,7 @@ import Wiki from './pages/Wiki'
 import KBSettings from './pages/KBSettings'
 import Assess from './pages/Assess'
 import ClinicalAssess from './pages/ClinicalAssess'
+import Learn from './pages/Learn'
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="kb-settings" element={<KBSettings />} />
             <Route path="assess" element={<Assess />} />
             <Route path="clinical-assess" element={<ClinicalAssess />} />
+            <Route path="learn" element={<Learn />} />
           </Route>
         </Routes>
       </BrowserRouter>

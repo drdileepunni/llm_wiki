@@ -236,11 +236,15 @@ export async function assessJobStatus(jobId) {
 
 // ── Clinical Assessment ────────────────────────────────────────────────────────
 
-export async function runClinicalAssessment(patientDir, kbName) {
+export async function listAvailablePatients() {
+  return fetch(`${BASE}/clinical-assess/available`).then(r => r.json())
+}
+
+export async function runClinicalAssessment(patientId, kbName) {
   const res = await fetch(`${BASE}/clinical-assess/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
-    body: JSON.stringify({ patient_dir: patientDir }),
+    body: JSON.stringify({ patient_id: patientId }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -254,8 +258,44 @@ export async function listClinicalAssessments(kbName) {
   return fetch(`${BASE}/clinical-assess/`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }
 
-export async function getClinicalAssessment(patientId, kbName) {
-  return fetch(`${BASE}/clinical-assess/${encodeURIComponent(patientId)}`, {
+export async function getClinicalAssessment(patientId, runId, kbName) {
+  return fetch(
+    `${BASE}/clinical-assess/${encodeURIComponent(patientId)}/${encodeURIComponent(runId)}`,
+    { headers: kbHeaders(kbName) }
+  ).then(r => r.json())
+}
+
+export async function rateSnapshotApi(patientId, runId, snapshotNum, { rating, knowledge_gaps } = {}, kbName) {
+  const res = await fetch(
+    `${BASE}/clinical-assess/${encodeURIComponent(patientId)}/${encodeURIComponent(runId)}/snapshots/${snapshotNum}/rating`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+      body: JSON.stringify({ rating, knowledge_gaps }),
+    }
+  )
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Learn (learning loop) ──────────────────────────────────────────────────────
+
+export async function startLearnRun(cpmrn, encounter, kbName) {
+  const res = await fetch(`${BASE}/learn/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ cpmrn, encounter }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function learnJobStatus(runId, kbName) {
+  return fetch(`${BASE}/learn/jobs/${runId}`, {
     headers: kbHeaders(kbName),
   }).then(r => r.json())
+}
+
+export async function listLearnRuns(kbName) {
+  return fetch(`${BASE}/learn/`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }

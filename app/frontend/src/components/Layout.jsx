@@ -7,6 +7,7 @@ import {
   BookOpenIcon,
   ClipboardDocumentCheckIcon,
   BeakerIcon,
+  AcademicCapIcon,
   Cog6ToothIcon,
   PlusIcon,
 } from '@heroicons/react/24/outline'
@@ -19,6 +20,7 @@ const navItems = [
   { to: '/wiki',      label: 'Wiki',      icon: BookOpenIcon },
   { to: '/assess',         label: 'Assess',    icon: ClipboardDocumentCheckIcon },
   { to: '/clinical-assess', label: 'Clinical',   icon: BeakerIcon },
+  { to: '/learn',           label: 'Learn',      icon: AcademicCapIcon },
   { to: '/dashboard',      label: 'Dashboard', icon: ChartBarIcon },
 ]
 

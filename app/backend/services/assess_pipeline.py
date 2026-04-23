@@ -164,7 +164,7 @@ Generate 10 assessment questions for this case."""
         json.dumps(assessment, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    log_call(
+    gen_cost = log_call(
         operation="assess_generate",
         source_name=source_name[:80],
         input_tokens=resp.usage.input_tokens,
@@ -172,6 +172,7 @@ Generate 10 assessment questions for this case."""
         model=MODEL,
         kb_name=kb.name,
     )
+    assessment["cost_usd"] = gen_cost
 
     if not questions:
         log.warning("Assessment written with 0 questions — LLM output may have been empty or unparseable")

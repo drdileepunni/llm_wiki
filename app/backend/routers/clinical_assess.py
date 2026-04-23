@@ -1,10 +1,11 @@
 """
 Clinical case assessment endpoints.
 
-POST /api/clinical-assess/run          — run all snapshots for a patient dir (background)
-GET  /api/clinical-assess/jobs/{id}    — poll job status
-GET  /api/clinical-assess/             — list completed clinical assessments
-GET  /api/clinical-assess/{patient_id} — load one assessment
+POST /api/clinical-assess/run                                   — run all snapshots (background)
+GET  /api/clinical-assess/jobs/{job_id}                         — poll job status
+GET  /api/clinical-assess/                                      — list all runs (all patients)
+GET  /api/clinical-assess/{patient_id}/{run_id}                 — load one run
+PATCH /api/clinical-assess/{patient_id}/{run_id}/snapshots/{n}/rating
 """
 
 import asyncio
@@ -17,9 +18,11 @@ from pydantic import BaseModel
 from ..config import KBConfig
 from ..dependencies import resolve_kb
 from ..services.clinical_assess_pipeline import (
+    list_available_patients,
     list_clinical_assessments,
     load_clinical_assessment,
     run_clinical_assessment,
+    save_snapshot_rating,
 )
 
 log = logging.getLogger("wiki.clinical_assess")
@@ -30,7 +33,17 @@ _jobs: dict[str, dict] = {}
 
 
 class RunRequest(BaseModel):
-    patient_dir: str
+    patient_id: str
+
+
+class RatingRequest(BaseModel):
+    rating: int | None = None
+    knowledge_gaps: list[str] | None = None
+
+
+@router.get("/available")
+def available_patients():
+    return {"patients": list_available_patients()}
 
 
 @router.get("/")
@@ -38,7 +51,7 @@ def list_endpoint(kb: KBConfig = Depends(resolve_kb)):
     return {"assessments": list_clinical_assessments(kb)}
 
 
-# IMPORTANT: /jobs/{job_id} must be before /{patient_id}
+# IMPORTANT: /jobs/{job_id} must stay above /{patient_id}/...
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str):
     job = _jobs.get(job_id)
@@ -47,12 +60,30 @@ def get_job(job_id: str):
     return {"job_id": job_id, **job}
 
 
-@router.get("/{patient_id}")
-def get_assessment(patient_id: str, kb: KBConfig = Depends(resolve_kb)):
+@router.patch("/{patient_id}/{run_id}/snapshots/{snapshot_num}/rating")
+def rate_snapshot(
+    patient_id: str,
+    run_id: str,
+    snapshot_num: int,
+    req: RatingRequest,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    if req.rating is not None and not 1 <= req.rating <= 10:
+        raise HTTPException(status_code=422, detail="Rating must be between 1 and 10")
     try:
-        return load_clinical_assessment(patient_id, kb)
+        return save_snapshot_rating(patient_id, run_id, snapshot_num, req.rating, kb, req.knowledge_gaps)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"No clinical assessment for {patient_id!r}")
+        raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{patient_id}/{run_id}")
+def get_assessment(patient_id: str, run_id: str, kb: KBConfig = Depends(resolve_kb)):
+    try:
+        return load_clinical_assessment(patient_id, run_id, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
 
 
 @router.post("/run")
@@ -62,15 +93,15 @@ async def run_endpoint(
     kb: KBConfig = Depends(resolve_kb),
 ):
     job_id = str(uuid.uuid4())[:8]
-    _jobs[job_id] = {"status": "running", "patient_dir": req.patient_dir, "result": None, "error": None}
-    background_tasks.add_task(_do_run, job_id, req.patient_dir, kb)
+    _jobs[job_id] = {"status": "running", "patient_id": req.patient_id, "result": None, "error": None}
+    background_tasks.add_task(_do_run, job_id, req.patient_id, kb)
     return {"job_id": job_id}
 
 
-async def _do_run(job_id: str, patient_dir: str, kb: KBConfig):
+async def _do_run(job_id: str, patient_id: str, kb: KBConfig):
     try:
-        result = await asyncio.to_thread(run_clinical_assessment, patient_dir, kb)
-        _jobs[job_id] = {"status": "done", "patient_dir": patient_dir, "result": result, "error": None}
+        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb)
+        _jobs[job_id] = {"status": "done", "patient_id": patient_id, "result": result, "error": None}
     except Exception as exc:
-        log.error("Clinical assessment failed for %r: %s", patient_dir, exc)
-        _jobs[job_id] = {"status": "error", "patient_dir": patient_dir, "result": None, "error": str(exc)}
+        log.error("Clinical assessment failed for %r: %s", patient_id, exc)
+        _jobs[job_id] = {"status": "error", "patient_id": patient_id, "result": None, "error": str(exc)}

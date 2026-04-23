@@ -15,6 +15,9 @@ import threading
 import httpx
 
 from ..config import ANTHROPIC_API_KEY, GOOGLE_API_KEY, BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID
+from .token_tracker import log_call, calculate_cost
+
+_GEMINI_SEARCH_MODEL = "gemini-2.5-flash"
 
 log = logging.getLogger("wiki.gap_resolver")
 
@@ -58,13 +61,14 @@ class _BB:
 
 # ── LLM query generation ──────────────────────────────────────────────────────
 
-def generate_search_query(gap_title: str, gap_sections: list[str]) -> str:
+def generate_search_query(gap_title: str, gap_sections: list[str]) -> tuple[str, float]:
+    """Returns (query_string, cost_usd)."""
     from google import genai
     client = genai.Client(api_key=GOOGLE_API_KEY)
     log.info("[gap=%s] Generating search query via Gemini (missing: %s)",
              gap_title, ", ".join(gap_sections))
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=_GEMINI_SEARCH_MODEL,
         contents=(
             f'Fill a knowledge gap about: "{gap_title}"\n'
             f"Missing: {', '.join(gap_sections)}\n\n"
@@ -78,7 +82,16 @@ def generate_search_query(gap_title: str, gap_sections: list[str]) -> str:
     query = (resp.text or "").strip().strip('"')
     query = query or f"{gap_title} PMC full text"
     log.info("[gap=%s] Search query: '%s'", gap_title, query)
-    return query
+    tokens_in  = getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
+    tokens_out = getattr(resp.usage_metadata, "candidates_token_count", 0) or 0
+    cost = log_call(
+        operation="gap_search_query",
+        source_name=gap_title[:80],
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+        model=_GEMINI_SEARCH_MODEL,
+    )
+    return query, cost
 
 
 # ── Google search ─────────────────────────────────────────────────────────────
@@ -260,18 +273,28 @@ def _fetch_article_meta(pmid: str) -> dict:
     }
 
 
-def _is_relevant(article: dict, gap_title: str, gap_sections: list[str]) -> tuple[bool, str]:
+def _is_relevant(article: dict, gap_title: str, gap_sections: list[str]) -> tuple[bool, str, float]:
+    """Returns (is_relevant, reason, cost_usd)."""
     from google import genai
     client = genai.Client(api_key=GOOGLE_API_KEY)
     log.debug("Checking relevance of '%s' for gap '%s'", article.get("title", "")[:60], gap_title)
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=_GEMINI_SEARCH_MODEL,
         contents=(
             f'Gap: "{gap_title}"\nMissing: {", ".join(gap_sections)}\n\n'
             f"Article: {article['title']}\nAbstract: {article['abstract'][:1000]}\n\n"
             "Would this fill one or more missing sections?\n"
             'JSON only: {"relevant": true/false, "reason": "one sentence"}'
         ),
+    )
+    tokens_in  = getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
+    tokens_out = getattr(resp.usage_metadata, "candidates_token_count", 0) or 0
+    cost = log_call(
+        operation="gap_relevance_check",
+        source_name=gap_title[:80],
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+        model=_GEMINI_SEARCH_MODEL,
     )
     text = (resp.text or "").strip()
     m = re.search(r'\{.*\}', text, re.DOTALL)
@@ -283,11 +306,11 @@ def _is_relevant(article: dict, gap_title: str, gap_sections: list[str]) -> tupl
             log.info("Relevance check → %s | %s | reason: %s",
                      "RELEVANT" if relevant else "not relevant",
                      article.get("title", "")[:60], reason)
-            return relevant, reason
+            return relevant, reason, cost
         except json.JSONDecodeError:
             pass
     log.warning("Relevance check unparseable response: %s", text[:100])
-    return False, text
+    return False, text, cost
 
 
 # ── PMC full-text fetch ───────────────────────────────────────────────────────
@@ -380,23 +403,24 @@ def _html_to_text(html: str) -> str:
 def _medscape_fallback(
     gap_title: str, gap_sections: list[str], query: str, max_results: int,
     bb_budget: int = 3,
-) -> list[dict]:
-    """Fetch Medscape reference pages as a fallback when PubMed yields nothing relevant."""
+) -> tuple[list[dict], float]:
+    """Fetch Medscape reference pages as a fallback. Returns (articles, cost_usd)."""
     log.info("[gap=%s] No relevant PubMed articles — trying Medscape fallback (BB budget: %d)",
              gap_title, bb_budget)
 
     if bb_budget <= 0:
         log.warning("[gap=%s] Medscape fallback skipped — BB session budget exhausted", gap_title)
-        return []
+        return [], 0.0
 
     medscape_hits = _medscape_direct_search(gap_title)
     bb_budget -= 1
 
     if not medscape_hits:
         log.warning("[gap=%s] Medscape search returned 0 hits — gap unresolved", gap_title)
-        return []
+        return [], 0.0
 
     articles: list[dict] = []
+    fallback_cost = 0.0
     for hit in medscape_hits:
         if len(articles) >= max_results:
             break
@@ -420,26 +444,28 @@ def _medscape_fallback(
             "content":    text,
             "source_url": hit["url"],
         }
-        relevant, reason = _is_relevant(article, gap_title, gap_sections)
+        relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
+        fallback_cost += rel_cost
         article["relevant"]         = relevant
         article["relevance_reason"] = reason
         if relevant:
             articles.append(article)
 
     log.info("[gap=%s] Medscape fallback: %d relevant article(s) found", gap_title, len(articles))
-    return articles
+    return articles, fallback_cost
 
 
-def search_for_gap(gap_title: str, gap_sections: list[str], max_results: int = 5) -> list[dict]:
+def search_for_gap(gap_title: str, gap_sections: list[str], max_results: int = 5) -> tuple[list[dict], float]:
     """
     Search Google/PubMed for free full-text articles covering the gap.
     Falls back to Medscape reference pages when PubMed yields no relevant results.
-    Returns list of article dicts enriched with relevance_reason.
+    Returns (articles, cost_usd).
     """
     log.info("=== search_for_gap START  gap='%s'  sections=%s ===", gap_title, gap_sections)
     bb_sessions_used = 0
 
-    query = generate_search_query(gap_title, gap_sections)
+    query, search_cost = generate_search_query(gap_title, gap_sections)
+    total_search_cost = search_cost
     seen_ids: set[str] = set()
     all_hits: list[dict] = []
 
@@ -486,7 +512,8 @@ def search_for_gap(gap_title: str, gap_sections: list[str], max_results: int = 5
             log.debug("[gap=%s] PMID %s has no PMC full text — skipping", gap_title, pmid)
             continue
 
-        relevant, reason = _is_relevant(article, gap_title, gap_sections)
+        relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
+        total_search_cost += rel_cost
         article["relevant"]          = relevant
         article["relevance_reason"]  = reason
 
@@ -498,13 +525,14 @@ def search_for_gap(gap_title: str, gap_sections: list[str], max_results: int = 5
 
     # ── Medscape fallback when PubMed found nothing relevant ─────────────────
     if not articles and bb_sessions_used < _BB_MAX_PER_SEARCH:
-        articles = _medscape_fallback(
+        articles, fallback_cost = _medscape_fallback(
             gap_title, gap_sections, query, max_results,
             bb_budget=_BB_MAX_PER_SEARCH - bb_sessions_used,
         )
+        total_search_cost += fallback_cost
 
     log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(articles))
-    return articles
+    return articles, total_search_cost
 
 
 def fetch_article_content(pmc_id: str) -> Optional[str]:
