@@ -21,6 +21,7 @@ from ..services.clinical_assess_pipeline import (
     delete_clinical_assessment,
     list_available_patients,
     list_clinical_assessments,
+    list_patient_snapshot_info,
     load_clinical_assessment,
     run_clinical_assessment,
     save_run_comment,
@@ -52,6 +53,11 @@ class CommentRequest(BaseModel):
 @router.get("/available")
 def available_patients():
     return {"patients": list_available_patients()}
+
+
+@router.get("/patients/{patient_id}/snapshots")
+def patient_snapshots(patient_id: str):
+    return {"snapshots": list_patient_snapshot_info(patient_id)}
 
 
 @router.get("/")

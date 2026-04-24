@@ -17,12 +17,17 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from ..cancellation import cleanup_run, get_stop_event
 from ..config import KBConfig, WIKI_ROOT
 from .assess_pipeline import generate_assessment, run_assessment
 from .chat_pipeline import run_chat
 from .clinical_assess_pipeline import _clinical_assess_path, _load_qa_json, load_case
 from .ingest_pipeline import run_ingest_chunked
 from .resolve_service import resolve_all_gaps
+
+
+class _Stopped(Exception):
+    """Raised when the user cancels a run."""
 
 log = logging.getLogger("wiki.learn_pipeline")
 
@@ -92,7 +97,11 @@ def _find_timeline(slug: str) -> Path:
 
 def _snapshot_dirs(slug: str) -> list[Path]:
     d = _timeline_dir(slug)
-    return sorted(d.glob("snapshot_*/"), key=lambda p: int(re.search(r"(\d+)", p.name).group(1)))
+    dirs = [p for p in d.glob("*snapshot*") if p.is_dir()]
+    def _sort_key(p):
+        m = re.search(r"(\d+)", p.name)
+        return int(m.group(1)) if m else 0
+    return sorted(dirs, key=_sort_key)
 
 
 # ── Log entry helpers ─────────────────────────────────────────────────────────
@@ -108,9 +117,11 @@ def _log_entry(state: dict, phase: str, message: str, **kwargs) -> None:
     log.info("[%s] %s", phase, message)
 
 
-def _update_phase(state: dict, phase: str, kb: KBConfig):
+def _update_phase(state: dict, phase: str, kb: KBConfig, stop_event=None):
     state["current_phase"] = phase
     _save_run(state, kb)
+    if stop_event and stop_event.is_set():
+        raise _Stopped()
 
 
 # ── Clinical loop helper ──────────────────────────────────────────────────────
@@ -192,10 +203,13 @@ def _run_clinical_via_chat(slug: str, kb: KBConfig, run_id: str, state: dict | N
 
         try:
             result = run_chat(prompt, kb)
-            snap_data["agent_answer"] = result.get("answer", "")
-            snap_data["tokens_in"] = result.get("input_tokens", 0)
-            snap_data["tokens_out"] = result.get("output_tokens", 0)
-            snap_data["cost_usd"] = result.get("cost_usd", 0.0)
+            snap_data["agent_answer"]   = result.get("answer", "")
+            snap_data["tokens_in"]      = result.get("input_tokens", 0)
+            snap_data["tokens_out"]     = result.get("output_tokens", 0)
+            snap_data["cost_usd"]       = result.get("cost_usd", 0.0)
+            snap_data["gap_registered"] = result.get("gap_registered") or None
+            snap_data["gap_entity"]     = result.get("gap_entity") or None
+            snap_data["gap_sections"]   = result.get("gap_sections") or []
             total_cost += snap_data["cost_usd"]
             if result.get("gap_registered"):
                 total_new_kgs += 1
@@ -211,7 +225,7 @@ def _run_clinical_via_chat(slug: str, kb: KBConfig, run_id: str, state: dict | N
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
-def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None = None) -> str:
+def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None = None, stop_event=None) -> str:
     """
     Launch the full learning loop synchronously (intended to run in a thread).
     Accepts an optional run_id so the router can use the same ID it returned to
@@ -221,6 +235,13 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
     slug   = f"{cpmrn}_{encounter}"
     if run_id is None:
         run_id = str(uuid.uuid4())[:8]
+
+    if stop_event is None:
+        stop_event = get_stop_event(run_id)
+
+    def _check_stop():
+        if stop_event.is_set():
+            raise _Stopped()
 
     state: dict = {
         "run_id":        run_id,
@@ -245,6 +266,7 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
 
         _log_entry(state, "ingesting", f"Ingesting timeline for {slug}…")
         _save_run(state, kb)
+        _check_stop()
 
         ingest_result = run_ingest_chunked(
             source_text=timeline_text,
@@ -281,16 +303,19 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
             log.warning("generate_assessment failed: %s", exc)
 
         _save_run(state, kb)
+        _check_stop()
 
         # ── PHASE 2: Knowledge loop ───────────────────────────────────────────
         for i in range(1, MAX_ITER + 1):
-            _update_phase(state, "resolving", kb)
+            _update_phase(state, "resolving", kb, stop_event)
 
             def _resolve_progress(idx, total, gap_title, articles, cost, _i=i):
                 _log_entry(state, "knowledge_loop",
                            f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
                            iteration=_i, sub_phase="resolving", cost_usd=cost)
                 _save_run(state, kb)
+                if stop_event.is_set():
+                    raise _Stopped()
 
             resolve_stats = resolve_all_gaps(kb, progress_callback=_resolve_progress)
             resolve_cost  = resolve_stats.get("cost_usd", 0.0)
@@ -307,11 +332,13 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 cost_usd=resolve_cost,
             )
             _save_run(state, kb)
+            _check_stop()
 
-            _update_phase(state, "knowledge_assessing", kb)
+            _update_phase(state, "knowledge_assessing", kb, stop_event)
             _log_entry(state, "knowledge_loop", f"Iter {i} — running knowledge assessment…",
                        iteration=i, sub_phase="assessing")
             _save_run(state, kb)
+            _check_stop()
 
             try:
                 assess = run_assessment(slug, kb)
@@ -341,16 +368,13 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 cost_usd=assess_cost,
             )
             _save_run(state, kb)
+            _check_stop()
 
             if assess.get("status") == "passing":
                 log.info("Knowledge assessment passing after iter %d", i)
                 break
 
         # ── PHASE 3: Clinical loop ────────────────────────────────────────────
-        # Track gap stems already resolved in this run.  If the same gap
-        # reappears after being resolved, the wiki has the content but the
-        # retriever can't surface it for the clinical question — that's a
-        # retrieval plateau, not a knowledge gap. We stop in that case.
         previously_resolved_gaps: set[str] = set()
 
         def _current_gap_stems() -> set[str]:
@@ -362,17 +386,15 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 if not f.stem.startswith("patient-")
             }
 
-        for i in range(1, MAX_ITER + 1):
-            _update_phase(state, "clinical_assessing", kb)
+        for i in range(1, MAX_ITER - 2):
+            _update_phase(state, "clinical_assessing", kb, stop_event)
 
             gaps_before             = _current_gap_stems()
             new_kgs, clinical_cost  = _run_clinical_via_chat(slug, kb, state["run_id"], state=state)
             state["total_cost_usd"] += clinical_cost
             gaps_after              = _current_gap_stems()
 
-            # Gaps registered during this iteration
             new_gap_stems    = gaps_after - gaps_before
-            # Gaps that are genuinely new (not resolved in a prior iteration)
             genuinely_new    = new_gap_stems - previously_resolved_gaps
             plateau_reoccur  = new_gap_stems & previously_resolved_gaps
 
@@ -393,23 +415,26 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 plateau=len(plateau_reoccur),
             )
             _save_run(state, kb)
+            _check_stop()
 
             if not genuinely_new:
                 log.info("Clinical loop complete after iter %d (no genuinely new KGs)", i)
                 break
 
-            _update_phase(state, "resolving", kb)
+            _update_phase(state, "resolving", kb, stop_event)
 
             def _clinical_resolve_progress(idx, total, gap_title, articles, cost, _i=i):
                 _log_entry(state, "clinical_loop",
                            f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
                            iteration=_i, sub_phase="resolving", cost_usd=cost)
                 _save_run(state, kb)
+                if stop_event.is_set():
+                    raise _Stopped()
 
             resolve_stats = resolve_all_gaps(kb, progress_callback=_clinical_resolve_progress)
             resolve_cost  = resolve_stats.get("cost_usd", 0.0)
             state["total_cost_usd"] += resolve_cost
-            previously_resolved_gaps |= new_gap_stems  # mark as resolved
+            previously_resolved_gaps |= new_gap_stems
 
             _log_entry(
                 state, "clinical_loop",
@@ -421,6 +446,7 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 cost_usd=resolve_cost,
             )
             _save_run(state, kb)
+            _check_stop()
 
         # ── Done ──────────────────────────────────────────────────────────────
         state["status"]        = "complete"
@@ -433,6 +459,14 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         _save_run(state, kb)
         log.info("Learn run %s complete for %s", run_id, slug)
 
+    except _Stopped:
+        log.info("Learn run %s stopped by user at phase=%s", run_id, state.get("current_phase"))
+        state["status"]        = "stopped"
+        state["current_phase"] = "stopped"
+        state["completed_at"]  = datetime.utcnow().isoformat()
+        _log_entry(state, "stopped", f"Run stopped by user — cost so far ${state['total_cost_usd']:.4f}")
+        _save_run(state, kb)
+
     except Exception as exc:
         log.error("Learn run %s failed: %s", run_id, exc, exc_info=True)
         state["status"]        = "error"
@@ -440,5 +474,8 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         state["error"]         = str(exc)
         state["completed_at"]  = datetime.utcnow().isoformat()
         _save_run(state, kb)
+
+    finally:
+        cleanup_run(run_id)
 
     return run_id

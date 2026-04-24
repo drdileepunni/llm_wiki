@@ -105,8 +105,36 @@ def _load_qa_json(snap_dir: Path) -> dict:
         return {}
 
 
+def _iter_snapshot_dirs(base: Path):
+    """
+    Yield (snap_num, snap_dir) for every *snapshot* directory under base.
+    Handles both numbered (snapshot_1, snapshot_2 …) and named (dummy_snapshot).
+    dummy_snapshot gets num=0 so it sorts before numbered snapshots.
+    """
+    dirs = sorted(base.glob("*snapshot*"))
+    for snap_dir in dirs:
+        if not snap_dir.is_dir():
+            continue
+        m = re.search(r"(\d+)", snap_dir.name)
+        num = int(m.group(1)) if m else 0
+        yield num, snap_dir
+
+
+def list_patient_snapshot_info(patient_id: str) -> list[dict]:
+    """Return available snapshot info for a patient (for the UI dropdown)."""
+    base = TIMELINES_BASE / patient_id
+    if not base.exists():
+        return []
+    result = []
+    for num, snap_dir in _iter_snapshot_dirs(base):
+        if (snap_dir / "snapshot.csv").exists():
+            label = snap_dir.name.replace("_", " ").title()
+            result.append({"num": num, "label": label, "dir": snap_dir.name})
+    return result
+
+
 def load_case(patient_dir: str) -> dict:
-    """Read all snapshot_N/ subdirectories and return a structured case dict."""
+    """Read all snapshot directories and return a structured case dict."""
     base = Path(patient_dir)
     if not base.exists():
         raise FileNotFoundError(f"Patient directory not found: {patient_dir}")
@@ -114,13 +142,7 @@ def load_case(patient_dir: str) -> dict:
     patient_id = base.name
     snapshots = []
 
-    for snap_dir in sorted(base.glob("snapshot_*")):
-        if not snap_dir.is_dir():
-            continue
-
-        num_m = re.search(r"snapshot_(\d+)", snap_dir.name)
-        snap_num = int(num_m.group(1)) if num_m else len(snapshots) + 1
-
+    for snap_num, snap_dir in _iter_snapshot_dirs(base):
         csv_path = snap_dir / "snapshot.csv"
         if not csv_path.exists():
             log.warning("Missing snapshot.csv in %s — skipping", snap_dir)
@@ -131,6 +153,7 @@ def load_case(patient_dir: str) -> dict:
 
         snapshots.append({
             "snapshot_num":        snap_num,
+            "snapshot_dir":        snap_dir.name,
             "csv_content":         csv_content,
             "question":            qa_data.get("question", ""),
             "phase":               qa_data.get("phase", ""),
@@ -299,6 +322,9 @@ def run_clinical_assessment(patient_id: str, kb: KBConfig, model: str | None = N
         snap["tokens_in"]                 = sum_in + result["input_tokens"]
         snap["tokens_out"]                = sum_out + result["output_tokens"]
         snap["cost_usd"]                  = sum_cost + result["cost_usd"]
+        snap["gap_registered"]            = result.get("gap_registered") or None
+        snap["gap_entity"]                = result.get("gap_entity") or None
+        snap["gap_sections"]              = result.get("gap_sections") or []
 
     result = {
         "patient_id": case["patient_id"],

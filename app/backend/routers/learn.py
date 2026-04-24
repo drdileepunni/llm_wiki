@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..config import KBConfig
 from ..dependencies import resolve_kb
+from ..cancellation import cancel_run, get_stop_event
 from ..services.learn_pipeline import _load_run, list_learn_runs, start_learn_run
 
 log = logging.getLogger("wiki.learn")
@@ -55,13 +56,40 @@ async def start(
 ):
     run_id = str(uuid.uuid4())[:8]
     _jobs[run_id] = {"status": "running"}
-    background_tasks.add_task(_do_run, run_id, req.cpmrn, req.encounter, kb)
+    stop_event = get_stop_event(run_id)
+    background_tasks.add_task(_do_run, run_id, req.cpmrn, req.encounter, kb, stop_event)
     return {"run_id": run_id}
 
 
-async def _do_run(run_id: str, cpmrn: str, encounter: str, kb: KBConfig):
+@router.post("/jobs/{run_id}/cancel")
+def cancel_job(run_id: str, kb: KBConfig = Depends(resolve_kb)):
+    found = cancel_run(run_id)
+    if not found:
+        # Server may have restarted — forcibly mark the run as stopped on disk
+        try:
+            import json
+            from datetime import datetime
+            state = _load_run(run_id, kb)
+            if state.get("status") == "running":
+                state["status"] = "stopped"
+                state["current_phase"] = "stopped"
+                state["completed_at"] = datetime.utcnow().isoformat()
+                state.setdefault("log", []).append({
+                    "phase": "stopped",
+                    "message": "Run stopped by user (server restart recovery)",
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+                from ..services.learn_pipeline import _save_run
+                _save_run(state, kb)
+                found = True
+        except FileNotFoundError:
+            pass
+    return {"run_id": run_id, "cancelled": found}
+
+
+async def _do_run(run_id: str, cpmrn: str, encounter: str, kb: KBConfig, stop_event=None):
     try:
-        await asyncio.to_thread(start_learn_run, cpmrn, encounter, kb, run_id)
+        await asyncio.to_thread(start_learn_run, cpmrn, encounter, kb, run_id, stop_event)
         _jobs[run_id] = {"status": "done"}
     except Exception as exc:
         log.error("Learn run %s failed: %s", run_id, exc)

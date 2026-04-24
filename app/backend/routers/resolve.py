@@ -13,7 +13,7 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..config import KBConfig
@@ -59,6 +59,18 @@ class ResolveAllRequest(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.delete("/gaps/{gap_stem}")
+def delete_gap(gap_stem: str, kb: KBConfig = Depends(resolve_kb)):
+    """Delete a gap file by its stem (filename without .md)."""
+    from ..services import vector_store as vs_mod
+    gap_path = kb.wiki_dir / "gaps" / f"{gap_stem}.md"
+    if not gap_path.exists():
+        raise HTTPException(status_code=404, detail=f"Gap file not found: {gap_stem}")
+    vs_mod.remove(f"gaps/{gap_stem}.md", kb.wiki_dir)
+    gap_path.unlink()
+    return {"deleted": gap_stem}
+
 
 @router.post("/search")
 async def resolve_search(req: SearchRequest, kb: KBConfig = Depends(resolve_kb)):

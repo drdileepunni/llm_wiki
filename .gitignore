@@ -14,3 +14,4 @@ kbs/agent_school/.cache/*
 kbs/agent_school/assessments/*
 .timeline_cache/*
 timelines/*
+kbs/agent_school/learn_runs/*

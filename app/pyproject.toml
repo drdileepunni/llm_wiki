@@ -17,4 +17,5 @@ dependencies = [
     "lxml>=6.0.2",
     "stagehand>=3.0.0",
     "playwright>=1.40.0",
+    "pymongo>=4.6.0",
 ]

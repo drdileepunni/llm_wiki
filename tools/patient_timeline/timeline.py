@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 from .lib.date_utils import load_json
 from .lib.extractors.orders    import extract_order_events
@@ -29,30 +30,39 @@ _SOURCE_PRIORITY = {"patients.json": 0, "tasks.json": 1, "chat.json": 2}
 
 
 def build(
-    json_dir: Path,
+    json_dir: Optional[Path],
     cpmrn: str,
     output_csv: Path,
     *,
+    encounter: Optional[int] = None,
     gemini_enabled: bool = True,
 ) -> Path:
     """
-    Run all six extractors against the three JSON files in json_dir and
-    write the full timeline to output_csv.
+    Run all six extractors and write the full timeline to output_csv.
 
     Args:
         json_dir:        Directory containing patients.json, tasks.json, chat.json.
-        cpmrn:           Patient identifier (used only for logging).
+                         Pass None to load from MongoDB instead (requires encounter).
+        cpmrn:           Patient identifier.
         output_csv:      Where to write the full timeline CSV.
+        encounter:       Encounter number — required when json_dir is None.
         gemini_enabled:  Whether to call Gemini for clinical note event extraction.
 
     Returns:
         output_csv path (for chaining).
     """
-    logger.info("Loading JSON files from %s …", json_dir)
-    patients_data = load_json(json_dir / "patients.json")
-    patient = patients_data[0] if isinstance(patients_data, list) else patients_data
-    tasks   = load_json(json_dir / "tasks.json")
-    chat    = load_json(json_dir / "chat.json")
+    if json_dir is None:
+        if encounter is None:
+            raise ValueError("encounter must be provided when json_dir is None")
+        from .lib.mongo_cache import load_for_timeline
+        logger.info("Loading from MongoDB for %s/%s …", cpmrn, encounter)
+        patient, tasks, chat = load_for_timeline(cpmrn, encounter)
+    else:
+        logger.info("Loading JSON files from %s …", json_dir)
+        patients_data = load_json(json_dir / "patients.json")
+        patient = patients_data[0] if isinstance(patients_data, list) else patients_data
+        tasks   = load_json(json_dir / "tasks.json")
+        chat    = load_json(json_dir / "chat.json")
 
     logger.info("Extracting order events …")
     order_events = extract_order_events(patient)

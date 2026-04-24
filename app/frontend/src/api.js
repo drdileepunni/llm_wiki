@@ -134,6 +134,15 @@ export async function getWikiGaps(kbName) {
 
 // ── Gap resolver ───────────────────────────────────────────────────────────────
 
+export async function deleteGap(gapStem, kbName) {
+  const res = await fetch(`${BASE}/resolve/gaps/${encodeURIComponent(gapStem)}`, {
+    method: 'DELETE',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function resolveSearch(gapTitle, gapSections, kbName, maxResults = 5) {
   const res = await fetch(`${BASE}/resolve/search`, {
     method: 'POST',
@@ -240,6 +249,10 @@ export async function listAvailablePatients() {
   return fetch(`${BASE}/clinical-assess/available`).then(r => r.json())
 }
 
+export async function listPatientSnapshots(patientId) {
+  return fetch(`${BASE}/clinical-assess/patients/${encodeURIComponent(patientId)}/snapshots`).then(r => r.json())
+}
+
 export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false) {
   const res = await fetch(`${BASE}/clinical-assess/run`, {
     method: 'POST',
@@ -247,7 +260,7 @@ export async function runClinicalAssessment(patientId, kbName, model = null, sna
     body: JSON.stringify({
       patient_id: patientId,
       model: model || undefined,
-      snapshot_num: snapshotNum || undefined,
+      snapshot_num: snapshotNum != null ? snapshotNum : undefined,
       use_patient_context: usePatientContext,
     }),
   })
@@ -321,6 +334,12 @@ export async function learnJobStatus(runId, kbName) {
   return fetch(`${BASE}/learn/jobs/${runId}`, {
     headers: kbHeaders(kbName),
   }).then(r => r.json())
+}
+
+export async function cancelLearnRun(runId) {
+  const res = await fetch(`${BASE}/learn/jobs/${runId}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 export async function listLearnRuns(kbName) {

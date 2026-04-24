@@ -294,17 +294,46 @@ class GeminiLLMClient:
         if thinking_budget is not None:
             thinking_cfg = types.ThinkingConfig(thinking_budget=thinking_budget)
 
-        # ── generate (with retry on MALFORMED_FUNCTION_CALL) ─────────────────
-        config = types.GenerateContentConfig(
-            system_instruction=system or None,
-            tools=gemini_tools or None,
-            tool_config=gemini_tool_cfg,
-            max_output_tokens=max_tokens,
-            thinking_config=thinking_cfg,
-        )
+        # ── generate (with escalating retry on MALFORMED_FUNCTION_CALL) ────────
+        # Attempt 1: ANY mode, thinking disabled (most reliable for tool calls)
+        # Attempt 2: AUTO mode + temperature=0  (lets model choose text vs tool)
+        # Attempt 3: no tools, pure text + JSON extraction in caller
+        no_thinking = types.ThinkingConfig(thinking_budget=0) if fn_decls else thinking_cfg
+
+        def _make_config(attempt: int) -> "types.GenerateContentConfig":
+            if attempt == 1:
+                return types.GenerateContentConfig(
+                    system_instruction=system or None,
+                    tools=gemini_tools or None,
+                    tool_config=gemini_tool_cfg,
+                    max_output_tokens=max_tokens,
+                    thinking_config=no_thinking,
+                    temperature=0.0,
+                )
+            if attempt == 2:
+                # Relax to AUTO — Gemini can return text if function call is tricky
+                auto_cfg = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+                ) if fn_decls else None
+                return types.GenerateContentConfig(
+                    system_instruction=system or None,
+                    tools=gemini_tools or None,
+                    tool_config=auto_cfg,
+                    max_output_tokens=max_tokens,
+                    thinking_config=no_thinking,
+                    temperature=0.0,
+                )
+            # attempt 3: no tools at all — plain text, caller handles JSON extraction
+            return types.GenerateContentConfig(
+                system_instruction=system or None,
+                max_output_tokens=max_tokens,
+                thinking_config=no_thinking,
+                temperature=0.0,
+            )
 
         raw = None
         for attempt in range(1, _retries + 1):
+            config = _make_config(attempt)
             raw = self._client.models.generate_content(
                 model=self.model,
                 contents=gemini_contents,
@@ -314,8 +343,9 @@ class GeminiLLMClient:
             if "MALFORMED" in finish_check:
                 wait = attempt * 2
                 log.warning(
-                    "Gemini MALFORMED_FUNCTION_CALL on attempt %d/%d — retrying in %ds",
+                    "Gemini MALFORMED_FUNCTION_CALL on attempt %d/%d — retrying in %ds (next: %s)",
                     attempt, _retries, wait,
+                    "AUTO mode" if attempt == 1 else "no-tools text",
                 )
                 if attempt < _retries:
                     time.sleep(wait)
@@ -360,6 +390,25 @@ class GeminiLLMClient:
                 stop_reason = "tool_use"
             elif getattr(part, "text", None):
                 content.append(LLMTextBlock(text=part.text))
+
+        # ── JSON extraction fallback: if no tool block found but text has JSON ──
+        # This handles attempt-3 (no-tools) responses where Gemini embeds the
+        # tool payload in plain text (often inside a ```json block).
+        if not any(b.type == "tool_use" for b in content) and tools:
+            raw_text = " ".join(b.text for b in content if b.type == "text")
+            import json as _json, re as _re
+            m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_text, _re.DOTALL)
+            if not m:
+                m = _re.search(r"(\{.*\})", raw_text, _re.DOTALL)
+            if m:
+                try:
+                    parsed = _json.loads(m.group(1))
+                    tool_name = tools[0]["name"] if tools else "extracted"
+                    content.append(LLMToolUseBlock(name=tool_name, input=parsed))
+                    stop_reason = "tool_use"
+                    log.info("Gemini text-fallback: extracted JSON tool block from plain text")
+                except Exception:
+                    pass
 
         # ── usage ────────────────────────────────────────────────────────────
         meta    = raw.usage_metadata

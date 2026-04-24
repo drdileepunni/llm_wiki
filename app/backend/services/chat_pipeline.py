@@ -50,7 +50,7 @@ _CDS_TOOL = {
             "immediate_actions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Immediate actions with specific drug/dose/route. Use [[wiki links]] for drugs and conditions."
+                "description": "Immediate actions with specific drug/dose/route. Use [[wiki links]] for drugs and conditions. Leave empty if the wiki lacks sufficient information."
             },
             "clinical_reasoning": {
                 "type": "array",
@@ -66,6 +66,19 @@ _CDS_TOOL = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Edge cases or alternatives where the answer might differ."
+            },
+            "gap_entity": {
+                "type": "string",
+                "description": "If the wiki lacks sufficient information to answer, name the primary missing clinical entity or topic. Omit if the question was answered."
+            },
+            "gap_page_path": {
+                "type": "string",
+                "description": "Relative wiki path for the gap page (e.g. 'entities/noradrenaline-dosing.md'). Omit if answered."
+            },
+            "gap_missing_sections": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Section headings that would fill the gap (e.g. ['Dosing', 'Titration', 'Weaning']). Omit if answered."
             }
         },
         "required": ["immediate_actions", "clinical_reasoning", "monitoring_followup", "alternative_considerations"]
@@ -140,6 +153,8 @@ Use [[wiki links]] for any drugs, conditions, or procedures that have wiki pages
 Cite source page paths inline (e.g. "entities/sepsis.md") where relevant.
 Write at senior-resident level. Be specific with drug names and doses.
 
+IMPORTANT: If the wiki pages do not contain sufficient information to answer this clinical question, leave immediate_actions empty and populate gap_entity, gap_page_path, and gap_missing_sections so the knowledge gap can be tracked and filled. Do not fabricate clinical guidance not supported by the wiki.
+
 Wiki pages:
 {context}"""
         tool = _CDS_TOOL
@@ -186,14 +201,30 @@ Wiki pages:
     gap_written = None
 
     if mode == "cds":
-        if answer_block:
-            inp = answer_block.input
-        else:
-            inp = {}
-        immediate_actions        = inp.get("immediate_actions", [])
-        clinical_reasoning       = inp.get("clinical_reasoning", [])
-        monitoring_followup      = inp.get("monitoring_followup", [])
+        if answer_block is None:
+            log.warning("CDS mode: no tool block returned after all retries — returning empty response")
+        inp = answer_block.input if answer_block else {}
+        immediate_actions          = inp.get("immediate_actions", [])
+        clinical_reasoning         = inp.get("clinical_reasoning", [])
+        monitoring_followup        = inp.get("monitoring_followup", [])
         alternative_considerations = inp.get("alternative_considerations", [])
+        gap_entity   = inp.get("gap_entity", "")
+        gap_page     = inp.get("gap_page_path", "")
+        gap_sections = inp.get("gap_missing_sections") or []
+
+        # Register knowledge gap when the wiki couldn't answer
+        gap_written = None
+        if gap_entity and gap_page and gap_sections:
+            try:
+                written = write_gap_files(
+                    [{"page": gap_page, "missing_sections": gap_sections}],
+                    kb,
+                    source_name=f"unanswered cds query: {question[:80]}",
+                )
+                gap_written = written[0] if written else None
+                log.info("CDS auto-registered gap: %s  sections=%s", gap_written, gap_sections)
+            except Exception as exc:
+                log.warning("Failed to write CDS gap from query: %s", exc)
 
         # Collect wiki links from all string fields
         all_text = " ".join(
@@ -210,8 +241,8 @@ Wiki pages:
             model=resolved_model,
             kb_name=kb.name,
         )
-        log.info("=== CHAT END (cds)  total_in=%d  total_out=%d  cost=$%.4f ===",
-                 total_input, total_output, cost)
+        log.info("=== CHAT END (cds)  gap=%s  total_in=%d  total_out=%d  cost=$%.4f ===",
+                 gap_written, total_input, total_output, cost)
         return {
             "mode": "cds",
             "answer": "",
@@ -225,9 +256,9 @@ Wiki pages:
             "output_tokens": total_output,
             "cost_usd": cost,
             "model": resolved_model,
-            "gap_registered": None,
-            "gap_entity": None,
-            "gap_sections": [],
+            "gap_registered": gap_written,
+            "gap_entity": gap_entity or None,
+            "gap_sections": gap_sections or [],
         }
 
     # ── QnA mode extraction ───────────────────────────────────────────────────

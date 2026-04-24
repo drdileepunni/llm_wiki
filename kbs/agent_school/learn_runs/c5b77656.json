@@ -4,17 +4,612 @@
   "encounter": "1",
   "slug": "INGJNADAAS1193_1",
   "kb_name": "agent_school",
-  "status": "running",
-  "current_phase": "ingesting",
+  "status": "stopped",
+  "current_phase": "stopped",
   "log": [
     {
       "phase": "ingesting",
       "message": "Ingesting timeline for INGJNADAAS1193_1…",
       "timestamp": "2026-04-23T17:20:12.997803"
+    },
+    {
+      "phase": "ingesting",
+      "message": "Ingested INGJNADAAS1193_1 — 88 pages, 25 KGs",
+      "timestamp": "2026-04-23T17:40:21.341782",
+      "pages_written": 88,
+      "kgs_found": 25,
+      "cost_usd": 0.27522075
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 1/25: Abg (3 articles)",
+      "timestamp": "2026-04-23T17:42:53.672370",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0089601
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 2/25: Bisacodyl (3 articles)",
+      "timestamp": "2026-04-23T17:44:38.055220",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.008503199999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 3/25: Braden Score (3 articles)",
+      "timestamp": "2026-04-23T17:46:17.142232",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.007088399999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 4/25: Cbc W Differential Panel (1 articles)",
+      "timestamp": "2026-04-23T17:46:50.014360",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0035368499999999994
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 5/25: Chest Physiotherapy (3 articles)",
+      "timestamp": "2026-04-23T17:48:08.623364",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0055674
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 6/25: Chlordiazepoxide (3 articles)",
+      "timestamp": "2026-04-23T17:49:18.063107",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0028813499999999995
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 7/25: Constipation (3 articles)",
+      "timestamp": "2026-04-23T17:51:16.999827",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.01179645
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 8/25: Crp (2 articles)",
+      "timestamp": "2026-04-23T17:52:45.617895",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.004100399999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 9/25: Ct Abdomen (1 articles)",
+      "timestamp": "2026-04-23T17:53:34.758548",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0038177999999999997
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 10/25: Cvc (3 articles)",
+      "timestamp": "2026-04-23T17:55:10.351657",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.01016865
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 11/25: Diclofenac (0 articles)",
+      "timestamp": "2026-04-23T17:55:35.474071",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0006806999999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 12/25: Heparin Benzyl Nicotinate Ointment (3 articles)",
+      "timestamp": "2026-04-23T17:56:54.135165",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0064145999999999995
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 13/25: Hrct Chest (3 articles)",
+      "timestamp": "2026-04-23T17:58:14.348058",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0075105
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 14/25: Hyperkalemia (3 articles)",
+      "timestamp": "2026-04-23T18:01:09.978156",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0070348500000000005
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 15/25: Incentive Spirometry (1 articles)",
+      "timestamp": "2026-04-23T18:01:40.757702",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0029363999999999996
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 16/25: Lactulose Enema (1 articles)",
+      "timestamp": "2026-04-23T18:02:31.393945",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00068655
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 17/25: Ng Og Tube Insertion (0 articles)",
+      "timestamp": "2026-04-23T18:02:56.485233",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0008288999999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 18/25: Non Invasive Ventilation (3 articles)",
+      "timestamp": "2026-04-23T18:05:14.455193",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0116145
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 19/25: Piperacillin Tazobactam (3 articles)",
+      "timestamp": "2026-04-23T18:06:51.916407",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.006572099999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 20/25: Piv (3 articles)",
+      "timestamp": "2026-04-23T18:08:17.203601",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.008616
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 21/25: Prone Positioning (3 articles)",
+      "timestamp": "2026-04-23T18:09:54.234567",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00892485
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 22/25: Renal Function Panel (0 articles)",
+      "timestamp": "2026-04-23T18:10:19.175381",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00073215
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 23/25: Respiratory Compromise (2 articles)",
+      "timestamp": "2026-04-23T18:11:33.515880",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00494865
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 24/25: Serum Ammonia (3 articles)",
+      "timestamp": "2026-04-23T18:12:42.078541",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.006708
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — gap 25/25: Tramadol (3 articles)",
+      "timestamp": "2026-04-23T18:14:02.740536",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00624195
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — resolved 25 gaps, ingested 56 articles",
+      "timestamp": "2026-04-23T18:14:02.741505",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "gaps_resolved": 25,
+      "articles_ingested": 56,
+      "cost_usd": 0.14687129999999993
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — running knowledge assessment…",
+      "timestamp": "2026-04-23T18:14:02.741930",
+      "iteration": 1,
+      "sub_phase": "assessing"
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 1 — assessment in_progress · 5 new KGs",
+      "timestamp": "2026-04-23T18:14:57.436761",
+      "iteration": 1,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 5,
+      "cost_usd": 0.00860565
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 1/8: Cvc (3 articles)",
+      "timestamp": "2026-04-23T18:16:21.988036",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0047046
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 2/8: Diclofenac (3 articles)",
+      "timestamp": "2026-04-23T18:17:53.535985",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.007214099999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 3/8: Enoxaparin (1 articles)",
+      "timestamp": "2026-04-23T18:18:30.530819",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00090135
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 4/8: Ng Og Tube Insertion (1 articles)",
+      "timestamp": "2026-04-23T18:19:36.203293",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0007971
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 5/8: Pancreatitis (3 articles)",
+      "timestamp": "2026-04-23T18:20:47.205273",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.008208149999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 6/8: Renal Function Panel (0 articles)",
+      "timestamp": "2026-04-23T18:21:14.900067",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00086655
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 7/8: Severe Acute Pancreatitis Antibiotic Management (3 articles)",
+      "timestamp": "2026-04-23T18:22:04.257033",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0066584999999999995
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — gap 8/8: Stemi Management (3 articles)",
+      "timestamp": "2026-04-23T18:23:16.120530",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0097983
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — resolved 8 gaps, ingested 17 articles",
+      "timestamp": "2026-04-23T18:23:16.121577",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "gaps_resolved": 8,
+      "articles_ingested": 17,
+      "cost_usd": 0.03914865
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — running knowledge assessment…",
+      "timestamp": "2026-04-23T18:23:16.122206",
+      "iteration": 2,
+      "sub_phase": "assessing"
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 2 — assessment in_progress · 4 new KGs",
+      "timestamp": "2026-04-23T18:24:20.221023",
+      "iteration": 2,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 4,
+      "cost_usd": 0.00891375
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — gap 1/5: Central Venous Catheter Indications (2 articles)",
+      "timestamp": "2026-04-23T18:25:23.654217",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00398625
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — gap 2/5: Constipation (1 articles)",
+      "timestamp": "2026-04-23T18:26:09.893284",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0011139
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — gap 3/5: Enoxaparin (0 articles)",
+      "timestamp": "2026-04-23T18:26:36.487187",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00026804999999999993
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — gap 4/5: Pancreatitis (1 articles)",
+      "timestamp": "2026-04-23T18:27:28.437488",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0022734
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — gap 5/5: Renal Function Panel (0 articles)",
+      "timestamp": "2026-04-23T18:27:50.936505",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0009439499999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — resolved 5 gaps, ingested 4 articles",
+      "timestamp": "2026-04-23T18:27:50.938457",
+      "iteration": 3,
+      "sub_phase": "resolving",
+      "gaps_resolved": 5,
+      "articles_ingested": 4,
+      "cost_usd": 0.008585549999999999
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — running knowledge assessment…",
+      "timestamp": "2026-04-23T18:27:50.939839",
+      "iteration": 3,
+      "sub_phase": "assessing"
+    },
+    {
+      "phase": "knowledge_loop",
+      "message": "Iter 3 — assessment in_progress · 4 new KGs",
+      "timestamp": "2026-04-23T18:28:47.069433",
+      "iteration": 3,
+      "sub_phase": "assessing",
+      "assessment_status": "in_progress",
+      "new_kgs": 4,
+      "cost_usd": 0.0076413
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 1/5 — running chat…",
+      "timestamp": "2026-04-23T18:28:47.079349",
+      "sub_phase": "assessing",
+      "iteration": 1
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 2/5 — running chat…",
+      "timestamp": "2026-04-23T18:29:46.476817",
+      "sub_phase": "assessing",
+      "iteration": 2
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 3/5 — running chat…",
+      "timestamp": "2026-04-23T18:29:48.917310",
+      "sub_phase": "assessing",
+      "iteration": 3
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 4/5 — running chat…",
+      "timestamp": "2026-04-23T18:29:51.780245",
+      "sub_phase": "assessing",
+      "iteration": 4
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 5/5 — running chat…",
+      "timestamp": "2026-04-23T18:30:52.645562",
+      "sub_phase": "assessing",
+      "iteration": 5
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — 1 KGs registered, 1 genuinely new",
+      "timestamp": "2026-04-23T18:31:54.500433",
+      "iteration": 1,
+      "sub_phase": "assessing",
+      "new_kgs": 1,
+      "genuinely_new": 1,
+      "plateau": 0
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 1/6: Constipation (0 articles)",
+      "timestamp": "2026-04-23T18:32:10.795332",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0003054
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 2/6: Enoxaparin (0 articles)",
+      "timestamp": "2026-04-23T18:32:29.173008",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00018915000000000002
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 3/6: Fluid Resuscitation In Acute Pancreatitis (3 articles)",
+      "timestamp": "2026-04-23T18:33:21.113766",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0071457
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 4/6: Pressure Injury Prevention Protocols (3 articles)",
+      "timestamp": "2026-04-23T18:35:07.984834",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00722715
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 5/6: Renal Function Panel (3 articles)",
+      "timestamp": "2026-04-23T18:37:18.007695",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.008986049999999999
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — gap 6/6: System 2025 10 19 Timeline Acute Pancreatitis (0 articles)",
+      "timestamp": "2026-04-23T18:37:44.668304",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "cost_usd": 0.000867
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 1 — resolved 6 gaps",
+      "timestamp": "2026-04-23T18:37:44.671404",
+      "iteration": 1,
+      "sub_phase": "resolving",
+      "gaps_resolved": 6,
+      "articles_ingested": 9,
+      "cost_usd": 0.024720449999999998
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 1/5 — running chat…",
+      "timestamp": "2026-04-23T18:37:44.674373",
+      "sub_phase": "assessing",
+      "iteration": 1
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 2/5 — running chat…",
+      "timestamp": "2026-04-23T18:38:33.218658",
+      "sub_phase": "assessing",
+      "iteration": 2
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 3/5 — running chat…",
+      "timestamp": "2026-04-23T18:39:31.991065",
+      "sub_phase": "assessing",
+      "iteration": 3
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 4/5 — running chat…",
+      "timestamp": "2026-04-23T18:40:35.986223",
+      "sub_phase": "assessing",
+      "iteration": 4
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 5/5 — running chat…",
+      "timestamp": "2026-04-23T18:41:37.599542",
+      "sub_phase": "assessing",
+      "iteration": 5
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — 1 KGs registered, 1 genuinely new",
+      "timestamp": "2026-04-23T18:41:49.009059",
+      "iteration": 2,
+      "sub_phase": "assessing",
+      "new_kgs": 1,
+      "genuinely_new": 1,
+      "plateau": 0
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — gap 1/4: A (0 articles)",
+      "timestamp": "2026-04-23T18:42:04.855040",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 6.795e-05
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — gap 2/4: Constipation (1 articles)",
+      "timestamp": "2026-04-23T18:42:51.788945",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0005101499999999999
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — gap 3/4: Enoxaparin (0 articles)",
+      "timestamp": "2026-04-23T18:43:09.719520",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.00021795
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — gap 4/4: System 2025 10 19 Timeline Acute Pancreatitis (3 articles)",
+      "timestamp": "2026-04-23T18:45:05.116414",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "cost_usd": 0.0072216
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Iter 2 — resolved 4 gaps",
+      "timestamp": "2026-04-23T18:45:05.117920",
+      "iteration": 2,
+      "sub_phase": "resolving",
+      "gaps_resolved": 4,
+      "articles_ingested": 4,
+      "cost_usd": 0.00801765
+    },
+    {
+      "phase": "clinical_loop",
+      "message": "Snapshot 1/5 — running chat…",
+      "timestamp": "2026-04-23T18:45:05.119281",
+      "sub_phase": "assessing",
+      "iteration": 1
+    },
+    {
+      "phase": "stopped",
+      "message": "Run stopped by user (server restart recovery)",
+      "timestamp": "2026-04-23T19:04:54.601834"
     }
   ],
-  "total_cost_usd": 0.0,
+  "total_cost_usd": 0.5495901,
   "started_at": "2026-04-23T17:20:12.995945",
-  "completed_at": null,
+  "completed_at": "2026-04-23T19:04:54.601802",
   "error": null
 }

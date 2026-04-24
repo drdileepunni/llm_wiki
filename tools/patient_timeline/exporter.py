@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
+
+from .lib.mongo_cache import is_cached, store_export
 
 logger = logging.getLogger(__name__)
 
@@ -80,28 +83,36 @@ def export(
     gcp_zone: str,
     remote_env_file: str,
     docker_image: str,
-) -> Path:
+) -> None:
     """
-    Export patient data from the GCP VM into a local cache directory.
+    Export patient data from the GCP VM and store it in MongoDB.
 
-    Returns the local directory containing patients.json, tasks.json, chat.json.
-    Skips the export (no SSH) if all three files are already cached locally.
+    Downloads patients.json / tasks.json / chat.json into a temporary local
+    directory, upserts them into the local MongoDB (emr-local), then deletes
+    the downloaded files.  The remote VM is left completely clean.
 
-    The remote VM is left completely clean — a mktemp dir is created at the
-    start and deleted at the end.
+    Skips the export entirely (no SSH) if MongoDB already holds data for this
+    CPMRN + encounter.
+
+    Args:
+        local_cache_dir: Ignored (kept for API compatibility).
+
+    Returns:
+        None  — callers should load data via mongo_cache.load_for_timeline().
     """
-    slug      = f"{cpmrn}_{encounter}"
-    local_out = local_cache_dir / slug
+    slug = f"{cpmrn}_{encounter}"
 
-    # ── Cache check ────────────────────────────────────────────────────────────
-    if local_out.is_dir() and _REQUIRED_FILES <= {f.name for f in local_out.iterdir()}:
-        logger.info("  [cache] %s already cached – skipping GCP export", slug)
-        return local_out
-
-    local_out.mkdir(parents=True, exist_ok=True)
+    # ── Cache check (MongoDB) ──────────────────────────────────────────────────
+    if is_cached(cpmrn, encounter):
+        logger.info("  [cache] %s already in MongoDB – skipping GCP export", slug)
+        return None
 
     instance = gcp_instance
     zone     = gcp_zone
+
+    # Use a proper temp directory; files are deleted after loading to MongoDB.
+    tmp_local = Path(tempfile.mkdtemp(prefix=f"timeline_{slug}_"))
+    local_out = tmp_local
 
     # ── Step 1: Set GCP project ────────────────────────────────────────────────
     _run(
@@ -148,7 +159,7 @@ def export(
             )
 
     finally:
-        # ── Step 6: Cleanup temp dir (always, even on failure) ────────────────
+        # ── Step 6: Cleanup remote temp dir (always, even on failure) ─────────
         try:
             _ssh(instance, zone, f"rm -rf {tmp}", desc="cleanup remote tmp dir")
         except Exception as cleanup_exc:
@@ -160,5 +171,16 @@ def export(
             f"Export appeared to succeed but files are missing: {missing}"
         )
 
-    logger.info("  [export] %s → %s", slug, local_out)
-    return local_out
+    # ── Step 7: Load JSON files into MongoDB, then delete them ────────────────
+    logger.info("  [export] %s → loading into MongoDB …", slug)
+    store_export(local_out, cpmrn, encounter)
+
+    # Clean up the local temp directory (store_export deletes the JSON files
+    # and rmdir's the directory if empty; this is a safety net).
+    try:
+        tmp_local.rmdir()
+    except OSError:
+        pass
+
+    logger.info("  [export] %s → stored in MongoDB, local files deleted", slug)
+    return None

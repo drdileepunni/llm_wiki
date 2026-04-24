@@ -268,6 +268,25 @@ def mop_up_wiki_structure(kb: "KBConfig") -> list[str]:
 
 # ── File executor ───────────────────────────────────────────────────────────────
 
+def _is_patient_specific(path: str, patient_dir: str) -> bool:
+    """True if this path should live under wiki/patients/{patient_dir}/.
+
+    Only patient bookkeeping (index.md, log.md) and pages whose filename
+    contains the patient CPMRN belong in the patient folder.  Generic clinical
+    knowledge (entities, concepts, etc.) always goes into the shared wiki.
+    """
+    p = Path(path)
+    stem = p.stem.lower()
+    name = p.name.lower()
+    # CPMRN is the part before the first underscore (encounter separator)
+    cpmrn = patient_dir.split("_")[0].lower()
+
+    if name in ("index.md", "log.md"):
+        return True
+    # source pages and entity pages named after the patient
+    return cpmrn in stem
+
+
 def _normalise_path(path: str) -> str:
     """
     Ensure the path starts with wiki/.
@@ -532,6 +551,23 @@ Source file: {source_ref}
     summary        = plan.get("summary", "")
     file_plan      = plan.get("files", [])
     knowledge_gaps = plan.get("knowledge_gaps", [])
+
+    # Skip op=write for files that already exist — they'll be enriched via KG gaps instead.
+    # Always skip index.md — sync_index owns it deterministically after every ingest.
+    skipped = []
+    filtered_plan = []
+    for f in file_plan:
+        path_check = _normalise_path(f.get("path", ""))
+        if Path(path_check).name == "index.md":
+            skipped.append(path_check)
+        elif f.get("op") == "write" and (kb.wiki_root / path_check).exists():
+            skipped.append(path_check)
+        else:
+            filtered_plan.append(f)
+    if skipped:
+        log.info("Skipping %d file(s) (index or already-existing): %s", len(skipped), skipped)
+    file_plan = filtered_plan
+
     log.info("Plan received: %d files to write  summary=%r", len(file_plan), summary[:120])
     for i, f in enumerate(file_plan):
         raw_kp = f.get("key_points", "")
@@ -633,11 +669,15 @@ Return the COMPLETE file content — never truncate."""
             content = write_block.input.get("content", "")
             log.info("  Content length: %d chars → executing op=%s", len(content), op)
 
-            # Reroute patient-specific pages to wiki/patients/{patient_dir}/
-            # so they never land in the general-knowledge wiki sections
+            # Reroute patient-specific pages to wiki/patients/{patient_dir}/.
+            # Generic clinical knowledge (entities, concepts not named after the
+            # patient) stays in the shared wiki sections.
             if patient_dir and path.startswith("wiki/"):
-                path = f"wiki/patients/{patient_dir}/{path[len('wiki/'):]}"
-                log.info("  Patient page rerouted → %s", path)
+                if _is_patient_specific(path, patient_dir):
+                    path = f"wiki/patients/{patient_dir}/{path[len('wiki/'):]}"
+                    log.info("  Patient page rerouted → %s", path)
+                else:
+                    log.info("  Generic page — keeping in shared wiki: %s", path)
 
             diff    = compute_diff(path, content, op, kb)
             execute_file_op(path, content, op, kb, section)

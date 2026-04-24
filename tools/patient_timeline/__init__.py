@@ -138,12 +138,10 @@ def generate(
 
     # ── Step 0: Export ────────────────────────────────────────────────────────
     if json_dir is None:
-        logger.info("[%s] Step 0 – exporting from GCP …", slug)
+        logger.info("[%s] Step 0 – exporting from GCP → MongoDB …", slug)
         from .exporter import export
-        json_dir = export(
-            cpmrn, encounter, cache_root,
-            **gcp_kw,
-        )
+        export(cpmrn, encounter, cache_root, **gcp_kw)
+        # json_dir stays None; build() will load from MongoDB
     else:
         json_dir = Path(json_dir)
         logger.info("[%s] Step 0 – using local json_dir: %s", slug, json_dir)
@@ -152,7 +150,7 @@ def generate(
     if force or not full_csv.exists():
         logger.info("[%s] Step 1 – building full timeline …", slug)
         from .timeline import build
-        build(json_dir, cpmrn, full_csv, gemini_enabled=gemini_notes)
+        build(json_dir, cpmrn, full_csv, encounter=encounter, gemini_enabled=gemini_notes)
     else:
         logger.info("[%s] Step 1 – full timeline already exists, skipping", slug)
 

@@ -13,6 +13,7 @@ import {
   listClinicalAssessments,
   getClinicalAssessment,
   listAvailablePatients,
+  listPatientSnapshots,
   rateSnapshotApi,
   saveRunComment,
   deleteClinicalAssessment,
@@ -337,7 +338,9 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
   const [gaps, setGaps] = useState(initGaps)
   const [gapInput, setGapInput] = useState('')
   const [gapsSaving, setGapsSaving] = useState(false)
-  const hasAnswer = !!(snap.agent_answer || snap.immediate_actions?.length)
+  const hasGapOnly = !!(snap.gap_entity && !snap.immediate_actions?.length && !snap.agent_answer)
+  const hasGapAlso = !!(snap.gap_entity && (snap.immediate_actions?.length || snap.agent_answer))
+  const hasAnswer = !!(snap.agent_answer || snap.immediate_actions?.length || snap.gap_entity)
 
   const handleRate = async (n) => {
     setSaving(true)
@@ -389,14 +392,24 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-4 py-3 bg-ink-900 hover:bg-ink-800 transition-colors text-left"
       >
-        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-ink-700 border border-border text-xs font-mono text-muted flex items-center justify-center">
-          {snap.snapshot_num}
+        <span className={`flex-shrink-0 rounded-full bg-ink-700 border border-border text-xs font-mono text-muted flex items-center justify-center ${snap.snapshot_num === 0 ? 'px-2 h-6' : 'w-6 h-6'}`}>
+          {snap.snapshot_num === 0 ? (snap.snapshot_dir?.replace('_', ' ') || 'demo') : snap.snapshot_num}
         </span>
         <div className="flex-1 flex items-center gap-2 flex-wrap">
           <PhaseBadge phase={snap.phase} />
           <DifficultyBadge difficulty={snap.difficulty} />
           {!hasAnswer && (
             <span className="text-xs text-muted italic">Not yet run</span>
+          )}
+          {hasGapOnly && (
+            <span className="text-xs text-orange-400/80 bg-orange-950/20 border border-orange-800/40 rounded px-1.5 py-0.5 font-mono">
+              KG registered
+            </span>
+          )}
+          {hasGapAlso && (
+            <span className="text-xs text-yellow-400/70 bg-yellow-950/20 border border-yellow-800/30 rounded px-1.5 py-0.5 font-mono">
+              + KG filed
+            </span>
           )}
         </div>
         {isOpen
@@ -448,6 +461,46 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
             <p className="text-sm text-muted italic">Run the assessment to get an answer.</p>
           ) : (
             <>
+              {/* Gap-only response */}
+              {hasGapOnly && (
+                <div className="mb-4 rounded-lg border border-orange-800/40 bg-orange-950/20 px-4 py-3">
+                  <p className="text-xs font-semibold text-orange-400 uppercase tracking-wide mb-1">
+                    Knowledge Gap Registered
+                  </p>
+                  <p className="text-sm text-white/80">
+                    The wiki does not have sufficient information to answer this question.
+                    A knowledge gap has been registered for <span className="font-mono text-orange-300">{snap.gap_entity}</span> and will be resolved in the next learning cycle.
+                  </p>
+                  {snap.gap_sections?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {snap.gap_sections.map((s, i) => (
+                        <span key={i} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-orange-950/40 border border-orange-800/30 text-orange-300/80">{s}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Gap registered alongside an answer */}
+              {hasGapAlso && (
+                <div className="mb-4 rounded-lg border border-yellow-800/30 bg-yellow-950/10 px-4 py-3">
+                  <p className="text-xs font-semibold text-yellow-400/80 uppercase tracking-wide mb-1">
+                    Knowledge Gap Filed
+                  </p>
+                  <p className="text-xs text-white/70">
+                    Wiki lacked complete information on <span className="font-mono text-yellow-300">{snap.gap_entity}</span>.
+                    A gap was registered and will be resolved in the next learning cycle.
+                  </p>
+                  {snap.gap_sections?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {snap.gap_sections.map((s, i) => (
+                        <span key={i} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-yellow-950/40 border border-yellow-800/30 text-yellow-300/80">{s}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Side-by-side answers */}
               <div className="grid grid-cols-2 gap-4 mb-4">
                 {/* Agent answer */}
@@ -620,6 +673,7 @@ function RunPanel({ activeKB, onRunDone }) {
   const [selectedPatient, setSelectedPatient] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedSnapshot, setSelectedSnapshot] = useState('')
+  const [availableSnapshots, setAvailableSnapshots] = useState([])
   const [usePatientContext, setUsePatientContext] = useState(false)
   const [running, setRunning] = useState(false)
   const [jobId, setJobId] = useState(null)
@@ -635,12 +689,19 @@ function RunPanel({ activeKB, onRunDone }) {
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    if (!selectedPatient) { setAvailableSnapshots([]); return }
+    listPatientSnapshots(selectedPatient)
+      .then(data => setAvailableSnapshots(data.snapshots || []))
+      .catch(() => setAvailableSnapshots([]))
+  }, [selectedPatient])
+
   const handleRun = async () => {
     if (!selectedPatient) return
     setRunning(true)
     setError(null)
     try {
-      const snapNum = selectedSnapshot ? parseInt(selectedSnapshot, 10) : null
+      const snapNum = selectedSnapshot !== '' ? parseInt(selectedSnapshot, 10) : null
       const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext)
       setJobId(job_id)
     } catch (err) {
@@ -703,8 +764,8 @@ function RunPanel({ activeKB, onRunDone }) {
         className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
       >
         <option value="">All snapshots</option>
-        {[1, 2, 3, 4, 5].map(n => (
-          <option key={n} value={n}>Snapshot {n}</option>
+        {availableSnapshots.map(s => (
+          <option key={s.num} value={s.num}>{s.label}</option>
         ))}
       </select>
       {/* Patient context toggle */}

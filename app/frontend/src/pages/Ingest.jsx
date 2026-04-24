@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
-import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus, resolveAll, resolveBatchStatus } from '../api'
+import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus, resolveAll, resolveBatchStatus, deleteGap } from '../api'
 import CostBadge from '../components/CostBadge'
 import ResolveModal from '../components/ResolveModal'
 import { useAppState } from '../AppStateContext'
@@ -173,6 +173,7 @@ export default function Ingest() {
   const { activeKB } = useAppState()
 
   const [gaps, setGaps]               = useState([])
+  const [deletingGap, setDeletingGap] = useState(null)
   const [resolveGap, setResolveGap]   = useState(null)
   const [jobs, setJobs]               = useState([])
   const [batchId, setBatchId]         = useState(null)
@@ -215,6 +216,19 @@ export default function Ingest() {
     }, 3000)
     return () => clearInterval(iv)
   }, [batchId])
+
+  const handleDeleteGap = async (gap) => {
+    const stem = gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title
+    setDeletingGap(stem)
+    try {
+      await deleteGap(stem, activeKB)
+      setGaps(prev => prev.filter(g => g.file !== gap.file))
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setDeletingGap(null)
+    }
+  }
 
   const handleResolveAll = async () => {
     try {
@@ -506,12 +520,22 @@ export default function Ingest() {
                     <div key={i} className="p-4 bg-amber-950/20 border border-amber-800/30 rounded-xl">
                       <div className="flex items-start justify-between gap-3 mb-2">
                         <p className="text-sm font-semibold text-amber-300">{gap.title}</p>
-                        <button
-                          onClick={() => setResolveGap(gap)}
-                          className="flex-shrink-0 px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium"
-                        >
-                          Resolve
-                        </button>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <button
+                            onClick={() => setResolveGap(gap)}
+                            className="px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium"
+                          >
+                            Resolve
+                          </button>
+                          <button
+                            onClick={() => handleDeleteGap(gap)}
+                            disabled={deletingGap === (gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title)}
+                            className="w-6 h-6 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 border border-transparent hover:border-red-800/40 transition-all disabled:opacity-40 text-sm leading-none"
+                            title="Delete gap"
+                          >
+                            ×
+                          </button>
+                        </div>
                       </div>
                       <p className="text-xs text-muted font-mono mb-2">{gap.referenced_page}</p>
                       <div className="flex flex-wrap gap-1">

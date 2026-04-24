@@ -5,8 +5,9 @@ import {
   ClockIcon,
   ExclamationCircleIcon,
   ArrowPathIcon,
+  StopIcon,
 } from '@heroicons/react/24/outline'
-import { startLearnRun, learnJobStatus, listLearnRuns } from '../api'
+import { startLearnRun, learnJobStatus, listLearnRuns, cancelLearnRun } from '../api'
 import { useAppState } from '../AppStateContext'
 
 // ── Status config ─────────────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ const STATUS_CONFIG = {
   running:  { label: 'Running',  classes: 'text-amber-400 bg-amber-950/20 border-amber-800/40',  Icon: ClockIcon },
   complete: { label: 'Complete', classes: 'text-green-400 bg-green-950/20 border-green-800/40',  Icon: CheckCircleIcon },
   error:    { label: 'Error',    classes: 'text-red-400   bg-red-950/20   border-red-800/40',    Icon: ExclamationCircleIcon },
+  stopped:  { label: 'Stopped',  classes: 'text-slate-400 bg-slate-900/30 border-slate-700/40',  Icon: StopIcon },
 }
 
 function StatusBadge({ status }) {
@@ -269,6 +271,26 @@ export default function Learn() {
   }
 
   const isRunning = detail?.status === 'running'
+  const [stopping, setStopping] = useState(false)
+
+  const handleStop = async () => {
+    if (!detail?.run_id || stopping) return
+    setStopping(true)
+    try {
+      await cancelLearnRun(detail.run_id)
+      // keep stopping=true; the poll will clear it once status changes from 'running'
+    } catch (err) {
+      console.error(err)
+      setStopping(false)
+    }
+  }
+
+  // Clear stopping flag once the run is no longer running
+  useEffect(() => {
+    if (detail?.status && detail.status !== 'running') {
+      setStopping(false)
+    }
+  }, [detail?.status])
 
   return (
     <div className="flex h-full">
@@ -340,10 +362,20 @@ export default function Learn() {
                 </div>
               </div>
               {isRunning && (
-                <span className="flex items-center gap-1.5 text-xs text-amber-400 flex-shrink-0">
-                  <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" />
-                  Polling every 5s…
-                </span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                    <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" />
+                    Running…
+                  </span>
+                  <button
+                    onClick={handleStop}
+                    disabled={stopping}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-red-800/60 bg-red-950/30 text-red-400 text-xs hover:bg-red-900/40 hover:border-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <StopIcon className="w-3.5 h-3.5" />
+                    {stopping ? 'Stopping…' : 'Stop'}
+                  </button>
+                </div>
               )}
             </div>
 

@@ -49,7 +49,11 @@ DOCKER_IMAGE: str = os.environ.get(
 REMOTE_HOME:     str = f"/home/{GCP_REMOTE_USER}"
 REMOTE_ENV_FILE: str = f"{REMOTE_HOME}/.env"
 
+# ── MongoDB (local) ────────────────────────────────────────────────────────────
+MONGO_URI: str = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+DB_NAME:   str = os.environ.get("DB_NAME",   "emr-local")
+
 # ── Local paths ────────────────────────────────────────────────────────────────
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 DEFAULT_OUTPUT_DIR: Path = REPO_ROOT / "timelines"
-DEFAULT_CACHE_DIR:  Path = REPO_ROOT / ".timeline_cache"  # raw JSON downloads
+DEFAULT_CACHE_DIR:  Path = REPO_ROOT / ".timeline_cache"  # kept for API compat
