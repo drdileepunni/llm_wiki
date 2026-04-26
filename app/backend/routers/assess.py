@@ -25,6 +25,7 @@ from ..services.assess_pipeline import (
     load_assessment,
     rate_question,
     run_assessment,
+    update_question_text,
 )
 
 log = logging.getLogger("wiki.assess")
@@ -47,6 +48,11 @@ class GenerateRequest(BaseModel):
 class RateRequest(BaseModel):
     question_id: int
     rating:      bool | None
+
+
+class EditQuestionRequest(BaseModel):
+    question_id: int
+    question:    str
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -116,6 +122,20 @@ async def run_assessment_endpoint(
     }
     background_tasks.add_task(_do_run, job_id, source_slug, kb)
     return {"job_id": job_id}
+
+
+@router.patch("/{source_slug}/questions")
+def edit_question_endpoint(
+    source_slug: str,
+    req: EditQuestionRequest,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    try:
+        return update_question_text(source_slug, req.question_id, req.question, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No assessment for {source_slug!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/{source_slug}/rate")

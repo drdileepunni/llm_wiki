@@ -45,6 +45,7 @@ class LLMToolUseBlock:
     type: str = "tool_use"
     name: str = ""
     input: dict = field(default_factory=dict)
+    id: str = ""
 
 
 @dataclass
@@ -132,7 +133,7 @@ class AnthropicLLMClient:
         content = []
         for block in raw.content:
             if block.type == "tool_use":
-                content.append(LLMToolUseBlock(name=block.name, input=block.input))
+                content.append(LLMToolUseBlock(name=block.name, input=block.input, id=block.id))
             else:
                 content.append(LLMTextBlock(text=getattr(block, "text", "")))
 
@@ -274,16 +275,35 @@ class GeminiLLMClient:
             role = "model" if msg["role"] == "assistant" else "user"
             content = msg["content"]
             if isinstance(content, list):
-                import base64
+                import base64, json as _json
                 parts = []
                 for block in content:
-                    if block.get("type") == "image":
+                    btype = block.get("type")
+                    if btype == "image":
                         src = block["source"]
                         img_bytes = base64.b64decode(src["data"])
                         parts.append(types.Part.from_bytes(data=img_bytes, mime_type=src.get("media_type", "image/jpeg")))
-                    elif block.get("type") == "text":
+                    elif btype == "text":
                         parts.append(types.Part(text=block["text"]))
-                gemini_contents.append(types.Content(role=role, parts=parts))
+                    elif btype == "tool_use":
+                        # assistant calling a function
+                        parts.append(types.Part(function_call=types.FunctionCall(
+                            name=block["name"],
+                            args=block.get("input", {}),
+                        )))
+                    elif btype == "tool_result":
+                        # user returning a function result
+                        raw_content = block.get("content", "")
+                        try:
+                            response_data = _json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                        except Exception:
+                            response_data = {"output": raw_content}
+                        parts.append(types.Part(function_response=types.FunctionResponse(
+                            name=block.get("name", "tool"),
+                            response=response_data,
+                        )))
+                if parts:
+                    gemini_contents.append(types.Content(role=role, parts=parts))
             else:
                 gemini_contents.append(
                     types.Content(role=role, parts=[types.Part(text=content)])
@@ -298,7 +318,14 @@ class GeminiLLMClient:
         # Attempt 1: ANY mode, thinking disabled (most reliable for tool calls)
         # Attempt 2: AUTO mode + temperature=0  (lets model choose text vs tool)
         # Attempt 3: no tools, pure text + JSON extraction in caller
-        no_thinking = types.ThinkingConfig(thinking_budget=0) if fn_decls else thinking_cfg
+        # If caller explicitly set thinking_budget, honour it for all models.
+        # Otherwise disable thinking when tools are present (most reliable for tool calls),
+        # except gemini-2.5-pro which rejects budget=0 entirely.
+        _requires_thinking = "2.5-pro" in self.model
+        if fn_decls and thinking_budget is None and not _requires_thinking:
+            no_thinking = types.ThinkingConfig(thinking_budget=0)
+        else:
+            no_thinking = thinking_cfg  # None → omitted, or caller-specified budget
 
         def _make_config(attempt: int) -> "types.GenerateContentConfig":
             if attempt == 1:
@@ -386,7 +413,7 @@ class GeminiLLMClient:
             fc = getattr(part, "function_call", None)
             if fc and getattr(fc, "name", None):
                 args = _to_python(dict(fc.args) if hasattr(fc.args, "items") else fc.args)
-                content.append(LLMToolUseBlock(name=fc.name, input=args))
+                content.append(LLMToolUseBlock(name=fc.name, input=args, id=f"gemini_{fc.name}"))
                 stop_reason = "tool_use"
             elif getattr(part, "text", None):
                 content.append(LLMTextBlock(text=part.text))

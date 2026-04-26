@@ -38,6 +38,7 @@ _jobs: dict[str, dict] = {}
 class RunRequest(BaseModel):
     patient_id: str
     model: str | None = None
+    reasoning_model: str | None = None
     snapshot_num: int | None = None  # None = run all
     use_patient_context: bool = False
 
@@ -130,13 +131,13 @@ async def run_endpoint(
 ):
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {"status": "running", "patient_id": req.patient_id, "result": None, "error": None}
-    background_tasks.add_task(_do_run, job_id, req.patient_id, kb, req.model, req.snapshot_num, req.use_patient_context)
+    background_tasks.add_task(_do_run, job_id, req.patient_id, kb, req.model, req.reasoning_model, req.snapshot_num, req.use_patient_context)
     return {"job_id": job_id}
 
 
-async def _do_run(job_id: str, patient_id: str, kb: KBConfig, model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False):
+async def _do_run(job_id: str, patient_id: str, kb: KBConfig, model: str | None = None, reasoning_model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False):
     try:
-        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb, model, snapshot_num, use_patient_context)
+        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb, model, snapshot_num, use_patient_context, reasoning_model)
         _jobs[job_id] = {"status": "done", "patient_id": patient_id, "result": result, "error": None}
     except Exception as exc:
         log.error("Clinical assessment failed for %r: %s", patient_id, exc)

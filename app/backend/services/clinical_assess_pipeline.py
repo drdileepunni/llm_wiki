@@ -272,7 +272,7 @@ def list_clinical_assessments(kb: KBConfig) -> list[dict]:
     return results
 
 
-def run_clinical_assessment(patient_id: str, kb: KBConfig, model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False) -> dict:
+def run_clinical_assessment(patient_id: str, kb: KBConfig, model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False, reasoning_model: str | None = None) -> dict:
     """
     Run the clinical case assessment for all snapshots for patient_id.
     Each call creates a new timestamped run under assessments/clinical/{patient_id}/.
@@ -307,13 +307,16 @@ def run_clinical_assessment(patient_id: str, kb: KBConfig, model: str | None = N
 
         # ── Step 2: Pass summary + question to wiki chat (CDS mode) ──────────
         question = f"{summary}\n\nQuestion: {snap['question']}"
-        result = run_chat(question=question, kb=kb, model=model, exclude_pattern=exclude_pat, mode="cds", include_patient_context=use_patient_context)
+        result = run_chat(question=question, kb=kb, model=model, exclude_pattern=exclude_pat, mode="cds", include_patient_context=use_patient_context, reasoning_model=reasoning_model)
         if run_model is None:
             run_model = result["model"]
 
         snap["timeline_summary"]          = summary
         snap["agent_answer"]              = result["answer"]
-        snap["immediate_actions"]         = result.get("immediate_actions", [])
+        snap["immediate_next_steps"]      = result.get("immediate_next_steps", [])
+        snap["clinical_direction"]        = result.get("clinical_direction", [])
+        snap["immediate_actions"]         = result.get("clinical_direction", [])  # backward compat
+        snap["specific_parameters"]       = result.get("specific_parameters", [])
         snap["agent_clinical_reasoning"]  = result.get("clinical_reasoning", [])
         snap["monitoring_followup"]       = result.get("monitoring_followup", [])
         snap["alternative_considerations"]= result.get("alternative_considerations", [])

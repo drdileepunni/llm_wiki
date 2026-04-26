@@ -23,6 +23,7 @@ from ..services.ingest_pipeline import (
     compute_diff,
     execute_file_op,
     resolve_gap_sections,
+    _normalise_path,
 )
 from ..services.llm_client import get_llm_client
 from ..services.token_tracker import log_call
@@ -88,6 +89,11 @@ def fill_sections(
     """
     if kb is None:
         kb = _default_kb()
+
+    # Normalize the path so the existence check and the write use the same location.
+    # execute_file_op calls _normalise_path internally, so without this the read
+    # would check kbs/kb/entities/foo.md while the write goes to kbs/kb/wiki/entities/foo.md.
+    target_page_path = _normalise_path(target_page_path)
 
     llm = get_llm_client()
     log.info(
@@ -176,6 +182,37 @@ Instructions:
     sections_filled  = fill_block.input.get("sections_filled", [])
     log.info("Sections filled: %s  content_length=%d", sections_filled, len(new_content))
 
+    # ── Quality gate: reject near-empty fills ─────────────────────────────────
+    # Strip frontmatter to measure actual prose content added.
+    # A real section needs at least ~200 chars of prose — anything less means the
+    # source article didn't actually cover this topic and the model had nothing to write.
+    MIN_PROSE_CHARS = 200
+    prose = new_content
+    if prose.startswith("---"):
+        end = prose.find("---", 3)
+        prose = prose[end + 3:] if end != -1 else prose
+    net_added = len(prose.strip()) - len(existing_content.strip())
+
+    if net_added < MIN_PROSE_CHARS:
+        log.warning(
+            "Fill rejected — net prose added (%d chars) below threshold (%d). "
+            "Source article likely did not cover this topic. Gap kept open.",
+            net_added, MIN_PROSE_CHARS,
+        )
+        cost = log_call("fill_sections", gap_title, total_in, total_out, model=MODEL, kb_name=kb.name)
+        return {
+            "summary":       f"Fill skipped for {gap_title} — insufficient content from source (net +{net_added} chars)",
+            "files_written": [],
+            "diffs":         [],
+            "errors":        [f"Source did not cover topic adequately (net +{net_added} chars added)"],
+            "knowledge_gaps": [],
+            "gap_files_written": [],
+            "input_tokens":  total_in,
+            "output_tokens": total_out,
+            "cost_usd":      cost,
+            "model":         MODEL,
+        }
+
     # ── Write the updated page ────────────────────────────────────────────────
     op   = "update" if existing_content else "write"
     diff = compute_diff(target_page_path, new_content, op, kb)
@@ -196,7 +233,6 @@ Instructions:
             resolve_gap_sections(gap_file_path, sections_filled, kb)
             log.info("Gap sections resolved: %s", sections_filled)
         else:
-            # All sections were addressed — delete the gap file entirely
             gap_path.unlink()
             log.info("Gap file deleted: %s", gap_file_path)
 

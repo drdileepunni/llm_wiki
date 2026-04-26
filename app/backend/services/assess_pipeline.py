@@ -234,6 +234,33 @@ def run_assessment(source_slug: str, kb: KBConfig | None = None) -> dict:
     return assessment
 
 
+def update_question_text(
+    source_slug: str,
+    question_id: int,
+    new_text: str,
+    kb: KBConfig | None = None,
+) -> dict:
+    if kb is None:
+        kb = _default_kb()
+
+    new_text = new_text.strip()
+    if not new_text:
+        raise ValueError("Question text cannot be empty")
+
+    assessment = load_assessment(source_slug, kb)
+    for q in assessment["questions"]:
+        if q["id"] == question_id:
+            q["question"] = new_text
+            break
+    else:
+        raise ValueError(f"Question {question_id} not found in assessment {source_slug!r}")
+
+    _assessment_path(source_slug, kb).write_text(
+        json.dumps(assessment, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return assessment
+
+
 def rate_question(
     source_slug: str,
     question_id: int,

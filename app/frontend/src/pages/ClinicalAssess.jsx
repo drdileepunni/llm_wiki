@@ -17,6 +17,7 @@ import {
   rateSnapshotApi,
   saveRunComment,
   deleteClinicalAssessment,
+  generateOrders,
 } from '../api'
 import CostBadge from '../components/CostBadge'
 import { useAppState } from '../AppStateContext'
@@ -56,6 +57,29 @@ const mdComponents = {
   strong({ children }) { return <strong className="font-semibold text-white">{children}</strong> },
 }
 
+// ── Accordion ─────────────────────────────────────────────────────────────────
+
+function Accordion({ label, badge, badgeCls, borderCls, bgCls, labelCls, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className={`rounded-lg border ${borderCls} ${bgCls}`}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left"
+      >
+        {open
+          ? <ChevronDownIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />
+          : <ChevronRightIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />}
+        <span className={`text-[9px] uppercase tracking-widest font-semibold ${labelCls}`}>{label}</span>
+        {badge && (
+          <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${badgeCls}`}>{badge}</span>
+        )}
+      </button>
+      {open && <div className="px-3 pb-3">{children}</div>}
+    </div>
+  )
+}
+
 // ── Available models ──────────────────────────────────────────────────────────
 
 const AVAILABLE_MODELS = [
@@ -65,6 +89,13 @@ const AVAILABLE_MODELS = [
   { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
   { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+]
+
+const REASONING_MODELS = [
+  { value: '', label: 'Same as grounding model' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
 ]
 
@@ -326,11 +357,76 @@ function PatientGroup({ patientId, runs, selectedRunId, onSelect, onDelete }) {
   )
 }
 
+// ── Order card (mirrors OrderGenerator.jsx) ───────────────────────────────────
+
+const ORDER_TYPE_COLORS = {
+  med:        'bg-blue-500/15 text-blue-300 border-blue-500/30',
+  lab:        'bg-purple-500/15 text-purple-300 border-purple-500/30',
+  procedure:  'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  monitoring: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
+}
+const CONF_COLORS = { high: 'text-green-400', medium: 'text-amber-400', low: 'text-red-400' }
+const CONF_DOTS   = { high: 'bg-green-400',   medium: 'bg-amber-400',   low: 'bg-red-400'   }
+
+function OrderCard({ order }) {
+  const typeCls = ORDER_TYPE_COLORS[order.order_type] || ORDER_TYPE_COLORS.monitoring
+  const confCls = CONF_COLORS[order.confidence] || CONF_COLORS.low
+  const dotCls  = CONF_DOTS[order.confidence]   || CONF_DOTS.low
+  const d = order.order_details || {}
+  const rows = [
+    d.name      && ['Drug / Item', d.name],
+    d.quantity && d.unit && ['Dose', `${d.quantity} ${d.unit}`],
+    d.route     && ['Route', d.route],
+    d.form      && ['Form', d.form],
+    d.frequency && ['Frequency', d.frequency],
+    d.instructions && ['Instructions', d.instructions],
+  ].filter(Boolean)
+
+  return (
+    <div className="border border-border rounded-lg p-3 space-y-2 bg-ink-900">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-xs text-white/80 leading-snug flex-1">{order.recommendation}</p>
+        <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded border flex-shrink-0 ${typeCls}`}>
+          {order.order_type}
+        </span>
+      </div>
+      {order.orderable_name && (
+        <p className="text-xs font-medium text-white">{order.orderable_name}</p>
+      )}
+      {rows.length > 0 && (
+        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+          {rows.map(([label, value]) => (
+            <>
+              <span key={`l-${label}`} className="text-muted">{label}</span>
+              <span key={`v-${label}`} className="text-white font-mono">{value}</span>
+            </>
+          ))}
+        </div>
+      )}
+      {order.dose_calculation && (
+        <p className="text-[11px] font-mono text-accent/80 bg-accent/5 px-2 py-1 rounded">
+          {order.dose_calculation}
+        </p>
+      )}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`flex items-center gap-1 text-[11px] ${confCls}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${dotCls}`} />
+          {order.confidence} confidence
+        </span>
+        {order.notes && <span className="text-[11px] text-muted">· {order.notes}</span>}
+      </div>
+    </div>
+  )
+}
+
 // ── Snapshot row ──────────────────────────────────────────────────────────────
 
 function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle }) {
   const [saving, setSaving] = useState(false)
-  const [showRaw, setShowRaw] = useState(false)
+  const [viewMode, setViewMode] = useState('rendered') // 'rendered' | 'raw' | 'orders'
+  const [ordersResult, setOrdersResult] = useState(null)
+  const [ordersLoading, setOrdersLoading] = useState(false)
+  const [ordersError, setOrdersError] = useState(null)
   const [localRating, setLocalRating] = useState(snap.rating ?? null)
   const initGaps = Array.isArray(snap.knowledge_gaps)
     ? snap.knowledge_gaps
@@ -338,9 +434,9 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
   const [gaps, setGaps] = useState(initGaps)
   const [gapInput, setGapInput] = useState('')
   const [gapsSaving, setGapsSaving] = useState(false)
-  const hasGapOnly = !!(snap.gap_entity && !snap.immediate_actions?.length && !snap.agent_answer)
-  const hasGapAlso = !!(snap.gap_entity && (snap.immediate_actions?.length || snap.agent_answer))
-  const hasAnswer = !!(snap.agent_answer || snap.immediate_actions?.length || snap.gap_entity)
+  const hasGapOnly = !!(snap.gap_entity && !snap.clinical_direction?.length && !snap.immediate_actions?.length && !snap.agent_answer)
+  const hasGapAlso = !!(snap.gap_entity && (snap.clinical_direction?.length || snap.immediate_actions?.length || snap.agent_answer))
+  const hasAnswer = !!(snap.agent_answer || snap.clinical_direction?.length || snap.immediate_actions?.length || snap.gap_entity)
 
   const handleRate = async (n) => {
     setSaving(true)
@@ -507,17 +603,54 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs font-semibold text-accent uppercase tracking-wide">Agent Answer</p>
-                    <button
-                      onClick={() => setShowRaw(v => !v)}
-                      className="text-[10px] text-muted hover:text-white/60 border border-border rounded px-1.5 py-0.5 transition-colors"
-                    >
-                      {showRaw ? 'Rendered' : 'Raw JSON'}
-                    </button>
+                    <div className="flex items-center gap-1">
+                      {[
+                        { key: 'rendered', label: 'Rendered' },
+                        { key: 'raw',      label: 'Raw JSON' },
+                        { key: 'orders',   label: 'Orders'   },
+                      ].map(({ key, label }) => (
+                        <button
+                          key={key}
+                          onClick={async () => {
+                            setViewMode(key)
+                            if (key === 'orders' && !ordersResult && !ordersLoading) {
+                              const recs = [
+                                ...(snap.immediate_actions || []),
+                                ...(snap.monitoring_followup || []),
+                              ].filter(Boolean)
+                              if (!recs.length) return
+                              const cpmrn = patientId.replace(/_\d+$/, '')
+                              setOrdersLoading(true)
+                              setOrdersError(null)
+                              try {
+                                const data = await generateOrders(
+                                  { recommendations: recs, cpmrn, patientType: 'adult' },
+                                  activeKB
+                                )
+                                setOrdersResult(data)
+                              } catch (e) {
+                                setOrdersError(e.message)
+                              } finally {
+                                setOrdersLoading(false)
+                              }
+                            }
+                          }}
+                          className={`text-[10px] border rounded px-1.5 py-0.5 transition-colors ${
+                            viewMode === key
+                              ? 'border-accent text-accent bg-accent/10'
+                              : 'border-border text-muted hover:text-white/60'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  {showRaw ? (
+                  {viewMode === 'raw' ? (
                     <pre className="text-[11px] font-mono text-white/70 bg-ink-900 rounded-lg p-3 border border-border overflow-x-auto max-h-80 overflow-y-auto whitespace-pre-wrap">
                       {JSON.stringify({
-                        immediate_actions: snap.immediate_actions,
+                        clinical_direction: snap.clinical_direction,
+                        specific_parameters: snap.specific_parameters,
                         clinical_reasoning: snap.agent_clinical_reasoning,
                         monitoring_followup: snap.monitoring_followup,
                         alternative_considerations: snap.alternative_considerations,
@@ -527,30 +660,209 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                         tokens_out: snap.tokens_out,
                       }, null, 2)}
                     </pre>
+                  ) : viewMode === 'orders' ? (
+                    <div className="space-y-2">
+                      {ordersLoading && (
+                        <p className="text-xs text-muted animate-pulse">Searching orderables catalog…</p>
+                      )}
+                      {ordersError && (
+                        <p className="text-xs text-red-400">{ordersError}</p>
+                      )}
+                      {ordersResult?.weight_gap_registered && (
+                        <div className="border border-amber-500/30 bg-amber-500/8 rounded px-3 py-2 text-[11px] text-amber-300">
+                          <span className="font-medium">KG registered: </span>
+                          <span className="font-mono">{ordersResult.weight_gap_registered}</span>
+                        </div>
+                      )}
+                      {ordersResult?.orders?.map((order, i) => (
+                        <OrderCard key={i} order={order} />
+                      ))}
+                      {ordersResult && !ordersResult.orders?.length && !ordersLoading && (
+                        <p className="text-xs text-muted">No orders generated.</p>
+                      )}
+                    </div>
                   ) : (
                     <div className="space-y-2">
-                      {[
-                        { key: 'immediate_actions',          data: snap.immediate_actions,          label: 'Immediate Actions',          color: 'text-red-400',    border: 'border-red-800/50',   bg: 'bg-red-950/20' },
-                        { key: 'clinical_reasoning',         data: snap.agent_clinical_reasoning,   label: 'Clinical Reasoning',         color: 'text-amber-400',  border: 'border-amber-800/50', bg: 'bg-amber-950/20' },
-                        { key: 'monitoring_followup',        data: snap.monitoring_followup,        label: 'Monitoring & Follow-up',     color: 'text-blue-400',   border: 'border-blue-800/50',  bg: 'bg-blue-950/20' },
-                        { key: 'alternative_considerations', data: snap.alternative_considerations, label: 'Alternative Considerations', color: 'text-purple-400', border: 'border-purple-800/50',bg: 'bg-purple-950/20' },
-                      ].map(({ key, data, label, color, border, bg }) => data?.length ? (
-                        <div key={key} className={`rounded-lg border ${border} ${bg} px-3 py-2`}>
-                          <p className={`text-[9px] uppercase tracking-widest font-semibold ${color} mb-1.5`}>{label}</p>
+
+                      {/* Immediate Next Steps — open by default */}
+                      {snap.immediate_next_steps?.length > 0 && (
+                        <Accordion
+                          label="Immediate Next Steps"
+                          labelCls="text-emerald-400"
+                          borderCls="border-emerald-800/50"
+                          bgCls="bg-emerald-950/20"
+                          defaultOpen={true}
+                        >
+                          <ol className="space-y-1.5 list-none">
+                            {snap.immediate_next_steps.map((item, i) => (
+                              <li key={i} className="flex gap-2.5 text-xs text-white/85 leading-snug">
+                                <span className="flex-shrink-0 w-4 h-4 rounded-full bg-emerald-900/60 border border-emerald-700/50 text-emerald-400 text-[9px] font-bold flex items-center justify-center mt-0.5">
+                                  {i + 1}
+                                </span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ol>
+                        </Accordion>
+                      )}
+
+                      {/* Monitoring & Follow-up — open by default */}
+                      {snap.monitoring_followup?.length > 0 && (
+                        <Accordion
+                          label="Monitoring & Follow-up"
+                          labelCls="text-blue-400"
+                          borderCls="border-blue-800/50"
+                          bgCls="bg-blue-950/20"
+                          defaultOpen={true}
+                        >
                           <ul className="space-y-1">
-                            {data.map((item, i) => (
+                            {snap.monitoring_followup.map((item, i) => (
                               <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
-                                <span className={`${color} flex-shrink-0`}>›</span>
+                                <span className="text-blue-400 flex-shrink-0">›</span>
                                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                                   {preprocessWikiLinks(item)}
                                 </ReactMarkdown>
                               </li>
                             ))}
                           </ul>
-                        </div>
-                      ) : null)}
-                      {/* Fallback for old runs without CDS fields */}
-                      {!snap.immediate_actions?.length && snap.agent_answer && (
+                        </Accordion>
+                      )}
+
+                      {/* Clinical Direction — collapsed by default */}
+                      {snap.clinical_direction?.length > 0 && (
+                        <Accordion
+                          label="Clinical Direction"
+                          badge="reasoning"
+                          badgeCls="bg-red-950/40 border-red-800/30 text-red-300/70"
+                          labelCls="text-red-400"
+                          borderCls="border-red-800/50"
+                          bgCls="bg-red-950/20"
+                          defaultOpen={false}
+                        >
+                          <ul className="space-y-1">
+                            {snap.clinical_direction.map((item, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
+                                <span className="text-red-400 flex-shrink-0">›</span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ul>
+                        </Accordion>
+                      )}
+
+                      {/* Specific Parameters — collapsed by default */}
+                      {snap.specific_parameters?.length > 0 && (
+                        <Accordion
+                          label="Specific Parameters"
+                          badge="wiki-grounded"
+                          badgeCls="bg-cyan-950/40 border-cyan-800/30 text-cyan-300/70"
+                          labelCls="text-cyan-400"
+                          borderCls="border-cyan-800/40"
+                          bgCls="bg-cyan-950/10"
+                          defaultOpen={false}
+                        >
+                          <div className="space-y-1.5">
+                            {snap.specific_parameters.map((p, i) => (
+                              <div key={i} className={`flex items-start gap-2 rounded px-2 py-1.5 border ${
+                                p.grounded
+                                  ? 'border-green-800/30 bg-green-950/10'
+                                  : 'border-orange-800/30 bg-orange-950/10'
+                              }`}>
+                                <span className={`flex-shrink-0 text-[9px] font-mono mt-0.5 px-1 py-0.5 rounded border ${
+                                  p.grounded
+                                    ? 'text-green-400 border-green-800/40 bg-green-950/30'
+                                    : 'text-orange-400 border-orange-800/40 bg-orange-950/30'
+                                }`}>
+                                  {p.grounded ? '✓' : '?'}
+                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-[10px] text-white/50 font-mono">{p.parameter}</span>
+                                  {p.value && <p className="text-xs text-white/80 mt-0.5">{p.value}</p>}
+                                  {!p.grounded && (
+                                    <p className="text-[10px] text-orange-400/70 mt-0.5">
+                                      {snap.gap_registered ? 'Not in wiki — gap registered' : 'Not in wiki'}
+                                    </p>
+                                  )}
+                                  {p.source && <p className="text-[10px] text-white/30 font-mono mt-0.5">{p.source}</p>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </Accordion>
+                      )}
+
+                      {/* Clinical Reasoning — collapsed by default */}
+                      {snap.agent_clinical_reasoning?.length > 0 && (
+                        <Accordion
+                          label="Clinical Reasoning"
+                          labelCls="text-amber-400"
+                          borderCls="border-amber-800/50"
+                          bgCls="bg-amber-950/20"
+                          defaultOpen={false}
+                        >
+                          <ul className="space-y-1">
+                            {snap.agent_clinical_reasoning.map((item, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
+                                <span className="text-amber-400 flex-shrink-0">›</span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ul>
+                        </Accordion>
+                      )}
+
+                      {/* Alternative Considerations — collapsed by default */}
+                      {snap.alternative_considerations?.length > 0 && (
+                        <Accordion
+                          label="Alternative Considerations"
+                          labelCls="text-purple-400"
+                          borderCls="border-purple-800/50"
+                          bgCls="bg-purple-950/20"
+                          defaultOpen={false}
+                        >
+                          <ul className="space-y-1">
+                            {snap.alternative_considerations.map((item, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
+                                <span className="text-purple-400 flex-shrink-0">›</span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ul>
+                        </Accordion>
+                      )}
+
+                      {/* Fallback: old runs using immediate_actions without clinical_direction */}
+                      {!snap.clinical_direction?.length && snap.immediate_actions?.length > 0 && (
+                        <Accordion
+                          label="Immediate Actions"
+                          labelCls="text-red-400"
+                          borderCls="border-red-800/50"
+                          bgCls="bg-red-950/20"
+                          defaultOpen={true}
+                        >
+                          <ul className="space-y-1">
+                            {snap.immediate_actions.map((item, i) => (
+                              <li key={i} className="flex gap-2 text-xs text-white/80 leading-snug">
+                                <span className="text-red-400 flex-shrink-0">›</span>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                  {preprocessWikiLinks(item)}
+                                </ReactMarkdown>
+                              </li>
+                            ))}
+                          </ul>
+                        </Accordion>
+                      )}
+
+                      {/* Fallback for very old runs with plain agent_answer */}
+                      {!snap.clinical_direction?.length && !snap.immediate_actions?.length && snap.agent_answer && (
                         <div className="prose-sm text-white/80 text-sm leading-relaxed bg-ink-900 rounded-lg p-3 border border-border">
                           <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                             {preprocessWikiLinks(snap.agent_answer)}
@@ -672,6 +984,7 @@ function RunPanel({ activeKB, onRunDone }) {
   const [availablePatients, setAvailablePatients] = useState([])
   const [selectedPatient, setSelectedPatient] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
+  const [selectedReasoningModel, setSelectedReasoningModel] = useState('')
   const [selectedSnapshot, setSelectedSnapshot] = useState('')
   const [availableSnapshots, setAvailableSnapshots] = useState([])
   const [usePatientContext, setUsePatientContext] = useState(false)
@@ -702,7 +1015,7 @@ function RunPanel({ activeKB, onRunDone }) {
     setError(null)
     try {
       const snapNum = selectedSnapshot !== '' ? parseInt(selectedSnapshot, 10) : null
-      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext)
+      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext, selectedReasoningModel || null)
       setJobId(job_id)
     } catch (err) {
       setError(err.message)
@@ -747,6 +1060,7 @@ function RunPanel({ activeKB, onRunDone }) {
           ))}
         </select>
       )}
+      <label className="block text-xs text-muted mb-0.5 font-mono">Grounding model</label>
       <select
         value={selectedModel}
         onChange={e => setSelectedModel(e.target.value)}
@@ -754,6 +1068,17 @@ function RunPanel({ activeKB, onRunDone }) {
         className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
       >
         {AVAILABLE_MODELS.map(m => (
+          <option key={m.value} value={m.value}>{m.label}</option>
+        ))}
+      </select>
+      <label className="block text-xs text-muted mb-0.5 font-mono">Reasoning model</label>
+      <select
+        value={selectedReasoningModel}
+        onChange={e => setSelectedReasoningModel(e.target.value)}
+        disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
+      >
+        {REASONING_MODELS.map(m => (
           <option key={m.value} value={m.value}>{m.label}</option>
         ))}
       </select>

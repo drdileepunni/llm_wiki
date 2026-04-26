@@ -8,6 +8,7 @@ import {
   ExclamationTriangleIcon,
   CheckCircleIcon,
   ClockIcon,
+  PencilIcon,
 } from '@heroicons/react/24/outline'
 import {
   HandThumbUpIcon as HandThumbUpSolid,
@@ -15,7 +16,7 @@ import {
 } from '@heroicons/react/24/solid'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { listAssessments, getAssessment, runAssessment, rateQuestion, assessJobStatus } from '../api'
+import { listAssessments, getAssessment, runAssessment, rateQuestion, assessJobStatus, updateQuestion } from '../api'
 import CostBadge from '../components/CostBadge'
 import { useAppState } from '../AppStateContext'
 
@@ -118,8 +119,13 @@ function AssessmentCard({ assessment, isSelected, onSelect, onRunDone, activeKB 
 
 // ── Question row ──────────────────────────────────────────────────────────────
 
-function QuestionRow({ question, sourceSlug, activeKB, onRated }) {
+function QuestionRow({ question: initialQuestion, sourceSlug, activeKB, onRated, onEdited }) {
   const [expanded, setExpanded] = useState(false)
+  const [question, setQuestion] = useState(initialQuestion)
+  const [editing, setEditing]   = useState(false)
+  const [editText, setEditText] = useState(initialQuestion.question)
+  const [saving, setSaving]     = useState(false)
+
   const latestRun = question.runs?.length > 0 ? question.runs[question.runs.length - 1] : null
 
   const handleRate = async (rating) => {
@@ -131,47 +137,127 @@ function QuestionRow({ question, sourceSlug, activeKB, onRated }) {
     }
   }
 
+  const startEdit = (e) => {
+    e.stopPropagation()
+    setEditText(question.question)
+    setEditing(true)
+  }
+
+  const cancelEdit = () => {
+    setEditing(false)
+    setEditText(question.question)
+  }
+
+  const saveEdit = async () => {
+    const trimmed = editText.trim()
+    if (!trimmed || trimmed === question.question) { cancelEdit(); return }
+    setSaving(true)
+    try {
+      await updateQuestion(sourceSlug, question.id, trimmed, activeKB)
+      setQuestion(q => ({ ...q, question: trimmed }))
+      setEditing(false)
+      onEdited?.()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleEditKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit() }
+    if (e.key === 'Escape') cancelEdit()
+  }
+
   const hasNewKGs = latestRun && latestRun.new_kgs_registered?.length > 0
   const userRating = latestRun?.user_rating
 
   return (
     <div className="border border-border rounded-lg overflow-hidden mb-3">
       {/* Header */}
-      <button
-        onClick={() => setExpanded(v => !v)}
-        className="w-full flex items-start gap-3 px-4 py-3 bg-ink-900 hover:bg-ink-800 transition-colors text-left"
+      <div
+        className="w-full flex items-start gap-3 px-4 py-3 bg-ink-900 hover:bg-ink-800 transition-colors group"
       >
-        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-ink-700 border border-border text-xs font-mono text-muted flex items-center justify-center mt-0.5">
+        <button
+          onClick={() => !editing && setExpanded(v => !v)}
+          className="flex-shrink-0 w-5 h-5 rounded-full bg-ink-700 border border-border text-xs font-mono text-muted flex items-center justify-center mt-0.5"
+        >
           {question.id}
-        </span>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm text-white leading-snug">{question.question}</p>
-          {question.linked_kgs?.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mt-1.5">
-              {question.linked_kgs.map(kg => (
-                <span key={kg} className="px-1.5 py-0.5 bg-ink-700 border border-border rounded text-[10px] font-mono text-muted">
-                  {kg.split('/').pop()}
-                </span>
-              ))}
+        </button>
+
+        <div className="flex-1 min-w-0" onClick={() => !editing && setExpanded(v => !v)}>
+          {editing ? (
+            <div onClick={e => e.stopPropagation()} className="space-y-1.5">
+              <textarea
+                autoFocus
+                value={editText}
+                onChange={e => setEditText(e.target.value)}
+                onKeyDown={handleEditKeyDown}
+                rows={3}
+                className="w-full bg-ink-800 border border-accent/60 rounded px-2.5 py-1.5 text-sm text-white placeholder:text-muted/50 resize-none focus:outline-none focus:border-accent leading-snug"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={saveEdit}
+                  disabled={saving || !editText.trim()}
+                  className="px-2.5 py-1 rounded bg-accent text-white text-xs font-medium hover:bg-accent/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  onClick={cancelEdit}
+                  className="px-2.5 py-1 rounded bg-ink-700 border border-border text-xs text-muted hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
+          ) : (
+            <>
+              <div className="flex items-start gap-1.5">
+                <p className="text-sm text-white leading-snug flex-1">{question.question}</p>
+                <button
+                  onClick={startEdit}
+                  title="Edit question"
+                  className="flex-shrink-0 p-0.5 rounded text-muted opacity-0 group-hover:opacity-100 hover:text-white hover:bg-ink-700 transition-all"
+                >
+                  <PencilIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {question.linked_kgs?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {question.linked_kgs.map(kg => (
+                    <span key={kg} className="px-1.5 py-0.5 bg-ink-700 border border-border rounded text-[10px] font-mono text-muted">
+                      {kg.split('/').pop()}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {hasNewKGs && (
-            <span className="flex items-center gap-1 text-xs text-amber-400">
-              <ExclamationTriangleIcon className="w-3.5 h-3.5" />
-              {latestRun.new_kgs_registered.length} KG
-            </span>
-          )}
-          {latestRun && !hasNewKGs && (
-            <CheckCircleIcon className="w-4 h-4 text-green-400" />
-          )}
-          {expanded
-            ? <ChevronDownIcon className="w-4 h-4 text-muted" />
-            : <ChevronRightIcon className="w-4 h-4 text-muted" />
-          }
-        </div>
-      </button>
+
+        {!editing && (
+          <div
+            onClick={() => setExpanded(v => !v)}
+            className="flex items-center gap-2 flex-shrink-0 cursor-pointer"
+          >
+            {hasNewKGs && (
+              <span className="flex items-center gap-1 text-xs text-amber-400">
+                <ExclamationTriangleIcon className="w-3.5 h-3.5" />
+                {latestRun.new_kgs_registered.length} KG
+              </span>
+            )}
+            {latestRun && !hasNewKGs && (
+              <CheckCircleIcon className="w-4 h-4 text-green-400" />
+            )}
+            {expanded
+              ? <ChevronDownIcon className="w-4 h-4 text-muted" />
+              : <ChevronRightIcon className="w-4 h-4 text-muted" />
+            }
+          </div>
+        )}
+      </div>
 
       {/* Expanded body */}
       {expanded && (
@@ -442,6 +528,7 @@ export default function Assess() {
                   sourceSlug={selectedSlug}
                   activeKB={activeKB}
                   onRated={handleRated}
+                  onEdited={handleRated}
                 />
               ))}
             </div>

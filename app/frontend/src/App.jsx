@@ -9,6 +9,7 @@ import KBSettings from './pages/KBSettings'
 import Assess from './pages/Assess'
 import ClinicalAssess from './pages/ClinicalAssess'
 import Learn from './pages/Learn'
+import OrderGenerator from './pages/OrderGenerator'
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
             <Route path="assess" element={<Assess />} />
             <Route path="clinical-assess" element={<ClinicalAssess />} />
             <Route path="learn" element={<Learn />} />
+            <Route path="order-generator" element={<OrderGenerator />} />
           </Route>
         </Routes>
       </BrowserRouter>

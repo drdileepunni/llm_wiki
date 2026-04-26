@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { ArrowUpTrayIcon, DocumentTextIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
-import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus, resolveAll, resolveBatchStatus, deleteGap } from '../api'
+import { ingestFile, ingestUrl, getWikiGaps, resolveJobStatus, resolveAll, resolveBatchStatus, deleteGap, updateGap, createGap } from '../api'
 import CostBadge from '../components/CostBadge'
 import ResolveModal from '../components/ResolveModal'
 import { useAppState } from '../AppStateContext'
@@ -148,6 +148,239 @@ function JobCard({ job, onUpdate }) {
   )
 }
 
+// ── New KG inline form ────────────────────────────────────────────────────────
+
+function NewGapForm({ activeKB, onCreated, onCancel }) {
+  const [title, setTitle]       = useState('')
+  const [chipInput, setChipInput] = useState('')
+  const [sections, setSections] = useState([])
+  const [saving, setSaving]     = useState(false)
+  const [error, setError]       = useState(null)
+
+  const addChip = () => {
+    const val = chipInput.trim()
+    if (val && !sections.includes(val)) setSections(prev => [...prev, val])
+    setChipInput('')
+  }
+
+  const handleChipKey = (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addChip() }
+    if (e.key === 'Backspace' && !chipInput && sections.length) {
+      setSections(prev => prev.slice(0, -1))
+    }
+  }
+
+  const handleSave = async () => {
+    const finalSections = chipInput.trim()
+      ? [...sections, chipInput.trim()]
+      : sections
+    if (!title.trim() || !finalSections.length) {
+      setError('Title and at least one section required.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const result = await createGap(title.trim(), finalSections, activeKB)
+      onCreated({
+        file: result.file,
+        title: result.title,
+        referenced_page: result.referenced_page,
+        missing_sections: result.missing_sections,
+      })
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="p-4 bg-amber-950/10 border border-amber-700/40 rounded-xl space-y-3">
+      <p className="text-xs font-mono text-amber-400 uppercase tracking-wider">New Knowledge Gap</p>
+
+      <input
+        autoFocus
+        value={title}
+        onChange={e => setTitle(e.target.value)}
+        onKeyDown={e => e.key === 'Escape' && onCancel()}
+        placeholder="Gap title, e.g. MAP target in vasopressor shock"
+        className="w-full bg-ink-900 border border-border rounded px-3 py-1.5 text-sm text-white placeholder:text-muted/50 focus:outline-none focus:border-amber-600/60"
+      />
+
+      {/* Chip input */}
+      <div
+        className="flex flex-wrap gap-1 min-h-[34px] bg-ink-900 border border-border rounded px-2 py-1 cursor-text focus-within:border-amber-600/60"
+        onClick={() => document.getElementById('gap-chip-input')?.focus()}
+      >
+        {sections.map((s, i) => (
+          <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-amber-900/30 border border-amber-800/30 rounded text-amber-400/80 font-mono">
+            {s}
+            <button onClick={() => setSections(prev => prev.filter((_, j) => j !== i))} className="text-amber-700 hover:text-red-400 leading-none">×</button>
+          </span>
+        ))}
+        <input
+          id="gap-chip-input"
+          value={chipInput}
+          onChange={e => setChipInput(e.target.value)}
+          onKeyDown={handleChipKey}
+          onBlur={addChip}
+          placeholder={sections.length ? '' : 'Add sections… (Enter to add each)'}
+          className="flex-1 min-w-[140px] bg-transparent text-xs text-white placeholder:text-muted/40 focus:outline-none py-0.5"
+        />
+      </div>
+
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      <div className="flex gap-2 justify-end">
+        <button onClick={onCancel} className="px-3 py-1 text-xs border border-border rounded text-muted hover:text-white transition-colors">
+          Cancel
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-3 py-1 text-xs bg-amber-800/40 hover:bg-amber-800/60 border border-amber-700/40 rounded text-amber-300 font-medium transition-colors disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save Gap'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Gap card with inline editing ──────────────────────────────────────────────
+
+function GapCard({ gap, activeKB, onResolve, onDelete, deleting, onUpdated }) {
+  const stem = gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title
+
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleVal, setTitleVal]         = useState(gap.title)
+  const [sections, setSections]         = useState(gap.missing_sections || [])
+  const [editingIdx, setEditingIdx]     = useState(null)
+  const [editingVal, setEditingVal]     = useState('')
+  const [saving, setSaving]             = useState(false)
+
+  const save = async (newTitle, newSections) => {
+    setSaving(true)
+    try {
+      await updateGap(stem, { title: newTitle, missing_sections: newSections }, activeKB)
+      onUpdated({ title: newTitle, missing_sections: newSections })
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const commitTitle = () => {
+    setEditingTitle(false)
+    if (titleVal.trim() && titleVal !== gap.title) save(titleVal.trim(), sections)
+    else setTitleVal(gap.title)
+  }
+
+  const commitChip = (idx) => {
+    const val = editingVal.trim()
+    setEditingIdx(null)
+    if (!val) { removeChip(idx); return }
+    const next = sections.map((s, i) => i === idx ? val : s)
+    setSections(next)
+    save(titleVal, next)
+  }
+
+  const removeChip = (idx) => {
+    const next = sections.filter((_, i) => i !== idx)
+    setSections(next)
+    save(titleVal, next)
+  }
+
+  return (
+    <div className="p-4 bg-amber-950/20 border border-amber-800/30 rounded-xl">
+      {/* Header row */}
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="flex-1 min-w-0">
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={titleVal}
+              onChange={e => setTitleVal(e.target.value)}
+              onBlur={commitTitle}
+              onKeyDown={e => { if (e.key === 'Enter') commitTitle(); if (e.key === 'Escape') { setEditingTitle(false); setTitleVal(gap.title) } }}
+              className="w-full bg-amber-950/40 border border-amber-700/50 rounded px-2 py-0.5 text-sm font-semibold text-amber-300 focus:outline-none focus:border-amber-500"
+            />
+          ) : (
+            <div className="flex items-center gap-1.5 group">
+              <p className="text-sm font-semibold text-amber-300">{titleVal}</p>
+              <button
+                onClick={() => setEditingTitle(true)}
+                className="opacity-0 group-hover:opacity-100 text-amber-600 hover:text-amber-400 transition-all text-[10px] border border-amber-800/40 rounded px-1 py-0.5"
+              >
+                edit
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <button
+            onClick={onResolve}
+            className="px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium"
+          >
+            Resolve
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={deleting}
+            className="w-6 h-6 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 border border-transparent hover:border-red-800/40 transition-all disabled:opacity-40 text-sm leading-none"
+            title="Delete gap"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted font-mono mb-2">{gap.referenced_page}</p>
+
+      {/* Section chips */}
+      <div className="flex flex-wrap gap-1 items-center">
+        {sections.map((s, j) => (
+          editingIdx === j ? (
+            <input
+              key={j}
+              autoFocus
+              value={editingVal}
+              onChange={e => setEditingVal(e.target.value)}
+              onBlur={() => commitChip(j)}
+              onKeyDown={e => { if (e.key === 'Enter') commitChip(j); if (e.key === 'Escape') setEditingIdx(null) }}
+              className="px-1.5 py-0.5 text-xs bg-amber-900/50 border border-amber-600/50 rounded text-amber-300 font-mono focus:outline-none min-w-[120px]"
+            />
+          ) : (
+            <span
+              key={j}
+              className="group inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-amber-900/30 border border-amber-800/30 rounded text-amber-400/80 font-mono"
+            >
+              {s}
+              <button
+                onClick={() => { setEditingIdx(j); setEditingVal(s) }}
+                className="opacity-0 group-hover:opacity-100 text-amber-600 hover:text-amber-300 transition-all leading-none"
+                title="Edit"
+              >
+                ✎
+              </button>
+              <button
+                onClick={() => removeChip(j)}
+                className="opacity-0 group-hover:opacity-100 text-amber-700 hover:text-red-400 transition-all leading-none"
+                title="Remove"
+              >
+                ×
+              </button>
+            </span>
+          )
+        ))}
+        {saving && <span className="text-[10px] text-muted/60 font-mono ml-1">saving…</span>}
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Ingest() {
@@ -175,6 +408,7 @@ export default function Ingest() {
   const [gaps, setGaps]               = useState([])
   const [deletingGap, setDeletingGap] = useState(null)
   const [resolveGap, setResolveGap]   = useState(null)
+  const [showNewGap, setShowNewGap]   = useState(false)
   const [jobs, setJobs]               = useState([])
   const [batchId, setBatchId]         = useState(null)
   const [batchInfo, setBatchInfo]     = useState(null)
@@ -494,58 +728,55 @@ export default function Ingest() {
               </div>
             )}
 
-            {gaps.length > 0 ? (
+            {gaps.length > 0 || showNewGap ? (
               <>
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <p className="text-xs font-mono text-amber-400 uppercase tracking-wider">
-                      Pending Knowledge Gaps — {gaps.length} pages
+                      Pending Knowledge Gaps{gaps.length > 0 ? ` — ${gaps.length} pages` : ''}
                     </p>
-                    <button
-                      onClick={handleResolveAll}
-                      disabled={!!batchId}
-                      className="flex-shrink-0 px-2.5 py-1 text-xs bg-blue-900/20 hover:bg-blue-900/40 border border-blue-700/30 rounded-md text-blue-400 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {batchId
-                        ? `Resolving… ${batchInfo?.completed_gaps ?? 0}/${batchInfo?.total_gaps ?? gaps.length}`
-                        : 'Resolve All'}
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => setShowNewGap(v => !v)}
+                        className="px-2.5 py-1 text-xs bg-amber-900/20 hover:bg-amber-900/40 border border-amber-700/30 rounded-md text-amber-400 transition-colors font-medium"
+                      >
+                        + New KG
+                      </button>
+                      {gaps.length > 0 && (
+                        <button
+                          onClick={handleResolveAll}
+                          disabled={!!batchId}
+                          className="flex-shrink-0 px-2.5 py-1 text-xs bg-blue-900/20 hover:bg-blue-900/40 border border-blue-700/30 rounded-md text-blue-400 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {batchId
+                            ? `Resolving… ${batchInfo?.completed_gaps ?? 0}/${batchInfo?.total_gaps ?? gaps.length}`
+                            : 'Resolve All'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <p className="text-xs text-muted">
                     These sections are missing from your wiki. Ingest a relevant source to fill them.
                   </p>
                 </div>
+                {showNewGap && (
+                  <NewGapForm
+                    activeKB={activeKB}
+                    onCreated={(gap) => { setGaps(prev => [gap, ...prev]); setShowNewGap(false) }}
+                    onCancel={() => setShowNewGap(false)}
+                  />
+                )}
                 <div className="flex flex-col gap-3 overflow-y-auto">
                   {gaps.map((gap, i) => (
-                    <div key={i} className="p-4 bg-amber-950/20 border border-amber-800/30 rounded-xl">
-                      <div className="flex items-start justify-between gap-3 mb-2">
-                        <p className="text-sm font-semibold text-amber-300">{gap.title}</p>
-                        <div className="flex items-center gap-1.5 flex-shrink-0">
-                          <button
-                            onClick={() => setResolveGap(gap)}
-                            className="px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium"
-                          >
-                            Resolve
-                          </button>
-                          <button
-                            onClick={() => handleDeleteGap(gap)}
-                            disabled={deletingGap === (gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title)}
-                            className="w-6 h-6 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 border border-transparent hover:border-red-800/40 transition-all disabled:opacity-40 text-sm leading-none"
-                            title="Delete gap"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-xs text-muted font-mono mb-2">{gap.referenced_page}</p>
-                      <div className="flex flex-wrap gap-1">
-                        {gap.missing_sections.map((s, j) => (
-                          <span key={j} className="px-1.5 py-0.5 text-xs bg-amber-900/30 border border-amber-800/30 rounded text-amber-400/80 font-mono">
-                            {s}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
+                    <GapCard
+                      key={gap.file || i}
+                      gap={gap}
+                      activeKB={activeKB}
+                      onResolve={() => setResolveGap(gap)}
+                      onDelete={() => handleDeleteGap(gap)}
+                      deleting={deletingGap === (gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title)}
+                      onUpdated={(updated) => setGaps(prev => prev.map(g => g.file === gap.file ? { ...g, ...updated } : g))}
+                    />
                   ))}
                 </div>
               </>
@@ -554,7 +785,13 @@ export default function Ingest() {
                 <div className="w-16 h-16 rounded-full bg-ink-800 flex items-center justify-center mb-4">
                   <DocumentTextIcon className="w-7 h-7 text-muted" />
                 </div>
-                <p className="text-sm text-muted">Results will appear here after ingestion</p>
+                <p className="text-sm text-muted mb-4">Results will appear here after ingestion</p>
+                <button
+                  onClick={() => setShowNewGap(true)}
+                  className="px-3 py-1.5 text-xs bg-amber-900/20 hover:bg-amber-900/40 border border-amber-700/30 rounded-md text-amber-400 transition-colors font-medium"
+                >
+                  + Add Knowledge Gap
+                </button>
               </div>
             )}
           </div>

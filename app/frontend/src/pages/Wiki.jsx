@@ -13,8 +13,9 @@ import {
   ExclamationCircleIcon,
   MagnifyingGlassIcon,
   XMarkIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline'
-import { getWikiTree, getWikiFile, saveWikiFile, searchWiki } from '../api'
+import { getWikiTree, getWikiFile, saveWikiFile, deleteWikiFile, searchWiki } from '../api'
 
 // ── Slug / index helpers ──────────────────────────────────────────────────────
 
@@ -224,6 +225,7 @@ export default function Wiki() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState(null)
+  const [deleting, setDeleting] = useState(false)
   const [searching, setSearching] = useState(false)
   const searchTimerRef = useRef(null)
 
@@ -272,6 +274,24 @@ export default function Wiki() {
     }, 300)
     return () => clearTimeout(searchTimerRef.current)
   }, [searchQuery])
+
+  const handleDelete = useCallback(async () => {
+    if (!selectedPath) return
+    if (!confirm(`Delete "${selectedPath.split('/').pop()}"? This cannot be undone.`)) return
+    setDeleting(true)
+    try {
+      await deleteWikiFile(selectedPath, activeKB)
+      setSelectedPath(null)
+      setContent('')
+      setSavedContent('')
+      getWikiTree(activeKB).then(d => setTree(d.tree)).catch(console.error)
+    } catch (e) {
+      console.error(e)
+      alert('Delete failed: ' + e.message)
+    } finally {
+      setDeleting(false)
+    }
+  }, [selectedPath, activeKB])
 
   const handleSave = useCallback(async () => {
     if (!selectedPath || !dirty) return
@@ -387,6 +407,19 @@ export default function Wiki() {
                   : saveStatus === 'error' ? <><ExclamationCircleIcon className="w-3 h-3 text-red-400" /> Error</>
                   : saving ? 'Saving…'
                   : <>Save <span className="text-white/30 font-mono ml-1">⌘S</span></>}
+              </button>
+            )}
+            {selectedPath && (
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                title="Delete this page"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium
+                  text-red-400/70 hover:text-red-400 hover:bg-red-950/30 border border-transparent
+                  hover:border-red-800/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <TrashIcon className="w-3.5 h-3.5" />
+                {deleting ? 'Deleting…' : 'Delete'}
               </button>
             )}
           </div>

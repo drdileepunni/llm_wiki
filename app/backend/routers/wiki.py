@@ -139,6 +139,16 @@ def save_file(payload: SavePayload, kb: KBConfig = Depends(resolve_kb)):
     return {"saved": True, "path": payload.path}
 
 
+@router.delete("/file")
+def delete_file(path: str = Query(...), kb: KBConfig = Depends(resolve_kb)):
+    full = _safe_path(path, kb)
+    if not full.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    full.unlink()
+    log.info("Deleted wiki file: %s  kb=%s", path, kb.name)
+    return {"deleted": True, "path": path}
+
+
 @router.get("/gaps")
 def get_gaps(kb: KBConfig = Depends(resolve_kb)):
     gaps_dir = kb.wiki_dir / "gaps"
@@ -183,6 +193,97 @@ def get_gaps(kb: KBConfig = Depends(resolve_kb)):
             })
 
     return {"gaps": gaps}
+
+
+class CreateGapRequest(BaseModel):
+    title: str
+    missing_sections: list[str]
+
+
+@router.post("/gaps")
+def create_gap(req: CreateGapRequest, kb: KBConfig = Depends(resolve_kb)):
+    if not req.title.strip() or not req.missing_sections:
+        raise HTTPException(status_code=400, detail="title and at least one missing_section required")
+
+    today = __import__("datetime").date.today().isoformat()
+    slug  = re.sub(r"[^a-z0-9]+", "-", req.title.lower()).strip("-")
+    ref   = f"entities/{slug}.md"
+    title_fm = req.title.strip().title()
+
+    gaps_dir = kb.wiki_dir / "gaps"
+    gaps_dir.mkdir(parents=True, exist_ok=True)
+    gap_path = gaps_dir / f"{slug}.md"
+
+    sections_block = "\n".join(f"- {s}" for s in req.missing_sections if s.strip())
+    content = (
+        f"---\n"
+        f'title: "Knowledge Gap — {title_fm}"\n'
+        f"type: gap\n"
+        f"referenced_page: {ref}\n"
+        f"tags: [gap]\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        f"---\n\n"
+        f"## Missing Sections\n\n"
+        f"{sections_block}\n"
+    )
+    gap_path.write_text(content, encoding="utf-8")
+    return {
+        "ok": True,
+        "file": f"wiki/gaps/{slug}.md",
+        "title": title_fm,
+        "referenced_page": ref,
+        "missing_sections": [s.strip() for s in req.missing_sections if s.strip()],
+    }
+
+
+class UpdateGapRequest(BaseModel):
+    title: str | None = None
+    missing_sections: list[str] | None = None
+
+
+@router.patch("/gaps/{stem}")
+def update_gap(stem: str, req: UpdateGapRequest, kb: KBConfig = Depends(resolve_kb)):
+    gap_path = kb.wiki_dir / "gaps" / f"{stem}.md"
+    if not gap_path.exists():
+        raise HTTPException(status_code=404, detail=f"Gap {stem!r} not found")
+
+    text = gap_path.read_text(encoding="utf-8")
+    today = __import__("datetime").date.today().isoformat()
+
+    # Update referenced_page slug and title in frontmatter when title changes
+    if req.title is not None:
+        new_slug = re.sub(r"[^a-z0-9]+", "-", req.title.lower()).strip("-")
+        new_ref  = f"entities/{new_slug}.md"
+        title_fm = req.title.title()
+
+        # Replace frontmatter fields
+        text = re.sub(r'^title:.*$', f'title: "Knowledge Gap — {title_fm}"', text, flags=re.MULTILINE)
+        text = re.sub(r'^referenced_page:.*$', f'referenced_page: {new_ref}', text, flags=re.MULTILINE)
+
+    # Update updated date
+    text = re.sub(r'^updated:.*$', f'updated: {today}', text, flags=re.MULTILINE)
+
+    # Replace missing sections block
+    if req.missing_sections is not None:
+        sections_block = "## Missing Sections\n\n" + "\n".join(f"- {s}" for s in req.missing_sections) + "\n"
+        if "## Missing Sections" in text:
+            text = re.sub(r"## Missing Sections\n.*", sections_block, text, flags=re.DOTALL)
+        else:
+            text = text.rstrip() + "\n\n" + sections_block
+
+    # If title changed, rename the file
+    if req.title is not None:
+        new_slug = re.sub(r"[^a-z0-9]+", "-", req.title.lower()).strip("-")
+        new_path = kb.wiki_dir / "gaps" / f"{new_slug}.md"
+        gap_path.write_text(text, encoding="utf-8")
+        if new_path != gap_path:
+            gap_path.rename(new_path)
+            gap_path = new_path
+    else:
+        gap_path.write_text(text, encoding="utf-8")
+
+    return {"ok": True, "file": f"wiki/gaps/{gap_path.name}"}
 
 
 @router.post("/vectors/rebuild")

@@ -88,6 +88,15 @@ export async function searchWiki(q, kbName) {
   }).then(r => r.json())
 }
 
+export async function deleteWikiFile(path, kbName) {
+  const res = await fetch(`${BASE}/wiki/file?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function saveWikiFile(path, content, kbName) {
   const res = await fetch(`${BASE}/wiki/file`, {
     method: 'PUT',
@@ -130,6 +139,26 @@ export async function updateKBPrompt(name, content) {
 
 export async function getWikiGaps(kbName) {
   return fetch(`${BASE}/wiki/gaps`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
+export async function createGap(title, missing_sections, kbName) {
+  const res = await fetch(`${BASE}/wiki/gaps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ title, missing_sections }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateGap(stem, { title, missing_sections } = {}, kbName) {
+  const res = await fetch(`${BASE}/wiki/gaps/${encodeURIComponent(stem)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ title, missing_sections }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 // ── Gap resolver ───────────────────────────────────────────────────────────────
@@ -239,6 +268,16 @@ export async function rateQuestion(sourceSlug, questionId, rating, kbName) {
   return res.json()
 }
 
+export async function updateQuestion(sourceSlug, questionId, question, kbName) {
+  const res = await fetch(`${BASE}/assess/${encodeURIComponent(sourceSlug)}/questions`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ question_id: questionId, question }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function assessJobStatus(jobId) {
   return fetch(`${BASE}/assess/jobs/${jobId}`).then(r => r.json())
 }
@@ -253,13 +292,14 @@ export async function listPatientSnapshots(patientId) {
   return fetch(`${BASE}/clinical-assess/patients/${encodeURIComponent(patientId)}/snapshots`).then(r => r.json())
 }
 
-export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false) {
+export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false, reasoningModel = null) {
   const res = await fetch(`${BASE}/clinical-assess/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
     body: JSON.stringify({
       patient_id: patientId,
       model: model || undefined,
+      reasoning_model: reasoningModel || undefined,
       snapshot_num: snapshotNum != null ? snapshotNum : undefined,
       use_patient_context: usePatientContext,
     }),
@@ -344,4 +384,21 @@ export async function cancelLearnRun(runId) {
 
 export async function listLearnRuns(kbName) {
   return fetch(`${BASE}/learn/`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
+// ── Order generation ───────────────────────────────────────────────────────────
+
+export async function generateOrders({ recommendations, cpmrn, patientType, model }, kbName) {
+  const res = await fetch(`${BASE}/orders/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({
+      recommendations,
+      cpmrn: cpmrn || null,
+      patient_type: patientType || 'adult',
+      model: model || null,
+    }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
