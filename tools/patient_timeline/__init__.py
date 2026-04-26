@@ -56,6 +56,7 @@ def generate(
     # -- feature flags --
     gemini_notes: bool = True,
     snapshots: bool = True,
+    num_snapshots: int = 5,
     force: bool = False,
     # -- GCP / API overrides (fall back to config defaults) --
     gemini_api_key: Optional[str] = None,
@@ -177,7 +178,7 @@ def generate(
             else:
                 logger.info("[%s] Step 3 – generating evaluation snapshots …", slug)
                 from .snapshots import ask_gemini, save_snapshots
-                snap_data = ask_gemini(df, api_key)
+                snap_data = ask_gemini(df, api_key, num_snapshots=num_snapshots)
                 save_snapshots(df, snap_data, patient_dir)
         else:
             logger.info("[%s] Step 3 – snapshots already exist, skipping", slug)

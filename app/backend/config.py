@@ -11,6 +11,7 @@ BROWSERBASE_API_KEY    = os.getenv("BROWSERBASE_API_KEY", "")
 BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
 WIKI_ROOT = Path(os.environ["WIKI_ROOT"])
 MODEL = os.getenv("MODEL", "claude-haiku-4-5")
+KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "gemini-2.5-flash")
 
 RAW_DIR   = WIKI_ROOT / "raw"
 WIKI_DIR  = WIKI_ROOT / "wiki"

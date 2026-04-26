@@ -93,6 +93,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip evaluation snapshot generation.",
     )
     p.add_argument(
+        "--num-snapshots",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of evaluation snapshots to generate (default: 5).",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -156,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_dir     = Path(args.cache_dir) if args.cache_dir else None,
                 gemini_notes  = not args.no_gemini_notes,
                 snapshots     = not args.no_snapshots,
+                num_snapshots = args.num_snapshots,
                 force         = args.force,
                 **gcp_kw,
             )

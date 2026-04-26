@@ -360,11 +360,11 @@ export async function rateSnapshotApi(patientId, runId, snapshotNum, { rating, k
 
 // ── Learn (learning loop) ──────────────────────────────────────────────────────
 
-export async function startLearnRun(cpmrn, encounter, kbName) {
+export async function startLearnRun(cpmrn, encounter, kbName, numSnapshots = 2, reviewQuestions = true) {
   const res = await fetch(`${BASE}/learn/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
-    body: JSON.stringify({ cpmrn, encounter }),
+    body: JSON.stringify({ cpmrn, encounter, num_snapshots: numSnapshots, review_questions: reviewQuestions }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -378,6 +378,31 @@ export async function learnJobStatus(runId, kbName) {
 
 export async function cancelLearnRun(runId) {
   const res = await fetch(`${BASE}/learn/jobs/${runId}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function resumeLearnRun(runId, questions, kbName) {
+  const res = await fetch(`${BASE}/learn/jobs/${runId}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ questions }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteLearnRun(runId, kbName) {
+  const res = await fetch(`${BASE}/learn/jobs/${runId}`, { method: 'DELETE', headers: kbHeaders(kbName) })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function restartLearnRun(runId, kbName) {
+  const res = await fetch(`${BASE}/learn/jobs/${runId}/restart`, {
+    method: 'POST',
+    headers: kbHeaders(kbName),
+  })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

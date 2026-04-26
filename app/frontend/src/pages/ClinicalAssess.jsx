@@ -339,12 +339,20 @@ function RunCard({ run, isSelected, onSelect, onDelete }) {
 }
 
 function PatientGroup({ patientId, runs, selectedRunId, onSelect, onDelete }) {
+  const [open, setOpen] = useState(false)
   return (
     <div>
-      <div className="px-4 py-2 bg-ink-900 border-b border-border sticky top-0 z-10">
-        <p className="text-xs font-mono font-semibold text-white/80">{patientId}</p>
-      </div>
-      {runs.map(r => (
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-2 px-4 py-2 bg-ink-900 border-b border-border sticky top-0 z-10 hover:bg-ink-800 transition-colors text-left"
+      >
+        {open
+          ? <ChevronDownIcon className="w-3 h-3 text-muted flex-shrink-0" />
+          : <ChevronRightIcon className="w-3 h-3 text-muted flex-shrink-0" />}
+        <span className="text-xs font-mono font-semibold text-white/80 flex-1">{patientId}</span>
+        <span className="text-[10px] text-muted font-mono">{runs.length}</span>
+      </button>
+      {open && runs.map(r => (
         <RunCard
           key={r.run_id}
           run={r}
@@ -517,20 +525,20 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
       {/* Expanded body */}
       {isOpen && (
         <div className="px-4 py-4 bg-ink-950 border-t border-border">
-          {/* Context: timeline + clinical context + question */}
+          {/* Context: clinical context + timeline + question */}
           <div className="mb-5 space-y-3">
-            {snap.csv_content && (
-              <div>
-                <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Timeline</p>
-                <TimelineTable csv={snap.csv_content} />
-              </div>
-            )}
             {snap.clinical_context && (
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Clinical Context</p>
                 <p className="text-xs text-white/70 bg-ink-900 border border-border rounded-lg p-3 leading-relaxed">
                   {snap.clinical_context}
                 </p>
+              </div>
+            )}
+            {snap.csv_content && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Timeline</p>
+                <TimelineTable csv={snap.csv_content} />
               </div>
             )}
             {snap.question && (
@@ -541,15 +549,22 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
             )}
           </div>
 
-          {/* Timeline summary (shown when available) */}
+          {/* Clinical Summary — collapsed accordion */}
           {snap.timeline_summary && (
             <div className="mb-4">
-              <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Clinical Summary</p>
-              <div className="text-xs text-white/75 bg-ink-900 border border-border rounded-lg p-3 leading-relaxed prose-sm">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                  {snap.timeline_summary}
-                </ReactMarkdown>
-              </div>
+              <Accordion
+                label="Clinical Summary"
+                labelCls="text-white/50"
+                borderCls="border-border"
+                bgCls="bg-ink-900"
+                defaultOpen={false}
+              >
+                <div className="text-xs text-white/75 leading-relaxed prose-sm">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                    {snap.timeline_summary}
+                  </ReactMarkdown>
+                </div>
+              </Accordion>
             </div>
           )}
 
@@ -985,9 +1000,9 @@ function RunPanel({ activeKB, onRunDone }) {
   const [selectedPatient, setSelectedPatient] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedReasoningModel, setSelectedReasoningModel] = useState('')
-  const [selectedSnapshot, setSelectedSnapshot] = useState('')
+  const [selectedSnapshot, setSelectedSnapshot] = useState('1')
   const [availableSnapshots, setAvailableSnapshots] = useState([])
-  const [usePatientContext, setUsePatientContext] = useState(false)
+  const [usePatientContext, setUsePatientContext] = useState(true)
   const [running, setRunning] = useState(false)
   const [jobId, setJobId] = useState(null)
   const [error, setError] = useState(null)
@@ -1178,7 +1193,7 @@ export default function ClinicalAssess() {
       const initial = {}
       detail.snapshots.forEach(s => { if (s.rating != null) initial[s.snapshot_num] = s.rating })
       setRatings(initial)
-      setOpenSnap(null)
+      setOpenSnap(detail.snapshots[0]?.snapshot_num ?? null)
     }
     setComment(detail?.comment ?? '')
   }, [detail])

@@ -8,23 +8,22 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
 from typing import Optional
 
 import threading
 
 import httpx
 
-from ..config import ANTHROPIC_API_KEY, GOOGLE_API_KEY, BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID
+from ..config import ANTHROPIC_API_KEY, GOOGLE_API_KEY, BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, KG_FALLBACK_MODEL
 from .token_tracker import log_call, calculate_cost
 
 _GEMINI_SEARCH_MODEL = "gemini-2.5-flash"
 
 log = logging.getLogger("wiki.gap_resolver")
 
-# Hard cap on total Browserbase sessions per search_for_gap call.
-# Each session costs money; 1 Google search + up to 3 article fetches = 4 max per gap.
-_BB_SEM = threading.Semaphore(3)   # max concurrent sessions (plan limit)
-_BB_MAX_PER_SEARCH = 4             # hard total cap per search_for_gap invocation
+# Limits concurrent BB sessions when NOT using BBPool (single-gap resolve / search).
+_BB_SEM = threading.Semaphore(3)
 
 NCBI_API_KEY = os.getenv("NCBI_API_KEY", "")
 EUTILS_BASE  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -57,6 +56,72 @@ class _BB:
         except Exception:
             pass
         self._sh.close()
+
+
+class BBPool:
+    """
+    Pool of long-lived Browserbase sessions for batch gap resolution.
+
+    Opens `size` BB sessions at start and keeps them alive for the whole batch.
+    Each call to `acquire()` borrows a CDP URL, creates a fresh Playwright
+    connection to it (thread-safe), and returns it when done.  This way 25 gaps
+    share 3 BB sessions instead of opening 25 × 60 s-minimum sessions.
+    """
+
+    def __init__(self, size: int = 3):
+        self._size      = size
+        self._sessions: list[_BB] = []
+        self._cdp_urls: list[str] = []
+        self._available: list[str] = []
+        self._lock = threading.Lock()
+        self._sem  = threading.Semaphore(0)  # released once per started session
+
+    def start(self):
+        for i in range(self._size):
+            bb = _BB()
+            bb.__enter__()
+            self._sessions.append(bb)
+            self._cdp_urls.append(bb.cdp_url)
+            self._available.append(bb.cdp_url)
+            self._sem.release()
+            log.info("BBPool: session %d/%d started (%s)", i + 1, self._size, bb._session_id)
+
+    def stop(self):
+        for bb in self._sessions:
+            try:
+                bb.__exit__()
+            except Exception:
+                pass
+        log.info("BBPool: all %d sessions closed", self._size)
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+    @contextmanager
+    def acquire(self):
+        """Borrow a CDP URL from the pool. Creates a fresh Playwright connection per call."""
+        self._sem.acquire()
+        with self._lock:
+            cdp_url = self._available.pop()
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                browser = pw.chromium.connect_over_cdp(cdp_url)
+                try:
+                    yield browser
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        finally:
+            with self._lock:
+                self._available.append(cdp_url)
+            self._sem.release()
 
 
 # ── LLM query generation ──────────────────────────────────────────────────────
@@ -105,10 +170,6 @@ _RE_PMC = re.compile(
     r'|pmc\.ncbi\.nlm\.nih\.gov/articles)/(PMC\d+)/?)["\']?',
     re.IGNORECASE,
 )
-_RE_MEDSCAPE = re.compile(
-    r'(?:href=["\']?/url\?[^"\']*?q=|href=["\']?)(https?://reference\.medscape\.com/(?:drug|article)/[^"\'&\s>]+)',
-    re.IGNORECASE,
-)
 
 
 def _extract_ncbi_hits(html: str) -> list[dict]:
@@ -127,87 +188,73 @@ def _extract_ncbi_hits(html: str) -> list[dict]:
     return hits
 
 
-def _extract_medscape_hits(html: str) -> list[dict]:
-    seen: set[str] = set()
-    hits: list[dict] = []
-    for m in _RE_MEDSCAPE.finditer(html):
-        url = m.group(1)
-        if url not in seen:
-            seen.add(url)
-            hits.append({"type": "medscape", "url": url})
-    return hits
-
-
-def _google_search(query: str) -> list[dict]:
+def _google_search_in_session(browser, query: str) -> list[dict]:
+    """Google search reusing an already-open Playwright browser."""
     from urllib.parse import urlencode
-    from playwright.sync_api import sync_playwright
-
     url = "https://www.google.com/search?" + urlencode({"q": query, "num": 20})
-    log.info("Google search (BB session): '%s'", query)
-    with _BB_SEM, _BB() as bb:
-        with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(bb.cdp_url)
-            ctx  = browser.contexts[0]
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            try:
-                btn = page.locator('button:has-text("Accept all")').first
-                if btn.is_visible(timeout=3_000):
-                    btn.click()
-                    page.wait_for_load_state("domcontentloaded", timeout=10_000)
-            except Exception:
-                pass
-            html = page.content()
-            browser.close()
+    log.info("Google search (shared BB session): '%s'", query)
+    ctx  = browser.contexts[0]
+    page = ctx.new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        try:
+            btn = page.locator('button:has-text("Accept all")').first
+            if btn.is_visible(timeout=3_000):
+                btn.click()
+                page.wait_for_load_state("domcontentloaded", timeout=10_000)
+        except Exception:
+            pass
+        html = page.content()
+    finally:
+        page.close()
     hits = _extract_ncbi_hits(html)
     log.info("Google search returned %d PubMed/PMC hits", len(hits))
     return hits
 
 
-def _medscape_direct_search(gap_title: str) -> list[dict]:
-    from urllib.parse import urlencode
-    from playwright.sync_api import sync_playwright
-
-    search_url = "https://reference.medscape.com/search?" + urlencode({"q": gap_title})
-    log.info("[gap=%s] Medscape direct search (BB session): %s", gap_title, search_url)
-    try:
-        with _BB_SEM, _BB() as bb:
-            with sync_playwright() as pw:
-                browser = pw.chromium.connect_over_cdp(bb.cdp_url)
-                ctx  = browser.contexts[0]
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
-                html = page.content()
-                browser.close()
-        hits = _extract_medscape_hits(html)
-        log.info("[gap=%s] Medscape search returned %d hits: %s",
-                 gap_title, len(hits), [h["url"] for h in hits])
-        return hits
-    except Exception as exc:
-        log.warning("[gap=%s] Medscape direct search failed: %s", gap_title, exc)
-        return []
-
-
-def _fetch_medscape_text(medscape_url: str) -> Optional[str]:
-    from playwright.sync_api import sync_playwright
-    log.info("Fetching Medscape page (BB session): %s", medscape_url)
-    try:
-        with _BB_SEM, _BB() as bb:
-            with sync_playwright() as pw:
-                browser = pw.chromium.connect_over_cdp(bb.cdp_url)
-                ctx  = browser.contexts[0]
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                page.goto(medscape_url, wait_until="domcontentloaded", timeout=30_000)
-                html = page.content()
-                browser.close()
-        if len(html) > 2000:
-            text = _html_to_text(html)
-            log.info("Medscape page fetched: %d chars of text", len(text))
-            return text
-        log.warning("Medscape page too short (%d chars) — skipping", len(html))
-    except Exception as exc:
-        log.warning("Medscape page fetch failed for %s: %s", medscape_url, exc)
-    return None
+def _llm_fallback(gap_title: str, gap_sections: list[str]) -> tuple[list[dict], float]:
+    """Generate gap content via LLM when PubMed yields 0 articles. Returns (articles, cost_usd)."""
+    from google import genai
+    log.info("[gap=%s] LLM fallback using model=%s  sections=%s", gap_title, KG_FALLBACK_MODEL, gap_sections)
+    client = genai.Client(api_key=GOOGLE_API_KEY)
+    prompt = (
+        f"You are a medical reference author. Write a comprehensive, evidence-based summary for the drug/topic: **{gap_title}**\n\n"
+        f"Cover ONLY these sections (use ## headings):\n"
+        + "".join(f"- {s}\n" for s in gap_sections)
+        + "\nFor each section write 2-5 paragraphs with specific clinical details, doses, and references where known. "
+        "Use plain prose, no bullet spam. Be precise and clinically useful."
+    )
+    resp = client.models.generate_content(model=KG_FALLBACK_MODEL, contents=prompt)
+    text = (resp.text or "").strip()
+    tokens_in  = getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
+    tokens_out = getattr(resp.usage_metadata, "candidates_token_count", 0) or 0
+    cost = log_call(
+        operation="gap_llm_fallback",
+        source_name=gap_title[:80],
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+        model=KG_FALLBACK_MODEL,
+    )
+    if len(text) < 200:
+        log.warning("[gap=%s] LLM fallback response too short (%d chars)", gap_title, len(text))
+        return [], cost
+    log.info("[gap=%s] LLM fallback generated %d chars", gap_title, len(text))
+    article = {
+        "pmid":               None,
+        "pmc_id":             None,
+        "title":              f"LLM-generated summary: {gap_title}",
+        "authors":            KG_FALLBACK_MODEL,
+        "journal":            "LLM fallback",
+        "pub_date":           "",
+        "abstract":           text[:500],
+        "citation":           f"Generated by {KG_FALLBACK_MODEL}. {gap_title}.",
+        "content":            text,
+        "source_url":         None,
+        "relevant":           True,
+        "relevance_reason":   f"LLM-generated content covering {', '.join(gap_sections)}",
+        "skip_quality_gate":  True,
+    }
+    return [article], cost
 
 
 # ── E-utilities ───────────────────────────────────────────────────────────────
@@ -400,136 +447,91 @@ def _html_to_text(html: str) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def _medscape_fallback(
-    gap_title: str, gap_sections: list[str], query: str, max_results: int,
-    bb_budget: int = 3,
+def search_for_gap(
+    gap_title: str,
+    gap_sections: list[str],
+    max_results: int = 5,
+    bb_pool: Optional["BBPool"] = None,
 ) -> tuple[list[dict], float]:
-    """Fetch Medscape reference pages as a fallback. Returns (articles, cost_usd)."""
-    log.info("[gap=%s] No relevant PubMed articles — trying Medscape fallback (BB budget: %d)",
-             gap_title, bb_budget)
-
-    if bb_budget <= 0:
-        log.warning("[gap=%s] Medscape fallback skipped — BB session budget exhausted", gap_title)
-        return [], 0.0
-
-    medscape_hits = _medscape_direct_search(gap_title)
-    bb_budget -= 1
-
-    if not medscape_hits:
-        log.warning("[gap=%s] Medscape search returned 0 hits — gap unresolved", gap_title)
-        return [], 0.0
-
-    articles: list[dict] = []
-    fallback_cost = 0.0
-    for hit in medscape_hits:
-        if len(articles) >= max_results:
-            break
-        if bb_budget <= 0:
-            log.warning("[gap=%s] Medscape page fetch skipped — BB session budget exhausted", gap_title)
-            break
-        text = _fetch_medscape_text(hit["url"])
-        bb_budget -= 1
-        if not text:
-            continue
-        title = hit["url"].rstrip("/").split("/")[-1].replace("-", " ").title()
-        article = {
-            "pmid":       None,
-            "pmc_id":     None,
-            "title":      title,
-            "authors":    "Medscape Reference",
-            "journal":    "Medscape",
-            "pub_date":   "",
-            "abstract":   text[:500],
-            "citation":   f"Medscape Reference. {title}. {hit['url']}",
-            "content":    text,
-            "source_url": hit["url"],
-        }
-        relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
-        fallback_cost += rel_cost
-        article["relevant"]         = relevant
-        article["relevance_reason"] = reason
-        if relevant:
-            articles.append(article)
-
-    log.info("[gap=%s] Medscape fallback: %d relevant article(s) found", gap_title, len(articles))
-    return articles, fallback_cost
-
-
-def search_for_gap(gap_title: str, gap_sections: list[str], max_results: int = 5) -> tuple[list[dict], float]:
     """
     Search Google/PubMed for free full-text articles covering the gap.
-    Falls back to Medscape reference pages when PubMed yields no relevant results.
+    Falls back to LLM-generated content (KG_FALLBACK_MODEL) when PubMed yields 0 results.
+    Pass a BBPool for batch usage — sessions are shared across all gaps in the batch.
     Returns (articles, cost_usd).
     """
     log.info("=== search_for_gap START  gap='%s'  sections=%s ===", gap_title, gap_sections)
-    bb_sessions_used = 0
 
     query, search_cost = generate_search_query(gap_title, gap_sections)
-    total_search_cost = search_cost
-    seen_ids: set[str] = set()
-    all_hits: list[dict] = []
-
-    if bb_sessions_used < _BB_MAX_PER_SEARCH:
-        for h in _google_search(query):
-            if h["id"] not in seen_ids:
-                seen_ids.add(h["id"])
-                all_hits.append(h)
-        bb_sessions_used += 1
-    else:
-        log.warning("[gap=%s] BB budget exhausted before Google search", gap_title)
-
-    log.info("[gap=%s] Google search found %d unique PubMed/PMC hits (BB used: %d/%d)",
-             gap_title, len(all_hits), bb_sessions_used, _BB_MAX_PER_SEARCH)
-
-    # ── Normal PubMed/PMC path ────────────────────────────────────────────────
+    total_search_cost  = search_cost
     articles: list[dict] = []
 
-    for hit in all_hits:
-        if len(articles) >= max_results:
-            log.info("[gap=%s] Reached max_results=%d — stopping PubMed scan", gap_title, max_results)
-            break
+    from playwright.sync_api import sync_playwright
 
-        if hit["type"] == "pmc":
-            pmid = _pmc_to_pmid(hit["id"])
-            if not pmid:
-                log.debug("[gap=%s] Could not resolve PMID for %s — skipping", gap_title, hit["id"])
-                continue
-            known_pmc = hit["id"]
+    @contextmanager
+    def _browser_ctx():
+        if bb_pool is not None:
+            with bb_pool.acquire() as browser:
+                yield browser
         else:
-            pmid      = hit["id"]
-            known_pmc = None
+            with _BB_SEM, _BB() as bb:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.connect_over_cdp(bb.cdp_url)
+                    yield browser
 
-        try:
-            article = _fetch_article_meta(pmid)
-        except Exception as exc:
-            log.warning("[gap=%s] Metadata fetch failed for PMID %s: %s", gap_title, pmid, exc)
-            continue
+    with _browser_ctx() as browser:
 
-        if known_pmc and not article["pmc_id"]:
-            article["pmc_id"] = known_pmc
+            seen_ids: set[str] = set()
+            all_hits: list[dict] = []
+            for h in _google_search_in_session(browser, query):
+                if h["id"] not in seen_ids:
+                    seen_ids.add(h["id"])
+                    all_hits.append(h)
 
-        if not article["pmc_id"]:
-            log.debug("[gap=%s] PMID %s has no PMC full text — skipping", gap_title, pmid)
-            continue
+            log.info("[gap=%s] Google search found %d unique PubMed/PMC hits", gap_title, len(all_hits))
 
-        relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
-        total_search_cost += rel_cost
-        article["relevant"]          = relevant
-        article["relevance_reason"]  = reason
+            for hit in all_hits:
+                if len(articles) >= max_results:
+                    break
 
-        if relevant:
-            articles.append(article)
+                if hit["type"] == "pmc":
+                    pmid = _pmc_to_pmid(hit["id"])
+                    if not pmid:
+                        continue
+                    known_pmc = hit["id"]
+                else:
+                    pmid      = hit["id"]
+                    known_pmc = None
+
+                try:
+                    article = _fetch_article_meta(pmid)
+                except Exception as exc:
+                    log.warning("[gap=%s] Metadata fetch failed for PMID %s: %s", gap_title, pmid, exc)
+                    continue
+
+                if known_pmc and not article["pmc_id"]:
+                    article["pmc_id"] = known_pmc
+
+                if not article["pmc_id"]:
+                    log.debug("[gap=%s] PMID %s has no PMC full text — skipping", gap_title, pmid)
+                    continue
+
+                relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
+                total_search_cost += rel_cost
+                article["relevant"]         = relevant
+                article["relevance_reason"] = reason
+                if relevant:
+                    articles.append(article)
+
+            browser.close()
 
     log.info("[gap=%s] PubMed path: %d relevant article(s) from %d hits",
              gap_title, len(articles), len(all_hits))
 
-    # ── Medscape fallback when PubMed found nothing relevant ─────────────────
-    if not articles and bb_sessions_used < _BB_MAX_PER_SEARCH:
-        articles, fallback_cost = _medscape_fallback(
-            gap_title, gap_sections, query, max_results,
-            bb_budget=_BB_MAX_PER_SEARCH - bb_sessions_used,
-        )
-        total_search_cost += fallback_cost
+    # ── LLM fallback when PubMed yields nothing ───────────────────────────────
+    if not articles:
+        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections)
+        articles.extend(llm_articles)
+        total_search_cost += llm_cost
 
     log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(articles))
     return articles, total_search_cost

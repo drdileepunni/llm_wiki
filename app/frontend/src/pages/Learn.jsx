@@ -7,7 +7,7 @@ import {
   ArrowPathIcon,
   StopIcon,
 } from '@heroicons/react/24/outline'
-import { startLearnRun, learnJobStatus, listLearnRuns, cancelLearnRun } from '../api'
+import { startLearnRun, learnJobStatus, listLearnRuns, cancelLearnRun, deleteLearnRun, resumeLearnRun, restartLearnRun } from '../api'
 import { useAppState } from '../AppStateContext'
 
 // ── Status config ─────────────────────────────────────────────────────────────
@@ -32,10 +32,11 @@ function StatusBadge({ status }) {
 // ── Phase steps ───────────────────────────────────────────────────────────────
 
 const PHASES = [
+  { key: 'exporting',           label: 'Export + Snapshots' },
   { key: 'ingesting',           label: 'Ingest' },
+  { key: 'pending_review',      label: 'Review Questions' },
   { key: 'resolving',           label: 'Resolve KGs' },
   { key: 'knowledge_assessing', label: 'Assess' },
-  { key: 'clinical_assessing',  label: 'Clinical' },
   { key: 'complete',            label: 'Done' },
 ]
 
@@ -75,12 +76,12 @@ function PhaseBar({ currentPhase, status }) {
 // ── Log entry ─────────────────────────────────────────────────────────────────
 
 const PHASE_LABEL = {
+  exporting:           'Export',
   ingesting:           'Ingest',
+  pending_review:      'Review',
   knowledge_loop:      'Knowledge',
-  clinical_loop:       'Clinical',
   resolving:           'Resolve',
   knowledge_assessing: 'Assess',
-  clinical_assessing:  'Clinical',
   complete:            'Done',
 }
 
@@ -132,11 +133,23 @@ function LogEntry({ entry }) {
 
 // ── Run card (left panel) ─────────────────────────────────────────────────────
 
-function RunCard({ run, isSelected, onSelect }) {
+function RunCard({ run, isSelected, onSelect, onDelete }) {
+  const [deleting, setDeleting] = useState(false)
+
+  const handleDelete = async (e) => {
+    e.stopPropagation()
+    setDeleting(true)
+    try {
+      await onDelete(run.run_id)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   return (
-    <button
+    <div
       onClick={() => onSelect(run.run_id)}
-      className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${
+      className={`relative w-full text-left pl-4 pr-8 py-3 border-b border-border transition-colors cursor-pointer group ${
         isSelected ? 'bg-accent/10 border-l-2 border-l-accent' : 'hover:bg-ink-800'
       }`}
     >
@@ -159,24 +172,129 @@ function RunCard({ run, isSelected, onSelect }) {
           </>
         )}
       </div>
-    </button>
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        className="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 text-xs leading-none"
+        title="Delete run"
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
+// ── Question review panel ─────────────────────────────────────────────────────
+
+function QuestionReviewPanel({ questions, runId, activeKB, onResumed }) {
+  const [items, setItems] = useState(questions.map(q => ({ ...q })))
+  const [editingId, setEditingId] = useState(null)
+  const [editText, setEditText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const startEdit = (q) => { setEditingId(q.id); setEditText(q.question) }
+  const cancelEdit = () => { setEditingId(null); setEditText('') }
+  const saveEdit = (id) => {
+    setItems(prev => prev.map(q => q.id === id ? { ...q, question: editText.trim() } : q))
+    setEditingId(null)
+  }
+
+  const handleApprove = async () => {
+    setSubmitting(true)
+    try {
+      await resumeLearnRun(runId, items, activeKB)
+      onResumed()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <p className="text-sm font-semibold text-white">Review Assessment Questions</p>
+          <p className="text-xs text-muted mt-0.5">Edit any question, then approve to continue the learning cycle.</p>
+        </div>
+        <button
+          onClick={handleApprove}
+          disabled={submitting}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-green-700 hover:bg-green-600 rounded text-xs text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <CheckCircleIcon className="w-3.5 h-3.5" />
+          {submitting ? 'Resuming…' : 'Approve & Continue'}
+        </button>
+      </div>
+      <div className="space-y-2">
+        {items.map((q, idx) => (
+          <div key={q.id} className="border border-border rounded-lg px-4 py-3 bg-ink-900">
+            <div className="flex items-start gap-3">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-ink-700 border border-border text-[10px] font-mono text-muted flex items-center justify-center mt-0.5">
+                {idx + 1}
+              </span>
+              <div className="flex-1 min-w-0">
+                {editingId === q.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editText}
+                      onChange={e => setEditText(e.target.value)}
+                      rows={3}
+                      autoFocus
+                      className="w-full bg-ink-800 border border-accent rounded px-2 py-1.5 text-xs text-white resize-none focus:outline-none leading-relaxed"
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => saveEdit(q.id)} className="text-[10px] px-2 py-1 rounded bg-accent text-white hover:bg-accent/80">Save</button>
+                      <button onClick={cancelEdit} className="text-[10px] px-2 py-1 rounded bg-ink-700 text-muted hover:text-white">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-xs text-white/85 leading-relaxed">{q.question}</p>
+                    <button
+                      onClick={() => startEdit(q)}
+                      className="flex-shrink-0 text-muted hover:text-white/60 transition-colors mt-0.5"
+                      title="Edit question"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                {q.rationale && editingId !== q.id && (
+                  <p className="text-[10px] text-muted mt-1">{q.rationale}</p>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
 // ── Start panel ───────────────────────────────────────────────────────────────
 
 function StartPanel({ activeKB, onStarted }) {
-  const [cpmrn, setCpmrn]       = useState('')
-  const [encounter, setEncounter] = useState('1')
-  const [loading, setLoading]    = useState(false)
-  const [error, setError]        = useState(null)
+  const [cpmrn, setCpmrn]                 = useState('')
+  const [encounter, setEncounter]         = useState('1')
+  const [numSnapshots, setNumSnapshots]   = useState('2')
+  const [reviewQuestions, setReviewQuestions] = useState(true)
+  const [loading, setLoading]             = useState(false)
+  const [error, setError]                 = useState(null)
 
   const handleStart = async () => {
     if (!cpmrn.trim()) return
     setLoading(true)
     setError(null)
     try {
-      const { run_id } = await startLearnRun(cpmrn.trim(), encounter.trim(), activeKB)
+      const { run_id } = await startLearnRun(
+        cpmrn.trim(), encounter.trim(), activeKB,
+        parseInt(numSnapshots, 10) || 2,
+        reviewQuestions,
+      )
       onStarted(run_id)
     } catch (err) {
       setError(err.message)
@@ -201,6 +319,28 @@ function StartPanel({ activeKB, onStarted }) {
           placeholder="Encounter (e.g. 1)"
           className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono placeholder:text-muted focus:outline-none focus:border-accent"
         />
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-muted whitespace-nowrap">Snapshots</label>
+          <input
+            type="number" min="1" max="10"
+            value={numSnapshots}
+            onChange={e => setNumSnapshots(e.target.value)}
+            className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent"
+          />
+        </div>
+        <button
+          onClick={() => setReviewQuestions(v => !v)}
+          className={`w-full flex items-center justify-between px-3 py-2 rounded border text-xs font-mono transition-colors ${
+            reviewQuestions
+              ? 'bg-accent/10 border-accent/40 text-accent'
+              : 'bg-ink-800 border-border text-muted'
+          }`}
+        >
+          <span>Review questions after ingest</span>
+          <span className={`w-8 h-4 rounded-full relative transition-colors ${reviewQuestions ? 'bg-accent' : 'bg-ink-600'}`}>
+            <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${reviewQuestions ? 'left-4' : 'left-0.5'}`} />
+          </span>
+        </button>
       </div>
       {error && <p className="text-xs text-red-400 mb-2">{error}</p>}
       <button
@@ -270,8 +410,38 @@ export default function Learn() {
     await fetchDetail(runId)
   }
 
+  const handleDelete = async (runId) => {
+    try {
+      await deleteLearnRun(runId, activeKB)
+      if (selectedId === runId) { setSelectedId(null); setDetail(null) }
+      await fetchList()
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
   const isRunning = detail?.status === 'running'
+  const isStopped = detail?.status === 'stopped' || detail?.status === 'error'
   const [stopping, setStopping] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+
+  const handleRestart = async () => {
+    if (!detail?.run_id || restarting) return
+    setRestarting(true)
+    const id = detail.run_id
+    try {
+      await restartLearnRun(id, activeKB)
+      await fetchList()
+      // Re-trigger the polling useEffect by cycling selectedId
+      setSelectedId(null)
+      setDetail(null)
+      setTimeout(() => setSelectedId(id), 50)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setRestarting(false)
+    }
+  }
 
   const handleStop = async () => {
     if (!detail?.run_id || stopping) return
@@ -319,6 +489,7 @@ export default function Learn() {
                 run={r}
                 isSelected={selectedId === r.run_id}
                 onSelect={setSelectedId}
+                onDelete={handleDelete}
               />
             ))
           )}
@@ -377,6 +548,16 @@ export default function Learn() {
                   </button>
                 </div>
               )}
+              {isStopped && (
+                <button
+                  onClick={handleRestart}
+                  disabled={restarting}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-green-800/60 bg-green-950/30 text-green-400 text-xs hover:bg-green-900/40 hover:border-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                >
+                  <ArrowPathIcon className={`w-3.5 h-3.5 ${restarting ? 'animate-spin' : ''}`} />
+                  {restarting ? 'Resuming…' : 'Resume'}
+                </button>
+              )}
             </div>
 
             {/* Phase bar */}
@@ -387,6 +568,16 @@ export default function Learn() {
               <div className="mb-4 p-3 bg-red-950/20 border border-red-800/40 rounded-lg text-sm text-red-400">
                 {detail.error}
               </div>
+            )}
+
+            {/* Question review gate */}
+            {detail.current_phase === 'pending_review' && detail.pending_questions?.length > 0 && (
+              <QuestionReviewPanel
+                questions={detail.pending_questions}
+                runId={detail.run_id}
+                activeKB={activeKB}
+                onResumed={fetchDetail.bind(null, selectedId)}
+              />
             )}
 
             {/* Activity log — newest first */}

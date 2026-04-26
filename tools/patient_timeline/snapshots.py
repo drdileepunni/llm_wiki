@@ -92,22 +92,23 @@ def _compact(df: pd.DataFrame, max_summary: int = 90) -> str:
 
 # ── Phase A: Gemini calls ──────────────────────────────────────────────────────
 
-def _get_event_windows(df: pd.DataFrame, client) -> list[dict]:
+def _get_event_windows(df: pd.DataFrame, client, num_snapshots: int = 5) -> list[dict]:
     """
-    One Gemini call — identify 5 event-focused windows (start_row, end_row).
+    One Gemini call — identify event-focused windows (start_row, end_row).
+    Each window ends at a trigger event: abnormal lab, abnormal vital, or SBAR raised.
     Returns list of dicts with: start_row, end_row, phase, difficulty, context, next_action
     """
     n = len(df)
     tl = _compact(df)
 
-    prompt = f"""You are identifying 5 clinically significant event windows from an ICU timeline.
+    prompt = f"""You are identifying {num_snapshots} clinically significant event windows from an ICU timeline.
 
 TIMELINE ({n} rows, 0-indexed):
 {tl}
 
-For each event, identify:
-- START_ROW: where the event/concern begins
-- END_ROW: where the event resolves or requires action (typically 15-30 rows after start)
+For each window, identify:
+- START_ROW: where the build-up to the trigger event begins
+- END_ROW: the row of the trigger event itself (see rules below)
 - The clinical phase and severity
 
 Reply with EXACTLY this format and nothing else:
@@ -120,20 +121,25 @@ ACTION_1: <specific clinical action that should be taken>
 
 WINDOW_2: <start_row>-<end_row>
 PHASE_2: ...
-(continue for WINDOW_3, WINDOW_4, WINDOW_5)
+(continue for all {num_snapshots} windows)
 
 Rules:
-- Each window 15-40 rows (sufficient to assess response to clinical situation)
+- END_ROW must be one of these trigger event types:
+    1. An abnormal lab result (e.g. rising creatinine, high lactate, low haemoglobin, abnormal electrolytes)
+    2. An abnormal vital sign (e.g. tachycardia, hypotension, desaturation, fever, high RR)
+    3. An SBAR raised by any clinician or nurse for any reason
+  Do NOT end a window on a medication order, nursing task, normal result, or administrative event.
+- Each window 15-40 rows (sufficient context leading up to the trigger)
 - Windows must not overlap
 - Spread across the entire stay
-- Focus on distinct clinical moments (admission, deterioration, management, etc.)
+- Pick triggers from different clinical domains where possible (e.g. not all vitals)
 """
 
     raw = _call(client, prompt, max_tokens=2000, thinking=False)
-    return _parse_event_windows(raw, n)
+    return _parse_event_windows(raw, n, num_snapshots)
 
 
-def _parse_event_windows(raw: str, n: int) -> list[dict]:
+def _parse_event_windows(raw: str, n: int, num_snapshots: int = 5) -> list[dict]:
     """Parse Gemini's event window response."""
     blocks: dict[int, dict] = {}
     key_re = re.compile(
@@ -184,7 +190,7 @@ def _parse_event_windows(raw: str, n: int) -> list[dict]:
             "next_action": b.get("ACTION", ""),
         })
 
-    return windows[:5]
+    return windows[:num_snapshots]
 
 
 def _get_structured_answer(
@@ -257,28 +263,29 @@ Write at senior-resident level. Be specific with numbers and drug names."""
         }
 
 
-def ask_gemini(df: pd.DataFrame, api_key: str) -> list[dict]:
+def ask_gemini(df: pd.DataFrame, api_key: str, num_snapshots: int = 5) -> list[dict]:
     """
     Phase A — all Gemini interactions for one timeline.
 
-    Returns a list of 5 dicts:
+    Returns a list of num_snapshots dicts:
       {start_row, end_row, phase, difficulty, context, next_action, answer_items}
       where answer_items contains structured fields directly from Gemini
     """
     client = _gemini_client(api_key)
 
-    logger.info("    Identifying 5 event windows …")
-    windows = _get_event_windows(df, client)
+    logger.info("    Identifying %d event windows …", num_snapshots)
+    windows = _get_event_windows(df, client, num_snapshots)
     logger.info(
         "    Event windows: %s",
         [f"[{w['start_row']}-{w['end_row']}]" for w in windows]
     )
 
+    total = len(windows)
     results = []
     for i, window in enumerate(windows, 1):
         logger.info(
-            "    Generating answer %d/5 (rows %d-%d, %s, %s) …",
-            i, window["start_row"], window["end_row"], window["phase"], window["difficulty"],
+            "    Generating answer %d/%d (rows %d-%d, %s, %s) …",
+            i, total, window["start_row"], window["end_row"], window["phase"], window["difficulty"],
         )
         snap_df = df.iloc[window["start_row"]: window["end_row"] + 1]
         answer_items = _get_structured_answer(snap_df, window, df, client)

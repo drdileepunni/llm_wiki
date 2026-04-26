@@ -81,6 +81,7 @@ def fill_sections(
     target_page_path: str,   # relative to wiki_root, e.g. "wiki/entities/saline.md"
     gap_file_path:   str,    # relative to wiki_root, e.g. "wiki/gaps/saline.md"
     kb: "KBConfig | None" = None,
+    skip_quality_gate: bool = False,
 ) -> dict:
     """
     Fill specific missing sections of a wiki page using a source article.
@@ -193,7 +194,7 @@ Instructions:
         prose = prose[end + 3:] if end != -1 else prose
     net_added = len(prose.strip()) - len(existing_content.strip())
 
-    if net_added < MIN_PROSE_CHARS:
+    if net_added < MIN_PROSE_CHARS and not skip_quality_gate:
         log.warning(
             "Fill rejected — net prose added (%d chars) below threshold (%d). "
             "Source article likely did not cover this topic. Gap kept open.",

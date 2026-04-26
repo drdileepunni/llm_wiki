@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from ..config import KBConfig
 from ..dependencies import resolve_kb
 from ..services.fill_sections_pipeline import fill_sections
-from ..services.gap_resolver import fetch_article_content, search_for_gap
+from ..services.gap_resolver import fetch_article_content, search_for_gap, BBPool, _llm_fallback
 from ..services.llm_client import get_llm_client
 
 log = logging.getLogger("wiki.resolve")
@@ -174,40 +174,64 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
     _batches[batch_id]["total_gaps"] = len(gaps)
     log.info("resolve-all batch %s: %d gaps", batch_id, len(gaps))
 
+    # Pre-create 3 shared BB sessions for the whole batch (reduces billed minutes
+    # from N×60s to just 3×actual_duration).
+    def _start_pool():
+        p = BBPool(size=3)
+        p.start()
+        return p
+
+    pool = await asyncio.to_thread(_start_pool)
+
+    async def _ingest_article(article, gap, skip_quality_gate=None):
+        job_id = str(uuid.uuid4())[:8]
+        _jobs[job_id] = {"status": "running", "title": article.get("title", ""), "result": None, "error": None}
+        _batches[batch_id]["job_ids"].append(job_id)
+        gate = skip_quality_gate if skip_quality_gate is not None else bool(article.get("skip_quality_gate"))
+        await _do_ingest(
+            job_id,
+            article.get("pmc_id", ""),
+            article.get("title", ""),
+            article.get("citation", ""),
+            gap["title"],
+            gap["missing_sections"],
+            gap["file"],
+            gap["referenced_page"],
+            kb,
+            prefetched_content=article.get("content", ""),
+            skip_quality_gate=gate,
+        )
+        result = _jobs[job_id].get("result") or {}
+        return len(result.get("files_written", []))
+
     async def process_gap(gap):
         try:
             articles, _ = await asyncio.to_thread(
-                search_for_gap, gap["title"], gap["missing_sections"], max_results
+                search_for_gap, gap["title"], gap["missing_sections"], max_results, pool
             )
-            # Run articles sequentially — each writes to the same referenced_page,
-            # so concurrent writes would race and overwrite each other.
+            # Run articles sequentially — each writes to the same referenced_page.
+            files_written = 0
             for article in articles:
-                job_id = str(uuid.uuid4())[:8]
-                _jobs[job_id] = {
-                    "status": "running",
-                    "title": article.get("title", ""),
-                    "result": None,
-                    "error": None,
-                }
-                _batches[batch_id]["job_ids"].append(job_id)
-                await _do_ingest(
-                    job_id,
-                    article.get("pmc_id", ""),
-                    article.get("title", ""),
-                    article.get("citation", ""),
-                    gap["title"],
-                    gap["missing_sections"],
-                    gap["file"],
-                    gap["referenced_page"],
-                    kb,
-                    prefetched_content=article.get("content", ""),
+                files_written += await _ingest_article(article, gap)
+
+            # LLM fallback if PubMed articles were found but nothing got written.
+            if files_written == 0:
+                log.info("resolve-all gap '%s': 0 files written — triggering LLM fallback", gap["title"])
+                llm_articles, _ = await asyncio.to_thread(
+                    _llm_fallback, gap["title"], gap["missing_sections"]
                 )
+                for article in llm_articles:
+                    await _ingest_article(article, gap, skip_quality_gate=True)
         except Exception as exc:
             log.warning("resolve-all gap '%s' search failed: %s", gap["title"], exc)
         finally:
             _batches[batch_id]["completed_gaps"] += 1
 
-    await asyncio.gather(*[process_gap(g) for g in gaps])
+    try:
+        await asyncio.gather(*[process_gap(g) for g in gaps])
+    finally:
+        await asyncio.to_thread(pool.stop)
+
     _batches[batch_id]["status"] = "done"
     log.info("resolve-all batch %s done: %d jobs started", batch_id, len(_batches[batch_id]["job_ids"]))
 
@@ -336,6 +360,7 @@ async def _do_ingest(
     referenced_page: str,
     kb: KBConfig,
     prefetched_content: str = "",
+    skip_quality_gate: bool = False,
 ):
     try:
         if prefetched_content:
@@ -360,6 +385,7 @@ async def _do_ingest(
             referenced_page,
             gap_file,
             kb,
+            skip_quality_gate,
         )
         _jobs[job_id] = {"status": "done", "title": title, "result": result, "error": None}
 

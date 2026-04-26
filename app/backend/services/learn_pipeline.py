@@ -4,7 +4,8 @@ Learning loop orchestrator.
 Given a pre-existing patient timeline, runs the full training pipeline:
   1. Ingest truncated CSV → wiki pages + KGs
   2. Knowledge loop: resolve KGs → assess (10 Qs) → until status=passing
-  3. Clinical loop:  run snapshots via run_chat → if new KGs: resolve → repeat
+
+Clinical assessment is a separate manual step (see clinical_assess_pipeline.py).
 
 State is persisted as JSON at {kb.wiki_root}/learn_runs/{run_id}.json so the
 router can poll it and the UI can display live progress.
@@ -17,11 +18,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from ..cancellation import cleanup_run, get_stop_event
+from ..cancellation import cleanup_run, get_resume_event, get_stop_event
 from ..config import KBConfig, WIKI_ROOT
 from .assess_pipeline import generate_assessment, run_assessment
 from .chat_pipeline import run_chat
-from .clinical_assess_pipeline import _clinical_assess_path, _load_qa_json, load_case
 from .ingest_pipeline import run_ingest_chunked
 from .resolve_service import resolve_all_gaps
 
@@ -124,108 +124,42 @@ def _update_phase(state: dict, phase: str, kb: KBConfig, stop_event=None):
         raise _Stopped()
 
 
-# ── Clinical loop helper ──────────────────────────────────────────────────────
-
-def _save_clinical_assessment(slug: str, run_id: str, snapshots_data: list, kb: KBConfig) -> None:
-    """Save clinical assessment results to assessments/clinical/{slug}/{run_id}.json"""
-    result = {
-        "patient_id": slug,
-        "run_id": run_id,
-        "patient_dir": str(_timeline_dir(slug)),
-        "run_at": datetime.utcnow().isoformat(),
-        "snapshots": snapshots_data,
-    }
-    out_path = _clinical_assess_path(slug, run_id, kb)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info("Clinical assessment saved from learning loop: %s", out_path)
 
 
-def _run_clinical_via_chat(slug: str, kb: KBConfig, run_id: str, state: dict | None = None) -> tuple[int, float]:
+
+# ── Resume helper ────────────────────────────────────────────────────────────
+
+def _resume_iteration(state: dict) -> int:
     """
-    Run each snapshot question through run_chat and save as a clinical assessment.
-    Returns (new_kg_count, cost_usd).
+    Infer which knowledge-loop iteration to start from when resuming a stopped run.
+    Returns the iteration number (1-based).
+    - If stopped mid-assess on iter N → resume from iter N (re-assess)
+    - If stopped mid-resolve on iter N → resume from iter N (gap files are source of truth)
+    - If no iteration logged yet → start from iter 1
     """
-    snap_dirs = _snapshot_dirs(slug)
-    if not snap_dirs:
-        log.warning("No snapshot dirs found for %s", slug)
-        return 0, 0.0
+    iterations_seen: dict[int, set] = {}
+    for entry in state.get("log", []):
+        i = entry.get("iteration")
+        if i is not None:
+            iterations_seen.setdefault(i, set()).add(entry.get("sub_phase", ""))
 
-    total_new_kgs = 0
-    total_cost    = 0.0
-    snapshots_data = []
+    if not iterations_seen:
+        return 1
 
-    total_snaps = len(snap_dirs)
-    for snap_dir in snap_dirs:
-        csv_path = snap_dir / "snapshot.csv"
-        if not csv_path.exists():
-            log.warning("Missing snapshot.csv in %s — skipping", snap_dir)
-            continue
+    last_iter = max(iterations_seen)
+    phases_done = iterations_seen[last_iter]
 
-        snap_num_m = re.search(r"snapshot_(\d+)", snap_dir.name)
-        snap_num = int(snap_num_m.group(1)) if snap_num_m else len(snapshots_data) + 1
+    # If both resolve and assess completed for last_iter, move to next
+    if "resolving" in phases_done and "assessing" in phases_done:
+        return last_iter + 1
 
-        # Emit progress before the (slow) run_chat call
-        if state is not None:
-            _log_entry(state, "clinical_loop",
-                       f"Snapshot {snap_num}/{total_snaps} — running chat…",
-                       sub_phase="assessing", iteration=snap_num)
-            _save_run(state, kb)
-
-        csv_text = csv_path.read_text(encoding="utf-8")
-        qa_data = _load_qa_json(snap_dir)
-        question = qa_data.get("question", "")
-        context = qa_data.get("clinical_context", "")
-
-        prompt = (
-            f"{csv_text}\n\n"
-            f"CLINICAL CONTEXT:\n{context}\n\n"
-            f"Question: {question}"
-        )
-
-        snap_data = {
-            "snapshot_num": snap_num,
-            "csv_content": csv_text,
-            "question": question,
-            "phase": qa_data.get("phase", ""),
-            "difficulty": qa_data.get("difficulty", ""),
-            "clinical_context": context,
-            "expected_next_action": qa_data.get("expected_next_action", ""),
-            "immediate_actions": qa_data.get("immediate_actions", []),
-            "clinical_reasoning": qa_data.get("clinical_reasoning", []),
-            "monitoring_followup": qa_data.get("monitoring_followup", []),
-            "alternative_considerations": qa_data.get("alternative_considerations", []),
-            "agent_answer": None,
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "cost_usd": 0.0,
-        }
-
-        try:
-            result = run_chat(prompt, kb)
-            snap_data["agent_answer"]   = result.get("answer", "")
-            snap_data["tokens_in"]      = result.get("input_tokens", 0)
-            snap_data["tokens_out"]     = result.get("output_tokens", 0)
-            snap_data["cost_usd"]       = result.get("cost_usd", 0.0)
-            snap_data["gap_registered"] = result.get("gap_registered") or None
-            snap_data["gap_entity"]     = result.get("gap_entity") or None
-            snap_data["gap_sections"]   = result.get("gap_sections") or []
-            total_cost += snap_data["cost_usd"]
-            if result.get("gap_registered"):
-                total_new_kgs += 1
-                log.info("Clinical snapshot %s registered new KG", snap_dir.name)
-        except Exception as exc:
-            log.warning("run_chat failed for %s: %s", snap_dir.name, exc)
-
-        snapshots_data.append(snap_data)
-
-    _save_clinical_assessment(slug, run_id, snapshots_data, kb)
-    return total_new_kgs, total_cost
+    # Otherwise re-run the current iter (gap files already reflect partial progress)
+    return last_iter
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
-def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None = None, stop_event=None) -> str:
+def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None = None, stop_event=None, num_snapshots: int = 2, review_questions: bool = True) -> str:
     """
     Launch the full learning loop synchronously (intended to run in a thread).
     Accepts an optional run_id so the router can use the same ID it returned to
@@ -250,7 +184,7 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         "slug":          slug,
         "kb_name":       kb.name,
         "status":        "running",
-        "current_phase": "ingesting",
+        "current_phase": "exporting",
         "log":           [],
         "total_cost_usd": 0.0,
         "started_at":    datetime.utcnow().isoformat(),
@@ -260,6 +194,29 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
     _save_run(state, kb)
 
     try:
+        # ── PHASE 0: Export + snapshot generation (skipped if already exists) ─
+        timeline_dir = _timeline_dir(slug)
+        trunc_csv    = timeline_dir / f"{slug}_timeline_truncated.csv"
+        snap1_dir    = timeline_dir / "snapshot_1"
+
+        if not trunc_csv.exists() or not snap1_dir.exists():
+            _update_phase(state, "exporting", kb, stop_event)
+            _log_entry(state, "exporting", f"Generating timeline and snapshots for {slug} …")
+            _save_run(state, kb)
+            _check_stop()
+
+            from tools.patient_timeline import generate as pt_generate
+            pt_generate(
+                f"{cpmrn}/{encounter}",
+                num_snapshots=num_snapshots,
+            )
+            _log_entry(state, "exporting", f"Timeline and {num_snapshots} snapshots ready for {slug}")
+            _save_run(state, kb)
+            _check_stop()
+        else:
+            _log_entry(state, "exporting", f"Timeline and snapshots already exist for {slug} — skipping export")
+            _save_run(state, kb)
+
         # ── PHASE 1: Ingest ───────────────────────────────────────────────────
         timeline_path = _find_timeline(slug)
         timeline_text = timeline_path.read_text(encoding="utf-8")
@@ -304,6 +261,37 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
 
         _save_run(state, kb)
         _check_stop()
+
+        # ── QUESTION REVIEW GATE ──────────────────────────────────────────────
+        if review_questions:
+            # Load the just-generated questions into run state so the UI can show them
+            try:
+                from .assess_pipeline import load_assessment
+                assess_data = load_assessment(slug, kb)
+                state["pending_questions"] = [
+                    {"id": q["id"], "question": q["question"], "rationale": q.get("rationale", ""), "linked_kgs": q.get("linked_kgs", [])}
+                    for q in assess_data.get("questions", [])
+                ]
+            except Exception as exc:
+                log.warning("Could not load questions for review gate: %s", exc)
+                state["pending_questions"] = []
+
+            _update_phase(state, "pending_review", kb, stop_event)
+            _log_entry(state, "pending_review", f"Waiting for question review — {len(state.get('pending_questions', []))} questions ready")
+            _save_run(state, kb)
+
+            # Block until user approves (or stop is requested)
+            resume_event = get_resume_event(run_id)
+            while not resume_event.is_set():
+                if stop_event.is_set():
+                    raise _Stopped()
+                resume_event.wait(timeout=2.0)
+
+            # Persist any edits the user made (router writes them to state before setting resume_event)
+            _update_phase(state, "resolving", kb, stop_event)
+            state.pop("pending_questions", None)
+            _save_run(state, kb)
+            _check_stop()
 
         # ── PHASE 2: Knowledge loop ───────────────────────────────────────────
         for i in range(1, MAX_ITER + 1):
@@ -374,80 +362,6 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
                 log.info("Knowledge assessment passing after iter %d", i)
                 break
 
-        # ── PHASE 3: Clinical loop ────────────────────────────────────────────
-        previously_resolved_gaps: set[str] = set()
-
-        def _current_gap_stems() -> set[str]:
-            gaps_dir = kb.wiki_dir / "gaps"
-            if not gaps_dir.exists():
-                return set()
-            return {
-                f.stem for f in gaps_dir.glob("*.md")
-                if not f.stem.startswith("patient-")
-            }
-
-        for i in range(1, MAX_ITER - 2):
-            _update_phase(state, "clinical_assessing", kb, stop_event)
-
-            gaps_before             = _current_gap_stems()
-            new_kgs, clinical_cost  = _run_clinical_via_chat(slug, kb, state["run_id"], state=state)
-            state["total_cost_usd"] += clinical_cost
-            gaps_after              = _current_gap_stems()
-
-            new_gap_stems    = gaps_after - gaps_before
-            genuinely_new    = new_gap_stems - previously_resolved_gaps
-            plateau_reoccur  = new_gap_stems & previously_resolved_gaps
-
-            if plateau_reoccur:
-                log.info(
-                    "Clinical loop: gap(s) %s reappeared after prior resolution — retrieval plateau, stopping",
-                    plateau_reoccur,
-                )
-
-            _log_entry(
-                state, "clinical_loop",
-                f"Iter {i} — {new_kgs} KGs registered, {len(genuinely_new)} genuinely new"
-                + (f", {len(plateau_reoccur)} plateau (already resolved)" if plateau_reoccur else ""),
-                iteration=i,
-                sub_phase="assessing",
-                new_kgs=new_kgs,
-                genuinely_new=len(genuinely_new),
-                plateau=len(plateau_reoccur),
-            )
-            _save_run(state, kb)
-            _check_stop()
-
-            if not genuinely_new:
-                log.info("Clinical loop complete after iter %d (no genuinely new KGs)", i)
-                break
-
-            _update_phase(state, "resolving", kb, stop_event)
-
-            def _clinical_resolve_progress(idx, total, gap_title, articles, cost, _i=i):
-                _log_entry(state, "clinical_loop",
-                           f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
-                           iteration=_i, sub_phase="resolving", cost_usd=cost)
-                _save_run(state, kb)
-                if stop_event.is_set():
-                    raise _Stopped()
-
-            resolve_stats = resolve_all_gaps(kb, progress_callback=_clinical_resolve_progress)
-            resolve_cost  = resolve_stats.get("cost_usd", 0.0)
-            state["total_cost_usd"] += resolve_cost
-            previously_resolved_gaps |= new_gap_stems
-
-            _log_entry(
-                state, "clinical_loop",
-                f"Iter {i} — resolved {resolve_stats['gaps_attempted']} gaps",
-                iteration=i,
-                sub_phase="resolving",
-                gaps_resolved=resolve_stats["gaps_attempted"],
-                articles_ingested=resolve_stats["articles_ingested"],
-                cost_usd=resolve_cost,
-            )
-            _save_run(state, kb)
-            _check_stop()
-
         # ── Done ──────────────────────────────────────────────────────────────
         state["status"]        = "complete"
         state["current_phase"] = "complete"
@@ -473,6 +387,131 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
         state["current_phase"] = "error"
         state["error"]         = str(exc)
         state["completed_at"]  = datetime.utcnow().isoformat()
+        _save_run(state, kb)
+
+    finally:
+        cleanup_run(run_id)
+
+    return run_id
+
+
+def resume_learn_run(run_id: str, kb: KBConfig, stop_event=None) -> str:
+    """
+    Resume a stopped/error learn run from the knowledge-loop iteration where it stopped.
+    Ingest and question-review phases are skipped (assumed already done).
+    Appends to the existing run log and preserves accumulated cost.
+    """
+    state = _load_run(run_id, kb)
+
+    if state.get("status") not in ("stopped", "error"):
+        raise ValueError(f"Run {run_id!r} is not stopped (status={state.get('status')!r})")
+
+    if stop_event is None:
+        stop_event = get_stop_event(run_id)
+
+    slug = state["slug"]
+    start_iter = _resume_iteration(state)
+
+    def _check_stop():
+        if stop_event.is_set():
+            raise _Stopped()
+
+    state["status"] = "running"
+    state["current_phase"] = "resolving"
+    state["completed_at"] = None
+    state["error"] = None
+    _log_entry(state, "resumed", f"Resuming from knowledge loop iter {start_iter} — cost so far ${state['total_cost_usd']:.4f}")
+    _save_run(state, kb)
+
+    try:
+        for i in range(start_iter, MAX_ITER + 1):
+            _update_phase(state, "resolving", kb, stop_event)
+
+            def _resolve_progress(idx, total, gap_title, articles, cost, _i=i):
+                _log_entry(state, "knowledge_loop",
+                           f"Iter {_i} — gap {idx}/{total}: {gap_title} ({articles} articles)",
+                           iteration=_i, sub_phase="resolving", cost_usd=cost)
+                _save_run(state, kb)
+                if stop_event.is_set():
+                    raise _Stopped()
+
+            resolve_stats = resolve_all_gaps(kb, progress_callback=_resolve_progress)
+            resolve_cost  = resolve_stats.get("cost_usd", 0.0)
+            state["total_cost_usd"] += resolve_cost
+
+            _log_entry(
+                state, "knowledge_loop",
+                f"Iter {i} — resolved {resolve_stats['gaps_attempted']} gaps, "
+                f"ingested {resolve_stats['articles_ingested']} articles",
+                iteration=i, sub_phase="resolving",
+                gaps_resolved=resolve_stats["gaps_attempted"],
+                articles_ingested=resolve_stats["articles_ingested"],
+                cost_usd=resolve_cost,
+            )
+            _save_run(state, kb)
+            _check_stop()
+
+            _update_phase(state, "knowledge_assessing", kb, stop_event)
+            _log_entry(state, "knowledge_loop", f"Iter {i} — running knowledge assessment…",
+                       iteration=i, sub_phase="assessing")
+            _save_run(state, kb)
+            _check_stop()
+
+            try:
+                assess = run_assessment(slug, kb)
+            except FileNotFoundError:
+                log.warning("Assessment file missing for %s — skipping knowledge loop", slug)
+                break
+
+            new_kgs = sum(
+                len(q["runs"][-1].get("new_kgs_registered", []))
+                for q in assess.get("questions", [])
+                if q.get("runs")
+            )
+            assess_cost = sum(
+                q["runs"][-1].get("cost_usd", 0.0)
+                for q in assess.get("questions", [])
+                if q.get("runs")
+            )
+            state["total_cost_usd"] += assess_cost
+
+            _log_entry(
+                state, "knowledge_loop",
+                f"Iter {i} — assessment {assess.get('status')} · {new_kgs} new KGs",
+                iteration=i, sub_phase="assessing",
+                assessment_status=assess.get("status"),
+                new_kgs=new_kgs,
+                cost_usd=assess_cost,
+            )
+            _save_run(state, kb)
+            _check_stop()
+
+            if assess.get("status") == "passing":
+                log.info("Knowledge assessment passing after iter %d", i)
+                break
+
+        state["status"] = "complete"
+        state["current_phase"] = "complete"
+        state["completed_at"] = datetime.utcnow().isoformat()
+        _log_entry(state, "complete",
+                   f"Learning loop complete — total cost ${state['total_cost_usd']:.4f}")
+        _save_run(state, kb)
+        log.info("Learn run %s resumed and completed for %s", run_id, slug)
+
+    except _Stopped:
+        log.info("Resumed run %s stopped again at phase=%s", run_id, state.get("current_phase"))
+        state["status"] = "stopped"
+        state["current_phase"] = "stopped"
+        state["completed_at"] = datetime.utcnow().isoformat()
+        _log_entry(state, "stopped", f"Run stopped — cost so far ${state['total_cost_usd']:.4f}")
+        _save_run(state, kb)
+
+    except Exception as exc:
+        log.error("Resumed run %s failed: %s", run_id, exc, exc_info=True)
+        state["status"] = "error"
+        state["current_phase"] = "error"
+        state["error"] = str(exc)
+        state["completed_at"] = datetime.utcnow().isoformat()
         _save_run(state, kb)
 
     finally:
