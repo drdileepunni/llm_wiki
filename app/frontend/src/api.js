@@ -228,6 +228,10 @@ export async function trackQueryAsGap(question, answer, kbName) {
   return res.json()
 }
 
+export async function getWikiActivity(kbName, limit = 500) {
+  return fetch(`${BASE}/wiki/activity?limit=${limit}`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
 export async function clearWikiContents(kbName) {
   const res = await fetch(`${BASE}/wiki/contents`, {
     method: 'DELETE',

@@ -4,6 +4,13 @@ Order generation pipeline.
 Takes a list of clinical recommendation strings and converts them into
 structured EMR orders by running an LLM agent with tool access to the
 orderables catalog and patient demographics.
+
+Pipeline:
+  Phase 0 — intent extraction: reduce each recommendation to a clean
+             catalog search term + structured parameters, guided by
+             order_rules.json (add rules there — no code change needed).
+  Phase 1 — data gathering loop: search catalog, fetch demographics.
+  Phase 2 — forced submit_orders call.
 """
 
 import json
@@ -19,6 +26,85 @@ from .ingest_pipeline import write_gap_files
 
 log = logging.getLogger("wiki.order_gen")
 
+_RULES_PATH = Path(__file__).parent / "order_rules.json"
+
+
+def _load_rules() -> tuple[list[dict], str]:
+    """
+    Load order_rules.json and return (rules_list, formatted_table_string).
+    The table string is injected into the Phase 0 prompt.
+    """
+    if not _RULES_PATH.exists():
+        return [], ""
+    try:
+        rules = json.loads(_RULES_PATH.read_text(encoding="utf-8"))
+        intents = rules.get("intents", [])
+        lines = ["CATALOG LOOKUP RULES (use these when a recommendation matches):"]
+        for r in intents:
+            triggers = ", ".join(f'"{t}"' for t in r["match"])
+            lines.append(
+                f"  If text contains [{triggers}]"
+                f" → catalog_query='{r['catalog_query']}'"
+                f"  order_type='{r['order_type']}'"
+                + (f"  note: {r['note']}" if r.get("note") else "")
+            )
+        return intents, "\n".join(lines)
+    except Exception as exc:
+        log.warning("Failed to load order_rules.json: %s", exc)
+        return [], ""
+
+
+_TOOL_EXTRACT_INTENTS = {
+    "name": "extract_intents",
+    "description": (
+        "For each clinical recommendation, identify every orderable entity mentioned "
+        "and emit one intent per entity. A single recommendation string may contain "
+        "multiple drugs, procedures, or labs — emit a separate intent for each one. "
+        "For example, 'Have etomidate 0.3 mg/kg IV and rocuronium 1 mg/kg IV ready' "
+        "must produce two intents (index=same, catalog_query='etomidate' and 'rocuronium')."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "intents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "0-based index of the source recommendation (multiple intents may share the same index)",
+                        },
+                        "catalog_query": {
+                            "type": "string",
+                            "description": (
+                                "Short 1-3 word term to search the EMR catalog "
+                                "(e.g. 'ventilator', 'noradrenaline', 'ABG', 'dextrose', 'etomidate'). "
+                                "Use the rules table when a match applies."
+                            ),
+                        },
+                        "order_type": {
+                            "type": "string",
+                            "description": "med, lab, procedure, monitoring, vents, diet, blood, or comm",
+                        },
+                        "parameters": {
+                            "type": "string",
+                            "description": (
+                                "Structured parameters for this specific orderable extracted from the text. "
+                                "For ventilator: 'Mode: VC, TV: 6 ml/kg IBW, RR: 20/min, PEEP: 8 cmH2O, FiO2: 100%'. "
+                                "For drugs: include dose and route, e.g. 'Dose: 0.3 mg/kg IV'. "
+                                "Leave empty string if no structured parameters are present."
+                            ),
+                        },
+                    },
+                    "required": ["index", "catalog_query", "order_type", "parameters"],
+                },
+            }
+        },
+        "required": ["intents"],
+    },
+}
+
 _SYSTEM = """\
 You are an EMR order generation assistant. Your job is to convert clinical recommendation \
 text into structured medication, lab, procedure, and monitoring orders.
@@ -29,14 +115,20 @@ For each recommendation:
 3. If the recommendation contains weight-based dosing (mg/kg, mcg/kg, units/kg), \
    fetch patient demographics to get the weight and calculate the actual dose
 4. Map the recommendation to an order with specific quantity, unit, route, frequency
+5. For ventilator orders: put mode/TV/RR/PEEP/FiO2 into the instructions field
 
 Rules:
 - Always search the catalog — never invent an orderable that wasn't found
+- Use the pre-analyzed catalog_query and order_type from Phase 0 for each recommendation
 - For monitoring (SpO2 target, HR target, UO target), the instruction text IS the order content; \
   search for a "vital monitoring" or "nursing" procedure orderable
 - For labs, search by test name (e.g. "CBC", "creatinine", "lactate")
 - Confidence: "high" if orderable found and dose is unambiguous; "medium" if approximate; \
   "low" if no matching orderable found or weight unavailable for weight-based dosing
+- Frequency must be one of: 'once', 'continuous', 'daily', 'every N hours', 'every N minutes', \
+  'every N days' where N is a single integer. Never use ranges like '1-2 hours'. \
+  Never append qualifiers like 'initially' or 'then as clinically indicated' to frequency — \
+  put that context in the instructions field instead.
 - When done processing ALL recommendations, call submit_orders exactly once"""
 
 _TOOL_SEARCH_ORDERABLES = {
@@ -88,7 +180,17 @@ _TOOL_SUBMIT_ORDERS = {
                                 "unit": {"type": "string"},
                                 "route": {"type": "string"},
                                 "form": {"type": "string"},
-                                "frequency": {"type": "string"},
+                                "frequency": {
+                                    "type": "string",
+                                    "description": (
+                                        "Use ONLY these formats: 'once', 'continuous', 'daily', "
+                                        "'every N hours', 'every N minutes', 'every N days' "
+                                        "where N is a single integer. "
+                                        "Never use ranges (e.g. '1-2 hours'), never append qualifiers "
+                                        "like 'initially' or 'then as clinically indicated' — "
+                                        "put those in the instructions field instead."
+                                    ),
+                                },
                                 "instructions": {"type": "string"},
                             },
                         },
@@ -147,6 +249,52 @@ def _append_turn(messages: list, response) -> list:
     if assistant_content:
         messages.append({"role": "assistant", "content": assistant_content})
     return tool_calls
+
+
+def _phase0_extract_intents(
+    recommendations: list[str],
+    llm,
+    rules_table: str,
+) -> list[dict]:
+    """
+    Phase 0: single forced LLM call that reduces each recommendation to
+    {index, catalog_query, order_type, parameters}.
+    Returns a list aligned with recommendations (same length, same order).
+    Falls back to empty dicts on failure so Phase 1 still runs.
+    """
+    rec_lines = "\n".join(f"{i}. {r}" for i, r in enumerate(recommendations))
+    prompt = (
+        f"{rules_table}\n\n"
+        "RECOMMENDATIONS TO ANALYSE:\n"
+        f"{rec_lines}\n\n"
+        "For each recommendation above, call extract_intents with:\n"
+        "- catalog_query: the short search term to use (apply rules table above when it matches)\n"
+        "- order_type: the correct EMR order category\n"
+        "- parameters: any structured clinical parameters embedded in the text "
+        "(ventilator settings, drug dose/route/rate, targets) — these will be written "
+        "verbatim into the order instructions field"
+    )
+    try:
+        response = llm.create_message(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[_TOOL_EXTRACT_INTENTS],
+            system="You are an EMR order assistant. Extract catalog search intents from clinical recommendation text.",
+            max_tokens=2000,
+            force_tool=True,
+        )
+        block = next((b for b in response.content if b.type == "tool_use" and b.name == "extract_intents"), None)
+        if not block:
+            return [{} for _ in recommendations]
+
+        raw = block.input.get("intents", [])
+        # Group by index — one rec can yield multiple intents
+        by_index: dict[int, list] = {}
+        for item in raw:
+            by_index.setdefault(item["index"], []).append(item)
+        return [by_index.get(i, [{}]) for i in range(len(recommendations))]
+    except Exception as exc:
+        log.warning("Phase 0 intent extraction failed: %s", exc)
+        return [[{}] for _ in recommendations]
 
 
 def _resolve_dosing_weight(
@@ -218,7 +366,6 @@ def _resolve_dosing_weight(
             continue
 
         content = page_path.read_text(encoding="utf-8")
-        # Look for an explicit "Default weight" or "Standard adult weight" with a number
         m = re.search(
             r'(?:default|standard)\s+(?:adult\s+)?weight[^\n]*?(\d{2,3})\s*kg',
             content, re.IGNORECASE
@@ -231,9 +378,20 @@ def _resolve_dosing_weight(
 
     # 4. Nothing found — register KG so the learn cycle can fill it
     log.info("No dosing weight available — registering KG: %s", gap_page)
+    if patient_type == "pediatric" and age_years is not None:
+        resolution_question = (
+            f"What is the recommended standard body weight in kg for a {age_years}-year-old child "
+            f"when actual weight is not recorded, for use in weight-based drug dosing in a paediatric ICU?"
+        )
+    else:
+        resolution_question = (
+            "What default adult body weight (kg) should be assumed for weight-based drug dosing "
+            "(e.g. rocuronium 1 mg/kg, gentamicin 5 mg/kg) in an ICU setting when the patient's "
+            "actual weight and height are not available in the EMR?"
+        )
     try:
         written = write_gap_files(
-            [{"page": gap_page, "missing_sections": gap_sections}],
+            [{"page": gap_page, "missing_sections": gap_sections, "resolution_question": resolution_question}],
             kb,
             source_name=f"order_gen: weight and height unavailable for {patient_type} patient",
         )
@@ -253,11 +411,12 @@ def run_order_generation(
     kb=None,
 ) -> dict:
     """
-    Two-phase pipeline:
-      Phase 1 — data gathering loop (patient demographics + orderable searches)
-               If weight is null, looks up standard weight from the wiki.
-               If wiki has no data, registers a knowledge gap for the learn cycle.
-      Phase 2 — forced submit_orders call with all context in the conversation
+    Three-phase pipeline:
+      Phase 0 — intent extraction: map each recommendation to a clean catalog
+               search term + structured parameters using order_rules.json.
+      Phase 1 — data gathering loop: catalog search + patient demographics.
+               Starts with pre-analyzed intents so catalog queries are accurate.
+      Phase 2 — forced submit_orders call.
     """
     if kb is None:
         kb = _default_kb()
@@ -269,13 +428,46 @@ def run_order_generation(
     llm = get_llm_client(model=model)
     total_input = total_output = 0
 
-    rec_text = "\n".join(f"- {r}" for r in recommendations)
-    user_msg = f"I need to convert these clinical recommendations to EMR orders:\n\n{rec_text}"
+    # ── Phase 0: intent extraction ────────────────────────────────────────────
+    _, rules_table = _load_rules()
+    log.info("Phase 0: extracting intents for %d recommendations", len(recommendations))
+    intents = _phase0_extract_intents(recommendations, llm, rules_table)
+    for idx, (rec, rec_intents) in enumerate(zip(recommendations, intents)):
+        log.info("  [%d] input: %.80s…", idx, rec)
+        for intent in rec_intents:
+            log.info(
+                "  [%d] intent: catalog_query=%r  order_type=%r  params=%r",
+                idx,
+                intent.get("catalog_query", "—"),
+                intent.get("order_type", "—"),
+                intent.get("parameters", "") or "—",
+            )
+
+    # ── Build Phase 1 user message with pre-analyzed intents ─────────────────
+    rec_lines = []
+    for idx, (rec, rec_intents) in enumerate(zip(recommendations, intents)):
+        line = f"{idx + 1}. {rec}"
+        for intent in rec_intents:
+            if intent.get("catalog_query"):
+                line += f"\n   → catalog_query: '{intent['catalog_query']}'  order_type: '{intent.get('order_type', '')}'"
+            if intent.get("parameters"):
+                line += f"\n   → parameters: {intent['parameters']}"
+        rec_lines.append(line)
+    rec_text = "\n\n".join(rec_lines)
+
+    user_msg = (
+        "Convert these clinical recommendations to EMR orders. "
+        "Each recommendation includes a pre-analyzed catalog_query — use it exactly when searching.\n\n"
+        + rec_text
+    )
     if cpmrn:
-        user_msg += f"\n\nPatient CPMRN: {cpmrn} (patient_type: {patient_type}). Use get_patient_demographics if any recommendation needs weight-based dosing."
+        user_msg += (
+            f"\n\nPatient CPMRN: {cpmrn} (patient_type: {patient_type}). "
+            "Use get_patient_demographics if any recommendation needs weight-based dosing."
+        )
     else:
         user_msg += "\n\nNo CPMRN provided — skip weight-based calculations, set confidence to low for any weight-based dosing."
-    user_msg += "\n\nPlease search the orderables catalog for each recommendation now."
+    user_msg += "\n\nSearch the orderables catalog for each recommendation now."
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
 
@@ -299,10 +491,25 @@ def run_order_generation(
         if not tool_calls or response.stop_reason == "end_turn":
             break
 
-        # Execute each tool call one at a time to avoid Gemini multi-call issues
         for block in tool_calls:
+            if block.name == "search_orderables":
+                log.info("  search_orderables  query=%r  order_type=%r",
+                         block.input.get("query"), block.input.get("order_type"))
+            elif block.name == "get_patient_demographics":
+                log.info("  get_patient_demographics  cpmrn=%r", block.input.get("cpmrn"))
             result_text = _execute_tool(block.name, block.input, cpmrn)
-            log.info("  Tool %s → %d chars", block.name, len(result_text))
+            try:
+                result_preview = json.loads(result_text)
+                if block.name == "search_orderables":
+                    names = [o.get("name", "?") for o in result_preview.get("orderables", [])]
+                    log.info("  → %d matches: %s", result_preview.get("count", 0), names)
+                elif block.name == "get_patient_demographics":
+                    log.info("  → weight=%s kg  height=%s cm  gender=%s",
+                             result_preview.get("weightKg", "—"),
+                             result_preview.get("heightCm", "—"),
+                             result_preview.get("gender", "—"))
+            except Exception:
+                log.info("  → %d chars", len(result_text))
             messages.append({"role": "user", "content": [{
                 "type": "tool_result",
                 "tool_use_id": block.id or f"call_{block.name}",
@@ -310,7 +517,7 @@ def run_order_generation(
                 "content": result_text,
             }]})
 
-    # ── Weight resolution: determine dosing weight from EMR / IBW / wiki ──────
+    # ── Weight resolution ─────────────────────────────────────────────────────
     weight_note = None
     weight_gap  = None
     for msg in messages:
@@ -349,7 +556,8 @@ def run_order_generation(
 
     # ── Phase 2: force submit_orders ──────────────────────────────────────────
     messages.append({"role": "user", "content":
-        "You now have all the data needed. Call submit_orders with the structured orders for every recommendation."
+        "You now have all the data needed. Call submit_orders with the structured orders for every recommendation. "
+        "Remember to include the extracted parameters (mode, TV, RR, PEEP, FiO2, dose, etc.) in each order's instructions field."
     })
 
     response = llm.create_message(
@@ -367,6 +575,14 @@ def run_order_generation(
     orders = submit_block.input.get("orders", []) if submit_block else []
     log.info("Phase2: submit_orders → %d orders  in=%d  out=%d",
              len(orders), response.usage.input_tokens, response.usage.output_tokens)
+    for o in orders:
+        log.info(
+            "  order: [%s] orderable=%r  confidence=%s  instructions=%r",
+            o.get("order_type", "?"),
+            o.get("orderable_name", "—"),
+            o.get("confidence", "?"),
+            (o.get("order_details") or {}).get("instructions", "") or "—",
+        )
 
     cost = log_call(
         operation="order_gen",

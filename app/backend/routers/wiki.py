@@ -286,6 +286,13 @@ def update_gap(stem: str, req: UpdateGapRequest, kb: KBConfig = Depends(resolve_
     return {"ok": True, "file": f"wiki/gaps/{gap_path.name}"}
 
 
+@router.get("/activity")
+def get_activity(limit: int = Query(500), kb: KBConfig = Depends(resolve_kb)):
+    """Return the structured activity log for this KB, newest first."""
+    from ..services.activity_log import read_events
+    return {"events": read_events(kb.wiki_dir, limit=limit)}
+
+
 @router.post("/vectors/rebuild")
 async def rebuild_vectors(background_tasks: BackgroundTasks, kb: KBConfig = Depends(resolve_kb)):
     """Embed (or re-embed) every wiki page for semantic search. Runs in background."""

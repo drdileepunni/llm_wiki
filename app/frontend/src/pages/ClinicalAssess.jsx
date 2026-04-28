@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -393,7 +393,6 @@ function OrderCard({ order }) {
   return (
     <div className="border border-border rounded-lg p-3 space-y-2 bg-ink-900">
       <div className="flex items-start justify-between gap-2">
-        <p className="text-xs text-white/80 leading-snug flex-1">{order.recommendation}</p>
         <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded border flex-shrink-0 ${typeCls}`}>
           {order.order_type}
         </span>
@@ -429,10 +428,11 @@ function OrderCard({ order }) {
 
 // ── Snapshot row ──────────────────────────────────────────────────────────────
 
-function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle }) {
+function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle, ordersCache }) {
   const [saving, setSaving] = useState(false)
   const [viewMode, setViewMode] = useState('rendered') // 'rendered' | 'raw' | 'orders'
-  const [ordersResult, setOrdersResult] = useState(null)
+  const cacheKey = `${runId}-${snap.snapshot_num}`
+  const [ordersResult, setOrdersResult] = useState(() => ordersCache?.current[cacheKey] ?? null)
   const [ordersLoading, setOrdersLoading] = useState(false)
   const [ordersError, setOrdersError] = useState(null)
   const [localRating, setLocalRating] = useState(snap.rating ?? null)
@@ -629,10 +629,7 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                           onClick={async () => {
                             setViewMode(key)
                             if (key === 'orders' && !ordersResult && !ordersLoading) {
-                              const recs = [
-                                ...(snap.immediate_actions || []),
-                                ...(snap.monitoring_followup || []),
-                              ].filter(Boolean)
+                              const recs = (snap.immediate_next_steps || []).filter(Boolean)
                               if (!recs.length) return
                               const cpmrn = patientId.replace(/_\d+$/, '')
                               setOrdersLoading(true)
@@ -642,6 +639,7 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                                   { recommendations: recs, cpmrn, patientType: 'adult' },
                                   activeKB
                                 )
+                                if (ordersCache?.current) ordersCache.current[cacheKey] = data
                                 setOrdersResult(data)
                               } catch (e) {
                                 setOrdersError(e.message)
@@ -689,10 +687,10 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                           <span className="font-mono">{ordersResult.weight_gap_registered}</span>
                         </div>
                       )}
-                      {ordersResult?.orders?.map((order, i) => (
+                      {ordersResult?.orders?.filter(o => o.orderable_name).map((order, i) => (
                         <OrderCard key={i} order={order} />
                       ))}
-                      {ordersResult && !ordersResult.orders?.length && !ordersLoading && (
+                      {ordersResult && !ordersResult.orders?.filter(o => o.orderable_name).length && !ordersLoading && (
                         <p className="text-xs text-muted">No orders generated.</p>
                       )}
                     </div>
@@ -1147,6 +1145,7 @@ export default function ClinicalAssess() {
   const [selectedRun, setSelectedRun] = useState(null)  // { patient_id, run_id }
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
+  const ordersCache = useRef({}) // { [runId-snapshotNum]: ordersResult } — persists across unmounts
 
   const fetchList = useCallback(async () => {
     try {
@@ -1365,6 +1364,7 @@ export default function ClinicalAssess() {
                   onRated={handleRated}
                   isOpen={openSnap === snap.snapshot_num}
                   onToggle={() => setOpenSnap(n => n === snap.snapshot_num ? null : snap.snapshot_num)}
+                  ordersCache={ordersCache}
                 />
               ))}
             </div>

@@ -62,6 +62,19 @@ PLAN_TOOL = {
                         "key_points": {
                             "type": "string",
                             "description": "Newline-separated bullet points of what THIS SOURCE explicitly says about this file's topic. Do not include background knowledge."
+                        },
+                        "subtype": {
+                            "type": "string",
+                            "enum": ["medication", "investigation", "procedure", "condition", "default"],
+                            "description": (
+                                "Page structural type — determines required section headings. "
+                                "medication=drugs/biologics/infusions; "
+                                "investigation=labs/imaging/ECG/cultures; "
+                                "procedure=bedside procedures/interventions; "
+                                "condition=clinical syndromes/diseases/physiological states; "
+                                "default=protocols/targets/scoring tools/anything else. "
+                                "Only required for wiki/entities/ and wiki/concepts/ pages."
+                            )
                         }
                     },
                     "required": ["op", "path", "key_points"]
@@ -81,6 +94,22 @@ PLAN_TOOL = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Standard sections this source does not cover (e.g. ['Epidemiology', 'Dosing', 'Adverse effects'])"
+                        },
+                        "resolution_question": {
+                            "type": "string",
+                            "description": (
+                                "A single, precise clinical question whose answer would fill this gap. "
+                                "Make it specific to how this gap arose from the current source — "
+                                "e.g. 'What is the recommended IV dose of furosemide for acute "
+                                "decompensated heart failure in a patient with CKD?' rather than "
+                                "'What is the dose of furosemide?'. This question is used to drive "
+                                "targeted literature search and LLM resolution later."
+                            )
+                        },
+                        "subtype": {
+                            "type": "string",
+                            "enum": ["medication", "investigation", "procedure", "condition", "default"],
+                            "description": "Page structural type of the target page — same enum as file plan subtype."
                         }
                     },
                     "required": ["page", "missing_sections"]
@@ -147,6 +176,9 @@ KNOWLEDGE GAP AWARENESS:
 Call plan_wiki_files with your summary, files, and knowledge_gaps.
 """
 
+# Sentinel substituted at write time with the actual template block for the page's subtype.
+TEMPLATE_PLACEHOLDER = "{TEMPLATE_PLACEHOLDER}"
+
 WRITE_PROMPT = f"""You are writing a single wiki page. Today: {date.today().isoformat()}.
 
 {PHI_RULES}
@@ -160,10 +192,8 @@ PAGE TYPE RULES:
 **entity and concept pages** (wiki/entities/..., wiki/concepts/...):
   - Write ONLY what this source explicitly states about the entity/concept.
   - DO NOT add background knowledge, textbook content, or anything not in the source text.
-  - Use the standard section headings (Definition, Epidemiology, Pathophysiology, Clinical Presentation,
-    Diagnosis, Treatment & Management, Complications, Prognosis) but ONLY populate a section if the
-    source addresses it. For sections the source does not cover, omit them entirely — they will be
-    tracked as knowledge gaps in the plan step.
+  - {TEMPLATE_PLACEHOLDER} — use the section headings provided; omit any not covered by the source
+    (they will be tracked as knowledge gaps). Do NOT invent other headings.
   - Specific values (doses, lab cut-offs, thresholds) are welcome IF they come from the source.
 
 GENERAL:
@@ -317,6 +347,17 @@ def execute_file_op(path: str, content: str, op: str, kb: "KBConfig", section: s
         # LLM has already merged existing + new content — just write it
         full_path.write_text(content, encoding="utf-8")
 
+    # Auto-register new entity/concept pages so the canonical registry stays current
+    rel = path.removeprefix("wiki/")
+    if op == "write" and (rel.startswith("entities/") or rel.startswith("concepts/")):
+        try:
+            from .canonical_registry import _register_path_only
+            title = Path(rel).stem.replace("-", " ").title()
+            _register_path_only(rel, title, kb.wiki_dir)
+        except Exception:
+            pass
+
+
 # ── Gap file helpers ────────────────────────────────────────────────────────────
 
 def _parse_gap_missing(text: str) -> set[str]:
@@ -333,6 +374,22 @@ def _parse_gap_missing(text: str) -> set[str]:
             if line.startswith("- "):
                 sections.add(line[2:].strip())
     return sections
+
+
+def _parse_gap_resolution_question(text: str) -> str:
+    """Extract the resolution_question from an existing gap file; empty string if absent."""
+    in_block = False
+    for line in text.splitlines():
+        if line.strip() == "## Resolution Question":
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith("##"):
+                break
+            stripped = line.strip()
+            if stripped:
+                return stripped
+    return ""
 
 
 def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> list[str]:
@@ -364,9 +421,11 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         created = today
 
         existing_missing: set[str] = set()
+        existing_question: str = ""
         if gap_path.exists():
             existing_text = gap_path.read_text(encoding="utf-8")
             existing_missing = _parse_gap_missing(existing_text)
+            existing_question = _parse_gap_resolution_question(existing_text)
             for line in existing_text.splitlines():
                 if line.startswith("created:"):
                     created = line.split(":", 1)[1].strip().strip('"')
@@ -376,12 +435,18 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         if not merged:
             continue
 
+        # Prefer incoming resolution_question (more specific context) over existing
+        resolution_question = gap.get("resolution_question", "").strip() or existing_question
+        subtype = gap.get("subtype", "").strip()
+
         title = stem.replace("-", " ").title()
         rel_gap = f"wiki/gaps/{stem}.md"
+        subtype_line = f"subtype: {subtype}\n" if subtype else ""
         content = (
             f"---\n"
             f'title: "Knowledge Gap \u2014 {title}"\n'
             f"type: gap\n"
+            f"{subtype_line}"
             f"referenced_page: {page}\n"
             f"tags: [gap]\n"
             f"created: {created}\n"
@@ -389,13 +454,15 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
             f"---\n\n"
             f"## Missing Sections\n\n"
             + "\n".join(f"- {s}" for s in merged)
+            + (f"\n\n## Resolution Question\n\n{resolution_question}\n" if resolution_question else "")
             + f"\n\n## Suggested Sources\n\n"
             f"- Ingest a reference document, guideline, or monograph that covers the above sections for: **{title}**\n"
             f"\n_Last updated by ingest of: {source_name}_\n"
         )
         gap_path.write_text(content, encoding="utf-8")
         written.append(rel_gap)
-        log.info("  gap file written: %s  (%d missing sections)", rel_gap, len(merged))
+        log.info("  gap file written: %s  (%d missing sections)  question=%s",
+                 rel_gap, len(merged), "yes" if resolution_question else "no")
 
     return written
 
@@ -450,6 +517,23 @@ def _parse_written_sections(content: str) -> set[str]:
     return sections
 
 
+def _wiki_link_context(wiki_dir: "Path", max_pages: int = 80) -> str:
+    """Return a list of known wiki pages for [[link]] injection in LLM write prompts."""
+    pages = []
+    for prefix in ("entities", "concepts"):
+        d = wiki_dir / prefix
+        if d.exists():
+            for f in sorted(d.glob("*.md")):
+                pages.append(f.stem.replace("-", " ").title())
+    if not pages:
+        return ""
+    return (
+        "\nWIKI LINKS — these pages exist; use [[Page Title]] syntax whenever you reference any of them:\n"
+        + ", ".join(f"[[{t}]]" for t in pages[:max_pages])
+        + "\n"
+    )
+
+
 def load_existing_gaps_context(kb: "KBConfig", max_files: int = 30) -> str:
     """Read wiki/gaps/ and return a context block for the plan prompt."""
     gaps_dir = kb.wiki_dir / "gaps"
@@ -483,7 +567,12 @@ def run_ingest(
     if kb is None:
         kb = _default_kb()
     llm           = get_llm_client()
-    system_prompt = kb.claude_md.read_text()
+    if kb.claude_md.exists():
+        system_prompt = kb.claude_md.read_text()
+    else:
+        # Fall back to project-level CLAUDE.md
+        fallback = Path(__file__).resolve().parents[3] / "CLAUDE.md"
+        system_prompt = fallback.read_text() if fallback.exists() else ""
     source_chars  = len(source_text)
     log.info("=== INGEST START  source=%r  chars=%d  model=%s ===", source_name, source_chars, MODEL)
 
@@ -552,6 +641,17 @@ Source file: {source_ref}
     file_plan      = plan.get("files", [])
     knowledge_gaps = plan.get("knowledge_gaps", [])
 
+    # Remap each gap's page to its canonical destination before writing gap files.
+    # This ensures repeated KG resolutions for the same concept consolidate into
+    # one broad canonical page rather than creating a new granular stub each time.
+    if knowledge_gaps:
+        from .canonical_registry import resolve as _resolve_canonical
+        for gap in knowledge_gaps:
+            if gap.get("page"):
+                # Derive concept name from the page path stem (e.g. entities/furosemide.md → "Furosemide")
+                concept = Path(gap["page"]).stem.replace("-", " ").title()
+                gap["page"] = _resolve_canonical(concept, kb.wiki_dir, llm)
+
     # Skip op=write for files that already exist — they'll be enriched via KG gaps instead.
     # Always skip index.md — sync_index owns it deterministically after every ingest.
     skipped = []
@@ -588,6 +688,7 @@ Source file: {source_ref}
         section  = file_spec.get("section", "")
         raw_pts  = file_spec.get("key_points", "")
         points   = [p.strip("- •").strip() for p in (raw_pts.splitlines() if isinstance(raw_pts, str) else raw_pts) if p.strip()]
+        subtype  = file_spec.get("subtype", "default")
 
         # Gap files are managed purely in Python — never let the LLM write them
         if path.startswith("wiki/gaps/"):
@@ -613,15 +714,24 @@ Source file: {source_ref}
                 if existing_content else ""
             )
 
+            is_entity_page = path.startswith("wiki/entities/") or path.startswith("wiki/concepts/")
+            from .page_templates import template_block as _template_block
+            template_injection = f"\nPAGE STRUCTURE: {_template_block(subtype)}\n" if is_entity_page else ""
+
+            effective_prompt = WRITE_PROMPT.replace("{TEMPLATE_PLACEHOLDER}", _template_block(subtype) if is_entity_page else "Use clear ## section headings")
+
+            wiki_links = _wiki_link_context(kb.wiki_dir)
+
             write_response = llm.create_message(
                 messages=[{
                     "role": "user",
-                    "content": f"""{WRITE_PROMPT}
+                    "content": f"""{effective_prompt}
 
 Write the wiki file at: {path}
 Operation: {op}{f' (section: {section})' if section else ''}
 {existing_block}
-
+{template_injection}
+{wiki_links}
 ---SOURCE TEXT---
 {source_text[:40000]}
 ---END SOURCE TEXT---
@@ -667,7 +777,11 @@ Return the COMPLETE file content — never truncate."""
                 continue
 
             content = write_block.input.get("content", "")
-            log.info("  Content length: %d chars → executing op=%s", len(content), op)
+            # Inject subtype into frontmatter for entity/concept pages
+            if is_entity_page and content:
+                from .page_templates import inject_subtype_frontmatter
+                content = inject_subtype_frontmatter(content, subtype)
+            log.info("  Content length: %d chars → executing op=%s  subtype=%s", len(content), op, subtype if is_entity_page else "n/a")
 
             # Reroute patient-specific pages to wiki/patients/{patient_dir}/.
             # Generic clinical knowledge (entities, concepts not named after the
@@ -717,6 +831,20 @@ Return the COMPLETE file content — never truncate."""
     if errors:
         for err in errors:
             log.warning("  error: %s", err)
+
+    from .activity_log import append_event
+    append_event(kb.wiki_dir, {
+        "operation": "ingest",
+        "kb": kb.name,
+        "source": source_name,
+        "files_written": files_written,
+        "gaps_opened": gap_files_written,
+        "gaps_closed": [],
+        "sections_filled": [],
+        "tokens_in": total_in,
+        "tokens_out": total_out,
+        "cost_usd": cost,
+    })
 
     return {
         "summary":          summary,
@@ -797,6 +925,7 @@ def run_ingest_chunked(
     seen_gap_files: set[str] = set()
     # Deduplicate knowledge gaps across chunks by page path
     gaps_by_page: dict[str, set[str]] = {}
+    gaps_resolution_questions: dict[str, str] = {}
     running_summary = ""
 
     for i, chunk in enumerate(chunks, 1):
@@ -850,11 +979,13 @@ def run_ingest_chunked(
                 seen_gap_files.add(gf)
                 combined["gap_files_written"].append(gf)
 
-        # Merge knowledge gaps — union missing sections per page
+        # Merge knowledge gaps — union missing sections per page, keep first resolution_question seen
         for gap in result.get("knowledge_gaps", []):
             page = gap.get("page", "")
             if page:
                 gaps_by_page.setdefault(page, set()).update(gap.get("missing_sections", []))
+                if gap.get("resolution_question") and page not in gaps_resolution_questions:
+                    gaps_resolution_questions[page] = gap["resolution_question"]
 
         # Set overall summary from first chunk; append subsequent summaries
         chunk_summary = result.get("summary", "")
@@ -869,7 +1000,11 @@ def run_ingest_chunked(
         )
 
     combined["knowledge_gaps"] = [
-        {"page": page, "missing_sections": sorted(sections)}
+        {
+            "page": page,
+            "missing_sections": sorted(sections),
+            **({"resolution_question": gaps_resolution_questions[page]} if page in gaps_resolution_questions else {}),
+        }
         for page, sections in sorted(gaps_by_page.items())
     ]
 

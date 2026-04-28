@@ -24,6 +24,7 @@ from ..services.ingest_pipeline import (
     execute_file_op,
     resolve_gap_sections,
     _normalise_path,
+    _wiki_link_context,
 )
 from ..services.llm_client import get_llm_client
 from ..services.token_tracker import log_call
@@ -82,6 +83,7 @@ def fill_sections(
     gap_file_path:   str,    # relative to wiki_root, e.g. "wiki/gaps/saline.md"
     kb: "KBConfig | None" = None,
     skip_quality_gate: bool = False,
+    hint_subtype: str = "",  # used when the target page doesn't exist yet
 ) -> dict:
     """
     Fill specific missing sections of a wiki page using a source article.
@@ -111,6 +113,19 @@ def fill_sections(
     else:
         log.info("Page does not exist yet — will create from scratch")
 
+    # Determine page subtype: prefer existing frontmatter, then caller hint, then "default"
+    subtype = hint_subtype or "default"
+    for line in existing_content.splitlines():
+        if line.startswith("subtype:"):
+            subtype = line.split(":", 1)[1].strip()
+            break
+
+    from .page_templates import template_block as _template_block
+    template_note = (
+        f"\nPAGE STRUCTURE — use ONLY these ## section headings for any NEW sections you add:\n"
+        f"{_template_block(subtype)}\n"
+    )
+
     existing_block = (
         f"\n\nCURRENT PAGE CONTENT (preserve all existing sections, only add the missing ones):\n"
         f"---BEGIN CURRENT PAGE---\n{existing_content}\n---END CURRENT PAGE---"
@@ -119,6 +134,7 @@ def fill_sections(
     )
 
     sections_str = "\n".join(f"- {s}" for s in gap_sections)
+    wiki_links = _wiki_link_context(kb.wiki_dir)
 
     prompt = f"""You are filling specific missing sections in a wiki page.
 
@@ -127,6 +143,8 @@ Topic: {gap_title}
 
 Missing sections to fill (ONLY these — do not modify anything else):
 {sections_str}
+{template_note}
+{wiki_links}
 {existing_block}
 
 ---SOURCE ARTICLE START---
@@ -141,7 +159,7 @@ Instructions:
 - Write each missing section using ONLY information from the source article
 - Preserve the existing page content exactly — do not rewrite or reorder anything
 - If the source does not cover a section, omit that section (do not invent content)
-- Use ## for section headings
+- Use ## for section headings matching the PAGE STRUCTURE above
 - Include `sources:` frontmatter update to reference this article
 - Return the COMPLETE page content
 """
@@ -242,6 +260,20 @@ Instructions:
         "=== FILL_SECTIONS END  filled=%s  cost=$%.4f ===",
         sections_filled, cost,
     )
+
+    from .activity_log import append_event
+    append_event(kb.wiki_dir, {
+        "operation": "gap_resolve",
+        "kb": kb.name,
+        "source": article_title,
+        "files_written": [target_page_path],
+        "gaps_opened": [],
+        "gaps_closed": [gap_file_path] if sections_filled else [],
+        "sections_filled": sections_filled,
+        "tokens_in": total_in,
+        "tokens_out": total_out,
+        "cost_usd": cost,
+    })
 
     return {
         "summary":           f"Filled {len(sections_filled)} section(s) in {target_page_path}: {', '.join(sections_filled)}",

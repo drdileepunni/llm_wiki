@@ -205,6 +205,10 @@ def start_learn_run(cpmrn: str, encounter: str, kb: KBConfig, run_id: str | None
             _save_run(state, kb)
             _check_stop()
 
+            import sys as _sys
+            _repo_root = str(Path(__file__).resolve().parents[3])
+            if _repo_root not in _sys.path:
+                _sys.path.insert(0, _repo_root)
             from tools.patient_timeline import generate as pt_generate
             pt_generate(
                 f"{cpmrn}/{encounter}",

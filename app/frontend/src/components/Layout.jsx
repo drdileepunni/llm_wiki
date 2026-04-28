@@ -11,6 +11,7 @@ import {
   Cog6ToothIcon,
   PlusIcon,
   ClipboardDocumentListIcon,
+  BoltIcon,
 } from '@heroicons/react/24/outline'
 import { getStats, createKB, listKBs } from '../api'
 import { useAppState } from '../AppStateContext'
@@ -23,6 +24,7 @@ const navItems = [
   { to: '/clinical-assess', label: 'Clinical',   icon: BeakerIcon },
   { to: '/learn',           label: 'Learn',      icon: AcademicCapIcon },
   { to: '/order-generator', label: 'Orders',     icon: ClipboardDocumentListIcon },
+  { to: '/activity',        label: 'Activity',   icon: BoltIcon },
   { to: '/dashboard',      label: 'Dashboard', icon: ChartBarIcon },
 ]
 

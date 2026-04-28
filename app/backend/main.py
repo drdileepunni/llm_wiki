@@ -45,6 +45,18 @@ app.include_router(order_gen.router)
 @app.on_event("startup")
 def startup():
     init_db()
+    _seed_canonical_registries()
+
+def _seed_canonical_registries():
+    from .config import list_kbs, get_kb
+    from .services.canonical_registry import seed_registry_vectors
+    for name in list_kbs():
+        try:
+            kb = get_kb(name)
+            seed_registry_vectors(kb.wiki_dir)
+        except Exception as exc:
+            log.warning("Canonical registry seed failed for KB '%s': %s", name, exc)
+
 
 @app.on_event("shutdown")
 def shutdown():

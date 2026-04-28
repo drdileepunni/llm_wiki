@@ -126,18 +126,28 @@ class BBPool:
 
 # ── LLM query generation ──────────────────────────────────────────────────────
 
-def generate_search_query(gap_title: str, gap_sections: list[str]) -> tuple[str, float]:
+def generate_search_query(gap_title: str, gap_sections: list[str], resolution_question: str = "") -> tuple[str, float]:
     """Returns (query_string, cost_usd)."""
     from google import genai
     client = genai.Client(api_key=GOOGLE_API_KEY)
-    log.info("[gap=%s] Generating search query via Gemini (missing: %s)",
-             gap_title, ", ".join(gap_sections))
+    log.info("[gap=%s] Generating search query via Gemini (missing: %s  question=%s)",
+             gap_title, ", ".join(gap_sections), resolution_question[:80] if resolution_question else "none")
+    if resolution_question:
+        context = (
+            f'Specific clinical question to answer: "{resolution_question}"\n'
+            f'(Topic: "{gap_title}", Missing: {", ".join(gap_sections)})\n\n'
+        )
+    else:
+        context = (
+            f'Fill a knowledge gap about: "{gap_title}"\n'
+            f"Missing: {', '.join(gap_sections)}\n\n"
+        )
     resp = client.models.generate_content(
         model=_GEMINI_SEARCH_MODEL,
         contents=(
-            f'Fill a knowledge gap about: "{gap_title}"\n'
-            f"Missing: {', '.join(gap_sections)}\n\n"
-            "Write ONE Google search query to find a free full-text PubMed review article.\n"
+            context
+            + "Write ONE Google search query to find a free full-text PubMed review article "
+            "that directly answers the question above.\n"
             "- Use the simplest clinical/scientific name\n"
             "- End with 'PMC full text'\n"
             "- Under 10 words\n"
@@ -212,18 +222,34 @@ def _google_search_in_session(browser, query: str) -> list[dict]:
     return hits
 
 
-def _llm_fallback(gap_title: str, gap_sections: list[str]) -> tuple[list[dict], float]:
+def _llm_fallback(gap_title: str, gap_sections: list[str], resolution_question: str = "") -> tuple[list[dict], float]:
     """Generate gap content via LLM when PubMed yields 0 articles. Returns (articles, cost_usd)."""
     from google import genai
-    log.info("[gap=%s] LLM fallback using model=%s  sections=%s", gap_title, KG_FALLBACK_MODEL, gap_sections)
+    log.info("[gap=%s] LLM fallback using model=%s  sections=%s  question=%s",
+             gap_title, KG_FALLBACK_MODEL, gap_sections, resolution_question[:80] if resolution_question else "none")
     client = genai.Client(api_key=GOOGLE_API_KEY)
-    prompt = (
-        f"You are a medical reference author. Write a comprehensive, evidence-based summary for the drug/topic: **{gap_title}**\n\n"
-        f"Cover ONLY these sections (use ## headings):\n"
-        + "".join(f"- {s}\n" for s in gap_sections)
-        + "\nFor each section write 2-5 paragraphs with specific clinical details, doses, and references where known. "
-        "Use plain prose, no bullet spam. Be precise and clinically useful."
-    )
+    if resolution_question:
+        prompt = (
+            f"You are a senior clinical consultant writing a concise, actionable wiki entry.\n\n"
+            f"Answer this specific clinical question precisely and completely:\n"
+            f"**{resolution_question}**\n\n"
+            f"Structure your answer using these headings (## heading):\n"
+            + "".join(f"- {s}\n" for s in gap_sections)
+            + "\nRequirements:\n"
+            "- Answer the question directly — do not write a general reference article.\n"
+            "- Include specific values, doses, ranges, or protocols where relevant.\n"
+            "- 2-4 paragraphs per section. Plain prose, no bullet spam.\n"
+            "- Cite evidence or guidelines where known (e.g. NICE, SSC, ARDSNet).\n"
+            "- If the answer depends on patient factors, state the decision logic explicitly."
+        )
+    else:
+        prompt = (
+            f"You are a medical reference author. Write a comprehensive, evidence-based summary for the drug/topic: **{gap_title}**\n\n"
+            f"Cover ONLY these sections (use ## headings):\n"
+            + "".join(f"- {s}\n" for s in gap_sections)
+            + "\nFor each section write 2-5 paragraphs with specific clinical details, doses, and references where known. "
+            "Use plain prose, no bullet spam. Be precise and clinically useful."
+        )
     resp = client.models.generate_content(model=KG_FALLBACK_MODEL, contents=prompt)
     text = (resp.text or "").strip()
     tokens_in  = getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
@@ -452,16 +478,19 @@ def search_for_gap(
     gap_sections: list[str],
     max_results: int = 5,
     bb_pool: Optional["BBPool"] = None,
+    resolution_question: str = "",
 ) -> tuple[list[dict], float]:
     """
     Search Google/PubMed for free full-text articles covering the gap.
     Falls back to LLM-generated content (KG_FALLBACK_MODEL) when PubMed yields 0 results.
     Pass a BBPool for batch usage — sessions are shared across all gaps in the batch.
+    Pass resolution_question for targeted search and fallback generation.
     Returns (articles, cost_usd).
     """
-    log.info("=== search_for_gap START  gap='%s'  sections=%s ===", gap_title, gap_sections)
+    log.info("=== search_for_gap START  gap='%s'  sections=%s  question=%s ===",
+             gap_title, gap_sections, resolution_question[:80] if resolution_question else "none")
 
-    query, search_cost = generate_search_query(gap_title, gap_sections)
+    query, search_cost = generate_search_query(gap_title, gap_sections, resolution_question)
     total_search_cost  = search_cost
     articles: list[dict] = []
 
@@ -529,7 +558,7 @@ def search_for_gap(
 
     # ── LLM fallback when PubMed yields nothing ───────────────────────────────
     if not articles:
-        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections)
+        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question)
         articles.extend(llm_articles)
         total_search_cost += llm_cost
 

@@ -1,0 +1,12 @@
+{
+  "version": "1",
+  "comment": "Add rules here — no code change needed. match[] terms are substring-matched (case-insensitive) against the recommendation text.",
+  "intents": [
+    {
+      "match": ["mechanical ventilation", "initiate ventilation", "post-intubation", "tidal volume", "PEEP", "FiO2", "volume control", "pressure control", "VC mode", "PC mode", "ventilator setting", "vent setting"],
+      "catalog_query": "ventilator",
+      "order_type": "vents",
+      "note": "Pack mode, TV, RR, PEEP, FiO2 into instructions field"
+    }
+  ]
+}

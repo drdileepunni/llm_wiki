@@ -151,16 +151,23 @@ Use an empty events array for notes with no discrete events.
         client = genai.Client(api_key=api_key)
         config = types.GenerateContentConfig(
             temperature=0,
-            max_output_tokens=16384,
+            max_output_tokens=8192,
             response_mime_type="application/json",
             response_schema=response_schema,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[prompt],
             config=config,
         )
-        raw = response.text or ""
+        # response.text raises if the response was blocked/cut; fall back gracefully
+        try:
+            raw = response.text or ""
+        except Exception:
+            raw = ""
+            for part in (response.candidates or [{}])[0].get("content", {}).get("parts", []):
+                raw += part.get("text", "")
         parsed = _safe_json_parse(raw)
 
         if not parsed or not isinstance(parsed.get("notes"), list):

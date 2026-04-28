@@ -147,28 +147,49 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
         for f in sorted(gaps_dir.glob("*.md")):
             text = f.read_text(encoding="utf-8", errors="replace")
             referenced_page = ""
+            subtype = ""
             for line in text.splitlines():
                 if line.startswith("referenced_page:"):
                     referenced_page = line.split(":", 1)[1].strip()
+                elif line.startswith("subtype:"):
+                    subtype = line.split(":", 1)[1].strip()
             missing: list[str] = []
+            resolution_question = ""
             in_missing = False
+            in_question = False
             for line in text.splitlines():
                 if line.strip() == "## Missing Sections":
                     in_missing = True
+                    in_question = False
                     continue
-                if in_missing:
-                    if line.startswith("##"):
-                        break
-                    if line.startswith("- "):
-                        item = line[2:].strip()
-                        if not item.startswith("RESOLVED:"):
-                            missing.append(item)
+                if line.strip() == "## Resolution Question":
+                    in_question = True
+                    in_missing = False
+                    continue
+                if line.startswith("##"):
+                    in_missing = False
+                    in_question = False
+                    continue
+                if in_missing and line.startswith("- "):
+                    item = line[2:].strip()
+                    if not item.startswith("RESOLVED:"):
+                        missing.append(item)
+                if in_question and line.strip() and not resolution_question:
+                    resolution_question = line.strip()
             if missing and not f.stem.startswith("patient-"):
+                # Re-route referenced_page through canonical registry so stale
+                # gap files pointing at narrow/renamed pages get consolidated.
+                from ..services.canonical_registry import resolve as _resolve_canonical
+                gap_title = f.stem.replace("-", " ").title()
+                canonical_page = _resolve_canonical(gap_title, kb.wiki_dir)
+                effective_page = canonical_page or referenced_page
                 gaps.append({
                     "file": f"wiki/gaps/{f.name}",
-                    "title": f.stem.replace("-", " ").title(),
-                    "referenced_page": referenced_page,
+                    "title": gap_title,
+                    "referenced_page": effective_page,
+                    "subtype": subtype,
                     "missing_sections": missing,
+                    "resolution_question": resolution_question,
                 })
 
     _batches[batch_id]["total_gaps"] = len(gaps)
@@ -200,6 +221,7 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
             kb,
             prefetched_content=article.get("content", ""),
             skip_quality_gate=gate,
+            hint_subtype=gap.get("subtype", ""),
         )
         result = _jobs[job_id].get("result") or {}
         return len(result.get("files_written", []))
@@ -207,7 +229,8 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
     async def process_gap(gap):
         try:
             articles, _ = await asyncio.to_thread(
-                search_for_gap, gap["title"], gap["missing_sections"], max_results, pool
+                search_for_gap, gap["title"], gap["missing_sections"], max_results, pool,
+                gap.get("resolution_question", ""),
             )
             # Run articles sequentially — each writes to the same referenced_page.
             files_written = 0
@@ -256,6 +279,11 @@ _GAP_EXTRACT_TOOL = {
                 "items": {"type": "string"},
                 "description": "Specific section headings that would answer the question (2-5 items)",
             },
+            "subtype": {
+                "type": "string",
+                "enum": ["medication", "investigation", "procedure", "condition", "default"],
+                "description": "Page structural type of the target entity page.",
+            },
         },
     },
 }
@@ -288,12 +316,15 @@ def _extract_and_write_gap(question: str, answer: str, kb: KBConfig) -> dict:
 
     inp = tool_block.input
     entity_title: str = inp["entity_title"]
-    page_path: str    = inp["page_path"]
     missing: list[str] = inp.get("missing_sections", [])
+    subtype: str = inp.get("subtype", "default") or "default"
 
     if not missing:
         raise ValueError("LLM returned no missing sections")
 
+    # Remap to canonical page so repeated gaps for the same concept consolidate.
+    from ..services.canonical_registry import resolve as _resolve_canonical
+    page_path = _resolve_canonical(entity_title, kb.wiki_dir)
     stem = Path(page_path).stem
     gaps_dir = kb.wiki_dir / "gaps"
     gaps_dir.mkdir(parents=True, exist_ok=True)
@@ -323,10 +354,12 @@ def _extract_and_write_gap(question: str, answer: str, kb: KBConfig) -> dict:
 
     merged = sorted(existing | set(missing))
     gap_rel = f"wiki/gaps/{stem}.md"
+    subtype_line = f"subtype: {subtype}\n" if subtype else ""
     content = (
         f"---\n"
         f'title: "Knowledge Gap \u2014 {entity_title}"\n'
         f"type: gap\n"
+        f"{subtype_line}"
         f"referenced_page: {page_path}\n"
         f"tags: [gap]\n"
         f"created: {created}\n"
@@ -361,6 +394,7 @@ async def _do_ingest(
     kb: KBConfig,
     prefetched_content: str = "",
     skip_quality_gate: bool = False,
+    hint_subtype: str = "",
 ):
     try:
         if prefetched_content:
@@ -386,6 +420,7 @@ async def _do_ingest(
             gap_file,
             kb,
             skip_quality_gate,
+            hint_subtype,
         )
         _jobs[job_id] = {"status": "done", "title": title, "result": result, "error": None}
 
