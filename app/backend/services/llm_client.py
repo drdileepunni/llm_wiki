@@ -120,9 +120,10 @@ class AnthropicLLMClient:
         system: str = "",
         max_tokens: int = 4000,
         force_tool: bool = True,
+        temperature: float | None = None,
     ) -> LLMResponse:
         tool_choice = {"type": "any"} if force_tool else {"type": "auto"}
-        raw = self._client.messages.create(
+        kwargs = dict(
             model=self.model,
             max_tokens=max_tokens,
             system=system,
@@ -130,6 +131,9 @@ class AnthropicLLMClient:
             tool_choice=tool_choice,
             messages=messages,
         )
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        raw = self._client.messages.create(**kwargs)
         content = []
         for block in raw.content:
             if block.type == "tool_use":
@@ -250,6 +254,7 @@ class GeminiLLMClient:
         max_tokens: int = 4000,
         force_tool: bool = True,
         thinking_budget: int | None = None,
+        temperature: float | None = None,
         _retries: int = 3,
     ) -> LLMResponse:
         import time
@@ -327,6 +332,8 @@ class GeminiLLMClient:
         else:
             no_thinking = thinking_cfg  # None → omitted, or caller-specified budget
 
+        _temperature = temperature if temperature is not None else 0.0
+
         def _make_config(attempt: int) -> "types.GenerateContentConfig":
             if attempt == 1:
                 return types.GenerateContentConfig(
@@ -335,7 +342,7 @@ class GeminiLLMClient:
                     tool_config=gemini_tool_cfg,
                     max_output_tokens=max_tokens,
                     thinking_config=no_thinking,
-                    temperature=0.0,
+                    temperature=_temperature,
                 )
             if attempt == 2:
                 # Relax to AUTO — Gemini can return text if function call is tricky
@@ -348,14 +355,14 @@ class GeminiLLMClient:
                     tool_config=auto_cfg,
                     max_output_tokens=max_tokens,
                     thinking_config=no_thinking,
-                    temperature=0.0,
+                    temperature=_temperature,
                 )
             # attempt 3: no tools at all — plain text, caller handles JSON extraction
             return types.GenerateContentConfig(
                 system_instruction=system or None,
                 max_output_tokens=max_tokens,
                 thinking_config=no_thinking,
-                temperature=0.0,
+                temperature=_temperature,
             )
 
         raw = None

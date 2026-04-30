@@ -9,6 +9,66 @@ from .llm_client import get_llm_client
 from .ingest_pipeline import write_gap_files
 from . import vector_store as vs_mod
 
+# ── Retrieval helpers ─────────────────────────────────────────────────────────
+
+_MIN_RETRIEVAL_SCORE = 0.55   # below this → try a shorter fallback query
+_GAP_COVER_THRESHOLD  = 0.72  # above this → section likely already covered
+
+
+def _merge_hits(hit_lists: list[list[dict]]) -> list[dict]:
+    """Merge hit lists from multiple queries, keeping best score per (path, section)."""
+    seen: dict[tuple, dict] = {}
+    for hits in hit_lists:
+        for h in hits:
+            key = (h["path"], h.get("section", ""))
+            if key not in seen or h["score"] > seen[key]["score"]:
+                seen[key] = h
+    return sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+
+
+def _best_section_for_query(sections: list[dict], query: str) -> dict:
+    """Pick the most relevant section from a linked page by heading word overlap."""
+    query_words = set(query.lower().split())
+    scored = [
+        (len(query_words & set(s["heading"].lower().split())), s)
+        for s in sections
+    ]
+    best_overlap, best = max(scored, key=lambda t: t[0])
+    return best if best_overlap > 0 else sections[0]
+
+
+
+def _gap_already_covered(entity: str, section: str, wiki_dir: Path) -> bool:
+    """
+    Return True if the wiki already has substantial content for entity+section.
+    Uses a vector search with a clean concept query — no LLM call needed.
+    """
+    query = f"{entity} {section}".strip()
+    if not query:
+        return False
+    try:
+        hits = vs_mod.search_sections(query, wiki_dir, top_k=3)
+        if not hits or hits[0]["score"] < _GAP_COVER_THRESHOLD:
+            return False
+        hit = hits[0]
+        full_path = wiki_dir / hit["path"]
+        if not full_path.exists():
+            return False
+        content = full_path.read_text(encoding="utf-8")
+        section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else ""
+        if not section_text:
+            section_text = content[:500]
+        covered = len(section_text.strip()) > 100
+        if covered:
+            log.info(
+                "  Pre-write check: '%s / %s' → covered by %s#%s (score=%.2f)",
+                entity, section, hit["path"], hit["section"], hits[0]["score"],
+            )
+        return covered
+    except Exception as exc:
+        log.debug("_gap_already_covered error (non-fatal): %s", exc)
+        return False
+
 log = logging.getLogger("wiki.chat_pipeline")
 
 
@@ -170,6 +230,24 @@ _CDS_GROUND_TOOL = {
                                 "This drives targeted literature search during gap resolution."
                             ),
                         },
+                        "missing_values": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Only populate when grounded=false. List the specific data points or values "
+                                "that were needed but not found in the wiki. CRITICAL RULES: "
+                                "(1) Each drug gets its OWN entry — never group multiple drugs. "
+                                "Write 'Etomidate induction dose for RSI (mg/kg IV)' and "
+                                "'Rocuronium dose for RSI (mg/kg IV)' as two separate items, NOT "
+                                "'RSI pre-medication drugs'. "
+                                "(2) Each setting gets its OWN entry — 'Initial IPAP for BiPAP in "
+                                "hypercapnic failure', 'Initial EPAP for BiPAP', 'SpO2 target on NIV' "
+                                "as three separate items. "
+                                "(3) Always name the specific drug, device, or parameter — never use "
+                                "vague terms like 'induction agents' or 'RSI protocol'. "
+                                "These drive what gets written when the gap is filled."
+                            ),
+                        },
                         "entity": {
                             "type": "string",
                             "description": "The drug, device, or clinical entity this parameter belongs to, e.g. 'Oxygen Therapy', 'Dexamethasone', 'Non-Invasive Ventilation'. Never a raw value.",
@@ -193,57 +271,6 @@ _CDS_GROUND_TOOL = {
     },
 }
 
-_CDS_DAGGER_GAP_TOOL = {
-    "name": "register_training_gaps",
-    "description": (
-        "For each †-marked value in the immediate next steps, identify the specific clinical "
-        "parameter and write a precise resolution question grounded in this patient's context."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "gaps": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "term": {
-                            "type": "string",
-                            "description": "The †-marked term or value exactly as it appears, e.g. 'PRVC', 'SpO2 92–96%', 'PEEP >12 cmH2O'",
-                        },
-                        "resolution_question": {
-                            "type": "string",
-                            "description": (
-                                "A single precise clinical question whose answer would verify this value "
-                                "for this patient's specific scenario. Include relevant patient context "
-                                "(e.g. diagnosis, severity, organ dysfunction). "
-                                "E.g. 'What is the recommended initial PEEP for lung-protective ventilation "
-                                "in a patient with acute hypoxic respiratory failure and SpO2 48%?' — "
-                                "NOT just 'What is PEEP?'"
-                            ),
-                        },
-                        "wiki_page": {
-                            "type": "string",
-                            "description": "Suggested wiki page path for this gap, e.g. 'entities/oxygen-therapy.md'. Use a broad entity page, never include section names in the path.",
-                        },
-                        "section_heading": {
-                            "type": "string",
-                            "description": "The ## section heading this gap belongs to on the wiki page, e.g. 'Dosing', 'Indications', 'Monitoring Parameters'. Must match the page template headings — never use a raw clinical value.",
-                        },
-                        "subtype": {
-                            "type": "string",
-                            "enum": ["medication", "investigation", "procedure", "condition", "default"],
-                            "description": "Page type of the target wiki page.",
-                        },
-                    },
-                    "required": ["term", "resolution_question", "wiki_page", "section_heading"],
-                },
-            }
-        },
-        "required": ["gaps"],
-    },
-}
-
 _CDS_SYNTHESIZE_TOOL = {
     "name": "synthesize_next_steps",
     "description": "Synthesise clinical reasoning and wiki-grounded parameters into a prioritised action list.",
@@ -259,8 +286,9 @@ _CDS_SYNTHESIZE_TOOL = {
                     "drug name + dose + route + rate; ventilator mode + TV (ml/kg IBW) + RR + PEEP + FiO2; "
                     "numeric target ranges; renal/hepatic dose adjustments where relevant; "
                     "monitoring checkpoints (e.g. 'recheck glucose in 30 min'). "
-                    "Use wiki-grounded values where available; fill in from clinical training where not — "
-                    "append '†' to any value drawn from training rather than the wiki. "
+                    "Use ONLY wiki-grounded values for specific numeric parameters. "
+                    "If a value was not found in the wiki, state the clinical action WITHOUT the specific number "
+                    "and add '(value not in wiki — consult local protocol)'. "
                     "Never write a vague action like 'intubate the patient' or 'give dextrose' without full detail. "
                     "Order by clinical urgency."
                 ),
@@ -392,8 +420,15 @@ def run_chat(
 {question}
 
 Provide your clinical direction, reasoning, and monitoring plan.
-Also list any specific clinical parameters where precise values matter (drug doses, titration steps, target ranges, protocol thresholds).
-These will be looked up in the medical wiki separately — keep each search_query short and focused on the clinical concept only, with no patient-specific details."""
+Also list specific clinical parameters where precise values matter (drug doses, titration steps, target ranges, protocol thresholds).
+These will be looked up in the medical wiki separately.
+
+QUERY RULES — read carefully:
+- Generate ONE query per drug: dose, route, rate, and renal/hepatic adjustment each get their own entry.
+- Generate ONE query per procedure or device: each specific setting (e.g. TV, PEEP, FiO2 for ventilation; IPAP, EPAP, SpO2 target for NIV) is a separate entry.
+- Do NOT group multiple drugs or procedures into one query.
+- Keep each search_query short and focused on the clinical concept only — no patient-specific details.
+- If a clinical direction involves both a drug AND a procedure, generate queries for both independently."""
 
         reason_msg = reason_prompt
         if images:
@@ -426,16 +461,35 @@ These will be looked up in the medical wiki separately — keep each search_quer
         # Call 2: targeted vector search per parameter, then ground
         pages_consulted: set = set()
         specific_parameters: list = []
+        score_by_param: dict = {}   # parameter name → top retrieval score from Step 2
 
         if specific_queries:
             param_contexts = []
             for sq in specific_queries:
-                hits = vs_mod.search_sections(sq["search_query"], kb.wiki_dir, top_k=6, include_patients=include_patient_context)
+                # ── Multi-query retrieval: use both search_query and parameter name ──
+                queries_to_run = list(dict.fromkeys([sq["search_query"], sq["parameter"]]))
+                raw_hit_lists = [
+                    vs_mod.search_sections(q, kb.wiki_dir, top_k=10, include_patients=include_patient_context)
+                    for q in queries_to_run
+                ]
+                hits = _merge_hits(raw_hit_lists)
                 if exclude_pattern:
                     hits = [h for h in hits if exclude_pattern.lower() not in h["path"].lower()]
-                hits = hits[:4]
-                log.info("  Targeted section search %r → %s", sq["search_query"],
-                         [f'{h["path"].split("/")[-1]}#{h["section"]}={h["score"]:.3f}' for h in hits])
+                hits = hits[:6]
+
+                # ── Weak-score fallback: retry with shorter query ──────────────────
+                if not hits or hits[0]["score"] < _MIN_RETRIEVAL_SCORE:
+                    short_q = " ".join(sq["search_query"].split()[:3])
+                    if short_q and short_q != sq["search_query"]:
+                        fallback = vs_mod.search_sections(short_q, kb.wiki_dir, top_k=6, include_patients=include_patient_context)
+                        if exclude_pattern:
+                            fallback = [h for h in fallback if exclude_pattern.lower() not in h["path"].lower()]
+                        hits = _merge_hits([hits, fallback])[:6]
+                        log.info("  Fallback retrieval %r → top score %.2f", short_q, hits[0]["score"] if hits else 0)
+
+                top_score = hits[0]["score"] if hits else 0.0
+                log.info("  Retrieval %r+%r → %d hits  top=%.2f", sq["search_query"], sq["parameter"], len(hits),
+                         top_score)
 
                 seed_paths: set[str] = set()
                 param_page_texts = []
@@ -456,31 +510,62 @@ These will be looked up in the medical wiki separately — keep each search_quer
                         section_text = vs_mod.extract_section(page_content, hit["section"]) if hit["section"] else page_content[:2000]
                         if not section_text:
                             section_text = page_content[:2000]
-                        label = f"{page_path} — {hit['section']}" if hit["section"] else page_path
+                        label = f"{page_path} — {hit['section']} (score={hit['score']:.2f})" if hit["section"] else page_path
                         param_page_texts.append(f"### {label}\n\n{section_text}")
 
-                # Link traversal: one hop from seed pages
-                for linked_path in _traverse_links(seed_paths, kb.wiki_dir, max_additional=2):
+                # ── Link traversal: one hop, best matching section per linked page ─
+                for linked_path in _traverse_links(seed_paths, kb.wiki_dir, max_additional=3):
                     full_path = kb.wiki_dir / linked_path
                     if full_path.exists():
                         linked_sections = vs_mod._split_sections(linked_path, full_path.read_text(encoding="utf-8"))
                         if linked_sections:
-                            top_sec = linked_sections[0]
-                            param_page_texts.append(f"### {linked_path} — {top_sec['heading']} [linked]\n\n{top_sec['body'][:600]}")
+                            best = _best_section_for_query(linked_sections, sq["search_query"])
+                            param_page_texts.append(
+                                f"### {linked_path} — {best['heading']} [linked]\n\n{best['body'][:800]}"
+                            )
 
                 param_contexts.append({
                     "parameter": sq["parameter"],
                     "context": "\n\n---\n\n".join(param_page_texts) if param_page_texts else "(no relevant wiki pages found)",
+                    "top_score": top_score,
                 })
 
-            # Build grounding prompt with per-parameter wiki context
+            # Index retrieval score by parameter name so we can gate the pre-write check
+            score_by_param = {pc["parameter"]: pc["top_score"] for pc in param_contexts}
+
+            # Build grounding prompt with per-parameter wiki context + score hint
             grounding_parts = [
                 "For each parameter below, check the provided wiki context.\n"
-                "Set grounded=true only if the wiki explicitly confirms the value. "
-                "Do NOT fabricate; set grounded=false if uncertain.\n"
+                "Set grounded=true if the wiki contains a value a clinician could directly apply "
+                "to this situation — even if the exact patient setting (ICU, ward, ED) is not "
+                "explicitly mentioned. A general drug dose is grounded unless the clinical context "
+                "specifically changes the value (e.g. renal failure requiring dose reduction, "
+                "hepatic impairment, paediatric weight-based dosing, a setting-specific protocol "
+                "that genuinely differs from the general dose). "
+                "Only set grounded=false if the actual numeric value, range, or clinical guidance "
+                "is completely absent from the wiki — not merely because the page doesn't say "
+                "'ICU-specific' or 'in the ICU'.\n"
+                "The retrieval score (0–1) indicates how closely the wiki matched the query — "
+                "be more skeptical of grounding when the score is below 0.65. "
+                "Do NOT fabricate; set grounded=false if uncertain.\n\n"
+                "GROUNDING DECISION EXAMPLES:\n"
+                "✓ GROUNDED — wiki has 'ondansetron 4 mg IV', query is antiemetic dose in ICU: "
+                "same drug, same dose, ICU setting does not change it.\n"
+                "✓ GROUNDED — wiki has 'noradrenaline 0.01–3 mcg/kg/min', query is vasopressor "
+                "starting dose in septic shock: general ICU dose applies.\n"
+                "✓ GROUNDED — wiki has 'PEEP 5 cmH₂O initial', query is PEEP setting on "
+                "mechanical ventilation: value is present even if ARDS-specific nuance is absent.\n"
+                "✗ NOT GROUNDED — wiki has no dose at all for this drug: value genuinely missing.\n"
+                "✗ NOT GROUNDED — wiki has standard morphine dose but patient has eGFR 15: "
+                "renal failure changes the dose — context matters clinically.\n"
+                "✗ NOT GROUNDED — wiki mentions IPAP/EPAP exist but gives no numeric starting "
+                "values: the number is absent, not just the setting label.\n"
             ]
             for pc in param_contexts:
-                grounding_parts.append(f"PARAMETER: {pc['parameter']}\nWIKI CONTEXT:\n{pc['context']}\n")
+                score_note = f"  [retrieval score: {pc['top_score']:.2f}]" if pc.get("top_score") else ""
+                grounding_parts.append(
+                    f"PARAMETER: {pc['parameter']}{score_note}\nWIKI CONTEXT:\n{pc['context']}\n"
+                )
 
             log.info("CDS Step 2: grounding %d parameters", len(param_contexts))
             step2 = llm.create_message(
@@ -500,6 +585,16 @@ These will be looked up in the medical wiki separately — keep each search_quer
 
         pages = list(pages_consulted)
 
+        # ── Metric 1: record a CDS query hit for every page consulted ────────
+        if pages_consulted:
+            try:
+                from .page_metrics import record_query as _record_query
+                for _p in pages_consulted:
+                    _record_query(_p, kb.wiki_dir)
+                log.debug("page_metrics: recorded CDS query for %d page(s)", len(pages_consulted))
+            except Exception as _me:
+                log.debug("page_metrics: record_query failed (non-fatal): %s", _me)
+
         # Step 3: synthesise direction + grounded params into immediate_next_steps
         immediate_next_steps: list = []
         if clinical_direction or specific_parameters:
@@ -518,9 +613,10 @@ These will be looked up in the medical wiki separately — keep each search_quer
                 "- For DRUGS: specify drug name, dose, route, rate, and any renal/hepatic adjustment. "
                 "Note monitoring parameters (e.g. 'recheck glucose in 30 min').\n"
                 "- For TARGETS: give the exact numeric range (e.g. 'MAP 65–70 mmHg', 'SpO2 94–98%').\n"
-                "- Use wiki-grounded values where available. For anything NOT wiki-grounded, use your "
-                "clinical training to supply the standard protocol value — append '†' to flag it "
-                "(e.g. 'TV 6 ml/kg IBW†'). Do NOT leave a step vague because a value was ungrounded.\n"
+                "- Use ONLY wiki-grounded values for specific numeric parameters. "
+                "If a value is not wiki-grounded, write the clinical action but replace the specific "
+                "value with '(value not in wiki — consult local protocol)'. "
+                "Do NOT invent or estimate values from clinical training.\n"
                 "- Order by clinical urgency (life threats first).\n"
                 "- 5–8 steps maximum.\n\n"
                 f"CLINICAL DIRECTION:\n{direction_text}\n\n"
@@ -541,90 +637,69 @@ These will be looked up in the medical wiki separately — keep each search_quer
             if synth_block:
                 immediate_next_steps = synth_block.input.get("immediate_next_steps", [])
 
-        # Step 4: register KGs for every †-marked value in immediate_next_steps
-        dagger_steps = [s for s in immediate_next_steps if "†" in s]
-        if dagger_steps:
-            steps_text = "\n".join(f"- {s}" for s in dagger_steps)
-            # Truncate patient summary to keep cost low — first 600 chars covers the key findings
-            summary_snippet = question[:600]
-            dagger_prompt = (
-                f"PATIENT CONTEXT (summary):\n{summary_snippet}\n\n"
-                f"IMMEDIATE NEXT STEPS containing †-marked values (drawn from training, not wiki-verified):\n"
-                f"{steps_text}\n\n"
-                "For each †-marked value above, call register_training_gaps with:\n"
-                "- term: the exact †-marked value or parameter\n"
-                "- resolution_question: a precise clinical question grounded in this patient's context\n"
-                "- wiki_page: a suggested wiki page path for this knowledge\n"
-                "One entry per distinct †-marked term. Do not duplicate."
-            )
-            log.info("CDS Step 4: registering KGs for %d †-marked steps", len(dagger_steps))
-            step4 = llm.create_message(
-                messages=[{"role": "user", "content": dagger_prompt}],
-                tools=[_CDS_DAGGER_GAP_TOOL],
-                system="You are a clinical knowledge gap analyst. Extract †-marked parameters and generate targeted resolution questions.",
-                max_tokens=2000,
-                force_tool=True,
-            )
-            total_input  += step4.usage.input_tokens
-            total_output += step4.usage.output_tokens
-            log.info("CDS Step 4 done: in=%d out=%d", step4.usage.input_tokens, step4.usage.output_tokens)
-            dagger_block = next((b for b in step4.content if b.type == "tool_use"), None)
-            if dagger_block:
-                dagger_gaps = dagger_block.input.get("gaps", [])
-                from .canonical_registry import resolve as _resolve_canonical
-                dagger_entries = []
-                for g in dagger_gaps:
-                    if not (g.get("term") and g.get("resolution_question") and g.get("wiki_page")):
-                        continue
-                    # Route using the wiki_page path stem, not the raw term value
-                    concept = Path(g["wiki_page"]).stem.replace("-", " ").title()
-                    section = g.get("section_heading") or "Dosing"
-                    entry = {
-                        "page": _resolve_canonical(concept, kb.wiki_dir, llm),
-                        "missing_sections": [section],
-                        "resolution_question": g["resolution_question"],
-                    }
-                    if g.get("subtype"):
-                        entry["subtype"] = g["subtype"]
-                    dagger_entries.append(entry)
-                if dagger_entries:
-                    try:
-                        written = write_gap_files(
-                            dagger_entries, kb,
-                            source_name=f"cds dagger params: {question[:80]}",
-                        )
-                        log.info("CDS Step 4: †-gap files registered (%d): %s", len(written), written)
-                    except Exception as exc:
-                        log.warning("CDS Step 4: failed to write †-gap files: %s", exc)
-
-        # Register one gap file per ungrounded parameter (Step 2 grounding misses)
-        gap_entity = gap_sections = ""
+        # Register gap files for ungrounded parameters.
+        # Pre-write vector check is only run when Step 2 retrieval score was LOW (<0.60)
+        # meaning the wiki page wasn't found. If score ≥ 0.60 and still grounded=false,
+        # the page exists but specific values are missing — that's a definite gap.
+        # placement confidence: score ≥ 0.70 → confirmed; below → approximate.
+        # Approximate gaps are valid knowledge gaps but the section assignment may be
+        # imprecise — defrag will correct placement after a scope-contamination scan.
+        _LOW_RETRIEVAL    = 0.60
+        _CONFIRM_RETRIEVAL = 0.70
+        gap_entity = ""
+        gap_sections: list = []
         gap_written = None
         ungrounded = [p for p in specific_parameters if not p.get("grounded", True)]
         if ungrounded:
-            gap_entity   = ungrounded[0]["parameter"]
-            gap_sections = [p["parameter"] for p in ungrounded]
-            gap_entries  = []
+            gap_entries: list = []
             from .canonical_registry import resolve as _resolve_canonical
             for param in ungrounded:
-                # Use entity name for routing, section_heading for the gap section
                 concept = param.get("entity") or param["parameter"]
                 section = param.get("section_heading") or "Dosing"
+                retrieval_score = score_by_param.get(param["parameter"], 0.0)
+                # Only run pre-write check when Step 2 retrieval was weak (page may have been missed)
+                if retrieval_score < _LOW_RETRIEVAL:
+                    if _gap_already_covered(concept, section, kb.wiki_dir):
+                        log.info(
+                            "  Skipping gap '%s / %s' — pre-write check: already covered (retrieval_score=%.2f)",
+                            concept, section, retrieval_score,
+                        )
+                        continue
+                else:
+                    log.info(
+                        "  Gap '%s / %s' confirmed — page found (score=%.2f) but values missing",
+                        concept, section, retrieval_score,
+                    )
+                placement = "confirmed" if retrieval_score >= _CONFIRM_RETRIEVAL else "approximate"
+                if placement == "approximate":
+                    log.info(
+                        "  Gap '%s / %s' flagged approximate (score=%.2f) — section may be imprecise",
+                        concept, section, retrieval_score,
+                    )
                 entry = {
                     "page": _resolve_canonical(concept, kb.wiki_dir, llm),
                     "missing_sections": [section],
+                    "placement": placement,
+                    "_param": param["parameter"],  # keep for metadata after write
                 }
                 if param.get("resolution_question"):
                     entry["resolution_question"] = param["resolution_question"]
+                if param.get("missing_values"):
+                    entry["missing_values"] = param["missing_values"]
                 if param.get("subtype"):
                     entry["subtype"] = param["subtype"]
                 gap_entries.append(entry)
-            try:
-                written = write_gap_files(gap_entries, kb, source_name=f"ungrounded cds params: {question[:80]}")
-                gap_written = written[0] if written else None
-                log.info("CDS gaps registered (%d): %s", len(gap_entries), written)
-            except Exception as exc:
-                log.warning("Failed to write CDS gaps: %s", exc)
+            if gap_entries:
+                try:
+                    written = write_gap_files(gap_entries, kb, source_name=f"ungrounded cds params: {question[:80]}")
+                    gap_written = written[0] if written else None
+                    # Report only what was actually filed
+                    gap_entity   = gap_entries[0]["_param"] if gap_entries else ""
+                    gap_sections = [e["_param"] for e in gap_entries]
+                    log.info("CDS gaps registered (%d): %s", len(gap_entries), written)
+                except Exception as exc:
+                    log.warning("Failed to write CDS gaps: %s", exc)
+
 
         all_text = " ".join(
             clinical_direction + clinical_reasoning + monitoring_followup + alternative_considerations +

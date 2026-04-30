@@ -130,6 +130,16 @@ WRITE_TOOL = {
             "content": {
                 "type": "string",
                 "description": "Full markdown content of the file including frontmatter."
+            },
+            "scope": {
+                "type": "string",
+                "description": (
+                    "For entity/concept pages only: one sentence declaring exactly what this page "
+                    "covers and what belongs on OTHER pages instead. "
+                    "Example: 'Acute Pancreatitis — general disease; etiology-specific variants "
+                    "(HTG-induced, gallstone, alcohol) belong on their own pages.' "
+                    "Omit for source/query pages."
+                )
             }
         },
         "required": ["content"]
@@ -158,7 +168,7 @@ RULES:
 - Always proceed. Never refuse. Ingest regardless of topic.
 - Minimum plan: 1 source page + at least 3 entity/concept pages + log.md append + index.md update.
 - Flag contradictions with existing wiki content explicitly in your plan.
-- Use [[wiki links]] for cross-references.
+- Use [[Page Title]] wiki links for EVERY significant named entity: drugs, conditions, procedures, devices, biomarkers — even ones that don't have a page yet. Stub pages are auto-created from links you produce.
 - For each entity/concept page, key_points MUST contain ONLY information explicitly stated in this source.
   Do NOT add background knowledge, textbook facts, or anything not in the source text.
 - For standard sections that apply to an entity/concept (e.g. Epidemiology, Pathophysiology, Treatment,
@@ -195,10 +205,17 @@ PAGE TYPE RULES:
   - {TEMPLATE_PLACEHOLDER} — use the section headings provided; omit any not covered by the source
     (they will be tracked as knowledge gaps). Do NOT invent other headings.
   - Specific values (doses, lab cut-offs, thresholds) are welcome IF they come from the source.
+  - SCOPE: Declare a scope field in the write_wiki_file call.
+    For MEDICATION / DRUG pages: scope should confirm that condition-specific dosing belongs HERE
+    (e.g. "Furosemide — dosing across all indications including CHF and renal failure, pharmacology,
+    adverse effects. Condition-specific dosing belongs here, on this page.").
+    For PROCEDURE / DEVICE pages: scope should confirm that condition-specific indications belong HERE.
+    For CONDITION / DISEASE pages: if the source covers a SUBTYPE or VARIANT, route that subtype
+    content to the subtype's own page — do NOT write it here.
 
 GENERAL:
 - DO NOT summarise. Write only source-derived content. Use ## sections to organise.
-- Use [[wiki links]] for all cross-references.
+- Use [[Page Title]] wiki links for EVERY significant named entity you mention — drugs, conditions, procedures, devices, biomarkers. Link even if the page doesn't exist yet; stubs are auto-created from your links.
 - If flagging a contradiction, include a ## Contradictions section.
 
 Write complete markdown with frontmatter:
@@ -392,6 +409,32 @@ def _parse_gap_resolution_question(text: str) -> str:
     return ""
 
 
+def _parse_gap_placement(text: str) -> str:
+    """Extract the placement field from a gap file's frontmatter; empty string if absent."""
+    for line in text.splitlines():
+        if line.strip().startswith("placement:"):
+            return line.split(":", 1)[1].strip()
+        if line.strip() == "---" and text.splitlines().index(line) > 0:
+            break
+    return ""
+
+
+def _parse_gap_missing_values(text: str) -> list[str]:
+    """Extract bullet items from the '## Specific Missing Values' section of an existing gap file."""
+    items: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        if line.strip() == "## Specific Missing Values":
+            in_block = True
+            continue
+        if in_block:
+            if line.startswith("##"):
+                break
+            if line.startswith("- "):
+                items.append(line[2:].strip())
+    return items
+
+
 def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> list[str]:
     """Write or merge gap files into wiki/gaps/ from the plan's knowledge_gaps output."""
     gaps_dir = kb.wiki_dir / "gaps"
@@ -422,6 +465,7 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
 
         existing_missing: set[str] = set()
         existing_question: str = ""
+        existing_times_opened: int = 0
         if gap_path.exists():
             existing_text = gap_path.read_text(encoding="utf-8")
             existing_missing = _parse_gap_missing(existing_text)
@@ -429,7 +473,11 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
             for line in existing_text.splitlines():
                 if line.startswith("created:"):
                     created = line.split(":", 1)[1].strip().strip('"')
-                    break
+                elif line.startswith("times_opened:"):
+                    try:
+                        existing_times_opened = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
 
         merged = sorted(existing_missing | missing)
         if not merged:
@@ -439,14 +487,48 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         resolution_question = gap.get("resolution_question", "").strip() or existing_question
         subtype = gap.get("subtype", "").strip()
 
+        # placement: "confirmed" when retrieval was strong; "approximate" when section
+        # assignment is uncertain (weak retrieval or bundled query). Approximate gaps
+        # are correct knowledge gaps but may be filed under the wrong section \u2014 the
+        # defrag pipeline will relocate them after scope-contamination scanning.
+        incoming_placement = gap.get("placement", "")
+        existing_placement = _parse_gap_placement(
+            gap_path.read_text(encoding="utf-8") if gap_path.exists() else ""
+        )
+        # Promote to confirmed if either source says confirmed; keep approximate otherwise
+        placement = (
+            "confirmed"
+            if "confirmed" in (incoming_placement, existing_placement)
+            else (incoming_placement or existing_placement or "confirmed")
+        )
+
+        # Merge incoming missing_values with any already stored in the gap file
+        incoming_mv: list[str] = gap.get("missing_values") or []
+        existing_mv: list[str] = _parse_gap_missing_values(
+            gap_path.read_text(encoding="utf-8") if gap_path.exists() else ""
+        )
+        merged_mv = list(dict.fromkeys(existing_mv + incoming_mv))  # dedup, preserve order
+
         title = stem.replace("-", " ").title()
         rel_gap = f"wiki/gaps/{stem}.md"
+        times_opened = existing_times_opened + 1
+        is_persistent = times_opened >= 3
         subtype_line = f"subtype: {subtype}\n" if subtype else ""
+        placement_line = f"placement: {placement}\n"
+        persistent_line = "status: persistent\n" if is_persistent else ""
+        missing_values_block = (
+            f"\n\n## Specific Missing Values\n\n"
+            + "\n".join(f"- {v}" for v in merged_mv)
+            if merged_mv else ""
+        )
         content = (
             f"---\n"
             f'title: "Knowledge Gap \u2014 {title}"\n'
             f"type: gap\n"
             f"{subtype_line}"
+            f"{placement_line}"
+            f"{persistent_line}"
+            f"times_opened: {times_opened}\n"
             f"referenced_page: {page}\n"
             f"tags: [gap]\n"
             f"created: {created}\n"
@@ -455,14 +537,27 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
             f"## Missing Sections\n\n"
             + "\n".join(f"- {s}" for s in merged)
             + (f"\n\n## Resolution Question\n\n{resolution_question}\n" if resolution_question else "")
+            + missing_values_block
             + f"\n\n## Suggested Sources\n\n"
             f"- Ingest a reference document, guideline, or monograph that covers the above sections for: **{title}**\n"
             f"\n_Last updated by ingest of: {source_name}_\n"
         )
         gap_path.write_text(content, encoding="utf-8")
+
+        # Metric 2+3: record gap open in page_metrics.json
+        try:
+            from .page_metrics import record_gap_open as _record_gap_open
+            _record_gap_open(page, kb.wiki_dir)
+        except Exception as _me:
+            log.debug("page_metrics: record_gap_open failed (non-fatal): %s", _me)
+
         written.append(rel_gap)
-        log.info("  gap file written: %s  (%d missing sections)  question=%s",
-                 rel_gap, len(merged), "yes" if resolution_question else "no")
+        log.info(
+            "  gap file written: %s  (%d missing sections)  times_opened=%d%s  question=%s",
+            rel_gap, len(merged), times_opened,
+            "  \u26a0 PERSISTENT" if is_persistent else "",
+            "yes" if resolution_question else "no",
+        )
 
     return written
 
@@ -472,14 +567,37 @@ def _norm_section(s: str) -> str:
     return re.sub(r'\s*\(.*?\)', '', s).strip().lower()
 
 
+def _section_match(gap_section: str, written_section: str) -> bool:
+    """
+    Return True if a gap section name is close enough to a written section name
+    to be considered resolved. Uses layered matching:
+      1. Exact normalized match
+      2. Word-overlap ≥ 60 % of gap section words present in written section
+      3. difflib sequence ratio ≥ 0.75
+    """
+    a = _norm_section(gap_section.removeprefix("RESOLVED: "))
+    b = _norm_section(written_section)
+    if a == b:
+        return True
+    gap_words = set(a.split())
+    written_words = set(b.split())
+    if gap_words and len(gap_words & written_words) / len(gap_words) >= 0.60:
+        return True
+    if difflib.SequenceMatcher(None, a, b).ratio() >= 0.75:
+        return True
+    return False
+
+
 def resolve_gap_sections(gap_file_rel: str, resolved_sections: list[str], kb: "KBConfig") -> None:
     """Remove resolved sections from a gap file; delete the file if nothing remains."""
     gap_path = kb.wiki_root / gap_file_rel
     if not gap_path.exists():
         return
     existing = _parse_gap_missing(gap_path.read_text(encoding="utf-8"))
-    resolved_normalized = {_norm_section(s.removeprefix("RESOLVED: ")) for s in resolved_sections}
-    remaining = {s for s in existing if _norm_section(s) not in resolved_normalized}
+    remaining = {
+        s for s in existing
+        if not any(_section_match(s, r) for r in resolved_sections)
+    }
     if not remaining:
         gap_path.unlink()
         log.info("  gap file fully resolved and deleted: %s", gap_file_rel)
@@ -517,6 +635,85 @@ def _parse_written_sections(content: str) -> set[str]:
     return sections
 
 
+def _parse_gap_referenced_page(text: str) -> str:
+    """Extract the referenced_page field from a gap file's frontmatter."""
+    for line in text.splitlines():
+        if line.strip() == "---" and line != text.splitlines()[0]:
+            break
+        if line.startswith("referenced_page:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def reconcile_gaps(kb: "KBConfig") -> dict:
+    """
+    Scan every gap file and close any sections already written in the
+    referenced wiki page. Returns a summary of what was closed/trimmed.
+    """
+    gaps_dir = kb.wiki_dir / "gaps"
+    if not gaps_dir.exists():
+        return {"checked": 0, "fully_closed": [], "partially_resolved": [], "errors": []}
+
+    fully_closed:       list[str] = []
+    partially_resolved: list[str] = []
+    errors:             list[str] = []
+    checked = 0
+
+    for gap_file in sorted(gaps_dir.glob("*.md")):
+        checked += 1
+        gap_rel = f"wiki/gaps/{gap_file.name}"
+        try:
+            gap_text = gap_file.read_text(encoding="utf-8", errors="replace")
+            referenced = _parse_gap_referenced_page(gap_text)
+            if not referenced:
+                log.warning("reconcile: no referenced_page in %s — skipping", gap_file.name)
+                continue
+
+            page_path = kb.wiki_root / "wiki" / referenced
+            if not page_path.exists():
+                # Try without the leading directory in case referenced_page already has wiki/
+                page_path = kb.wiki_root / referenced
+            if not page_path.exists():
+                log.warning("reconcile: referenced page not found for %s (%s)", gap_file.name, referenced)
+                continue
+
+            page_content = page_path.read_text(encoding="utf-8", errors="replace")
+            written_sections = _parse_written_sections(page_content)
+            missing_before = _parse_gap_missing(gap_text)
+
+            if not written_sections:
+                continue  # page is empty, nothing to resolve
+
+            gap_existed = gap_file.exists()
+            resolve_gap_sections(gap_rel, list(written_sections), kb)
+
+            if gap_existed and not gap_file.exists():
+                fully_closed.append(gap_rel)
+                log.info("reconcile: fully closed %s (had %d sections)", gap_file.name, len(missing_before))
+            elif gap_existed:
+                missing_after = _parse_gap_missing(gap_file.read_text(encoding="utf-8", errors="replace"))
+                resolved_count = len(missing_before) - len(missing_after)
+                if resolved_count > 0:
+                    partially_resolved.append(gap_rel)
+                    log.info("reconcile: %d section(s) resolved in %s (%d remain)",
+                             resolved_count, gap_file.name, len(missing_after))
+
+        except Exception as exc:
+            log.warning("reconcile: error processing %s: %s", gap_file.name, exc)
+            errors.append(f"{gap_file.name}: {exc}")
+
+    log.info(
+        "reconcile_gaps: checked=%d fully_closed=%d partially_resolved=%d errors=%d",
+        checked, len(fully_closed), len(partially_resolved), len(errors),
+    )
+    return {
+        "checked":            checked,
+        "fully_closed":       fully_closed,
+        "partially_resolved": partially_resolved,
+        "errors":             errors,
+    }
+
+
 def _wiki_link_context(wiki_dir: "Path", max_pages: int = 80) -> str:
     """Return a list of known wiki pages for [[link]] injection in LLM write prompts."""
     pages = []
@@ -528,8 +725,98 @@ def _wiki_link_context(wiki_dir: "Path", max_pages: int = 80) -> str:
     if not pages:
         return ""
     return (
-        "\nWIKI LINKS — these pages exist; use [[Page Title]] syntax whenever you reference any of them:\n"
+        "\nEXISTING WIKI PAGES (already have content — link these when you reference them):\n"
         + ", ".join(f"[[{t}]]" for t in pages[:max_pages])
+        + "\nFor any other significant named entity (drug, condition, procedure, device, biomarker) "
+        "not listed above, still use [[Page Title]] — a stub will be auto-created.\n"
+    )
+
+
+_STUB_SKIP = {
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for",
+    "with", "by", "from", "as", "is", "are", "was", "were", "be",
+}
+
+
+def _create_missing_stubs(content: str, kb: "KBConfig") -> None:
+    """
+    Scan a newly written wiki page for [[wiki links]] and create a minimal stub
+    page for any linked title that doesn't yet have an entities/ or concepts/ page.
+    Stubs land in entities/ by default.
+    """
+    from datetime import date as _date
+    links = set(re.findall(r'\[\[([^\]]+)\]\]', content))
+    for title in links:
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        # Skip empty, very short, or generic slugs
+        if len(slug) < 4 or slug in _STUB_SKIP:
+            continue
+        # Check both entities and concepts
+        exists = any(
+            (kb.wiki_dir / d / f"{slug}.md").exists()
+            for d in ("entities", "concepts")
+        )
+        if exists:
+            continue
+        stub_path = kb.wiki_dir / "entities" / f"{slug}.md"
+        stub_content = (
+            f"---\ntitle: {title}\ntype: entity\nsubtype: default\n"
+            f"tags: []\ncreated: {_date.today().isoformat()}\n"
+            f"updated: {_date.today().isoformat()}\nsources: []\n---\n\n"
+            f"## Definition\n\n*(Stub — referenced from other wiki pages. "
+            f"Ingest a source about this topic to fill it in.)*\n"
+        )
+        stub_path.write_text(stub_content, encoding="utf-8")
+        log.info("  stub created: entities/%s.md  (linked as [[%s]])", slug, title)
+
+
+def _section_enrichment_context(existing_content: str) -> str:
+    """
+    For op=update on entity/concept pages: build a per-section context block
+    showing what is already written in each ## section so the LLM only adds
+    genuinely new content rather than duplicating existing points.
+    """
+    lines = existing_content.splitlines()
+    # Skip YAML frontmatter
+    fm_end = 0
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                fm_end = i + 1
+                break
+
+    sections: list[tuple[str, str]] = []
+    current_heading: str | None = None
+    current_body: list[str] = []
+
+    for line in lines[fm_end:]:
+        if line.startswith("## "):
+            if current_heading is not None:
+                sections.append((current_heading, "\n".join(current_body).strip()))
+            current_heading = line[3:].strip()
+            current_body = []
+        elif current_heading is not None:
+            current_body.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, "\n".join(current_body).strip()))
+
+    if not sections:
+        return ""
+
+    parts = []
+    for heading, body in sections:
+        if body:
+            parts.append(
+                f"## {heading}\n"
+                f"Current content (DO NOT repeat or rephrase — only append new points from this source):\n"
+                f"{body}"
+            )
+        else:
+            parts.append(f"## {heading}\n(empty — create from source if covered)")
+
+    return (
+        "\nEXISTING SECTIONS — for each, add ONLY what is new from this source:\n\n"
+        + "\n\n".join(parts)
         + "\n"
     )
 
@@ -679,6 +966,7 @@ Source file: {source_ref}
     diffs            = []
     errors           = []
     gap_files_written: list[str] = []
+    gaps_closed:       list[str] = []
     total_in         = plan_response.usage.input_tokens
     total_out        = plan_response.usage.output_tokens
 
@@ -709,7 +997,7 @@ Source file: {source_ref}
                 existing_content = full_path_for_op.read_text(encoding="utf-8")
 
             existing_block = (
-                f"\n\nEXISTING FILE CONTENT (merge/update this — return the complete updated file):\n"
+                f"\n\nEXISTING FILE CONTENT (return the complete updated file):\n"
                 f"---BEGIN EXISTING---\n{existing_content}\n---END EXISTING---"
                 if existing_content else ""
             )
@@ -722,6 +1010,22 @@ Source file: {source_ref}
 
             wiki_links = _wiki_link_context(kb.wiki_dir)
 
+            # For update ops on entity/concept pages, show per-section current content
+            # so the LLM adds only genuinely new points rather than duplicating.
+            enrichment_context = (
+                _section_enrichment_context(existing_content)
+                if op == "update" and is_entity_page and existing_content
+                else ""
+            )
+
+            update_instruction = (
+                "For each existing section: append ONLY new points from this source — "
+                "do NOT repeat, rephrase, or rewrite content already there.\n"
+                "For sections not yet in the page: create them if the source covers them.\n"
+                if op == "update" and is_entity_page
+                else "Write ONLY what this source explicitly states. Do NOT add background knowledge.\n"
+            )
+
             write_response = llm.create_message(
                 messages=[{
                     "role": "user",
@@ -730,6 +1034,7 @@ Source file: {source_ref}
 Write the wiki file at: {path}
 Operation: {op}{f' (section: {section})' if section else ''}
 {existing_block}
+{enrichment_context}
 {template_injection}
 {wiki_links}
 ---SOURCE TEXT---
@@ -743,7 +1048,7 @@ Source: {source_name}
 Citation: {citation}
 Source file path: {source_ref}
 
-IMPORTANT: Write ONLY what this source explicitly states. Do NOT add background knowledge.
+IMPORTANT: {update_instruction}
 A page that only covers what the source says is correct — gaps are tracked separately.
 
 Include `source_file: "{source_ref}"` in the frontmatter.
@@ -777,10 +1082,38 @@ Return the COMPLETE file content — never truncate."""
                 continue
 
             content = write_block.input.get("content", "")
+            llm_scope = write_block.input.get("scope", "")
             # Inject subtype into frontmatter for entity/concept pages
             if is_entity_page and content:
                 from .page_templates import inject_subtype_frontmatter
                 content = inject_subtype_frontmatter(content, subtype)
+            # Inject scope into frontmatter (use LLM-declared or generate default)
+            if is_entity_page and content and not path.startswith("wiki/patients/"):
+                try:
+                    from .quality_scorer import (
+                        update_scope_frontmatter, _default_scope, parse_scope
+                    )
+                    effective_scope = llm_scope.strip() or parse_scope(content) or _default_scope(
+                        Path(path).stem.replace("-", " ").title(), subtype
+                    )
+                    content = update_scope_frontmatter(content, effective_scope)
+                    log.info("  Scope: %s", effective_scope[:80])
+                except Exception as _se:
+                    log.warning("  Scope injection failed (non-fatal): %s", _se)
+            # Deduplicate any repeated ## section headings the LLM may have emitted
+            if is_entity_page and content:
+                from .fill_sections_pipeline import _dedup_sections
+                content = _dedup_sections(content)
+            # Score and inject quality metadata before writing
+            if is_entity_page and content and not path.startswith("wiki/patients/"):
+                try:
+                    from .quality_scorer import score_page, update_quality_frontmatter
+                    _scores = score_page(content)
+                    if _scores:
+                        content = update_quality_frontmatter(content, _scores)
+                        log.info("  Quality scores: %s", {k: v["score"] for k, v in _scores.items()})
+                except Exception as _qe:
+                    log.warning("  Quality scoring failed (non-fatal): %s", _qe)
             log.info("  Content length: %d chars → executing op=%s  subtype=%s", len(content), op, subtype if is_entity_page else "n/a")
 
             # Reroute patient-specific pages to wiki/patients/{patient_dir}/.
@@ -801,14 +1134,41 @@ Return the COMPLETE file content — never truncate."""
             # Embed the page for semantic search (_embed_page skips wiki/patients/ automatically)
             _embed_page(path, content, kb)
 
-            # Resolve gap file for this entity/concept page in pure Python
+            # Create stub pages for any [[links]] that don't exist yet
             p = Path(path)
-            if len(p.parts) >= 2 and p.parts[-2] in ("entities", "concepts"):
-                gap_rel = f"wiki/gaps/{p.stem}.md"
-                if (kb.wiki_root / gap_rel).exists():
-                    written_sections = _parse_written_sections(content)
-                    resolve_gap_sections(gap_rel, list(written_sections), kb)
-                    log.info("  gap resolution: checked %s against %d written sections", gap_rel, len(written_sections))
+            if len(p.parts) >= 2 and p.parts[-2] in ("entities", "concepts") and not path.startswith("wiki/patients/"):
+                _create_missing_stubs(content, kb)
+
+            # Scope contamination check — flag out-of-scope content in frontmatter
+            if is_entity_page and content and not path.startswith("wiki/patients/"):
+                try:
+                    from .quality_scorer import (
+                        check_scope, parse_scope, _default_scope,
+                        update_contamination_frontmatter,
+                    )
+                    scope_str = parse_scope(content) or _default_scope(
+                        Path(path).stem.replace("-", " ").title(), subtype
+                    )
+                    page_title = Path(path).stem.replace("-", " ").title()
+                    existing_titles = [
+                        f.stem.replace("-", " ").title()
+                        for d in ("entities", "concepts")
+                        for f in sorted((kb.wiki_dir / d).glob("*.md"))
+                    ] if kb.wiki_dir.exists() else []
+                    sc_result = check_scope(page_title, content, scope_str, existing_titles)
+                    if not sc_result["clean"]:
+                        updated = update_contamination_frontmatter(content, sc_result["violations"])
+                        full_written_path = kb.wiki_root / path
+                        full_written_path.write_text(updated, encoding="utf-8")
+                        log.warning(
+                            "  ⚠ Scope contamination flagged on %s: %d violation(s)",
+                            path, len(sc_result["violations"]),
+                        )
+                except Exception as _sce:
+                    log.warning("  Scope check failed (non-fatal): %s", _sce)
+
+            # Gap resolution deferred — runs after write_gap_files below
+            # (so new gaps created in this ingest are also checked)
 
         except Exception as e:
             log.exception("  Exception writing %s: %s", path, e)
@@ -816,6 +1176,27 @@ Return the COMPLETE file content — never truncate."""
 
     # ── Write new gap files for sections not covered by this source ───────────
     gap_files_written = write_gap_files(knowledge_gaps, kb, source_name)
+
+    # ── Resolve gaps for all entity/concept pages written in this ingest ──────
+    # Runs AFTER write_gap_files so newly-opened gaps are also checked against
+    # sections already written in the same pass (fixes born-stale gap bug).
+    for written_path in files_written:
+        p = Path(written_path)
+        if len(p.parts) >= 2 and p.parts[-2] in ("entities", "concepts"):
+            gap_rel = f"wiki/gaps/{p.stem}.md"
+            if (kb.wiki_root / gap_rel).exists():
+                full_path = kb.wiki_root / written_path
+                if full_path.exists():
+                    content = full_path.read_text(encoding="utf-8", errors="replace")
+                    written_sections = _parse_written_sections(content)
+                    gap_existed = (kb.wiki_root / gap_rel).exists()
+                    resolve_gap_sections(gap_rel, list(written_sections), kb)
+                    if gap_existed and not (kb.wiki_root / gap_rel).exists():
+                        gaps_closed.append(gap_rel)
+                        log.info("  gap fully resolved: %s", gap_rel)
+                    elif gap_existed:
+                        log.info("  gap partially resolved: %s  (%d sections written)",
+                                 gap_rel, len(written_sections))
 
     # ── Mop-up: move any files the LLM placed in rogue directories ────────────
     moved = mop_up_wiki_structure(kb)
@@ -839,11 +1220,12 @@ Return the COMPLETE file content — never truncate."""
         "source": source_name,
         "files_written": files_written,
         "gaps_opened": gap_files_written,
-        "gaps_closed": [],
+        "gaps_closed": gaps_closed,
         "sections_filled": [],
         "tokens_in": total_in,
         "tokens_out": total_out,
         "cost_usd": cost,
+        "file_diffs": {d["path"]: {"diff": d["diff"], "added": d["added"], "removed": d["removed"], "is_new": d["is_new"]} for d in diffs},
     })
 
     return {
@@ -1008,6 +1390,10 @@ def run_ingest_chunked(
         for page, sections in sorted(gaps_by_page.items())
     ]
 
+    # ── Merge patient entity pages into one timeline (patient ingestion only) ───
+    if patient_dir:
+        _merge_patient_timeline_pages(combined, patient_dir, kb)
+
     sync_index(kb.wiki_dir)
 
     log.info(
@@ -1016,3 +1402,246 @@ def run_ingest_chunked(
         len(combined["knowledge_gaps"]),
     )
     return combined
+
+
+_MERGE_TIMELINE_TOOL = {
+    "name": "write_patient_timeline",
+    "description": "Return a single unified patient timeline page merging all date-specific entries.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "Complete unified chronological patient timeline markdown page with frontmatter.",
+            }
+        },
+        "required": ["content"],
+    },
+}
+
+_MERGE_TIMELINE_SYSTEM = f"""You are a medical wiki editor merging patient encounter notes into a single timeline.
+{PHI_RULES}
+Rules:
+- One ## section per date
+- Under each date: Clinical Findings, Diagnoses, Medications, Procedures, Monitoring
+- Remove cross-date repetition (keep in earliest date; later dates say "continued" where unchanged)
+- Use [[wiki links]] for all drug/procedure/concept names
+- Never add new information — only reorganise what is in the source pages
+"""
+
+
+def _merge_patient_timeline_pages(combined: dict, patient_dir: str, kb: "KBConfig") -> None:
+    """
+    After chunked patient ingest: if multiple date-specific entity pages were written
+    under wiki/patients/{patient_dir}/entities/, merge them into a single timeline page
+    and delete the individual date pages.
+    Modifies `combined` in place.
+    """
+    import re
+
+    entities_dir = kb.wiki_dir / "patients" / patient_dir / "entities"
+    if not entities_dir.exists():
+        return
+
+    # Find all entity pages written during this ingest that look like date pages
+    # (any page that isn't already a *_timeline.md)
+    date_page_prefix = f"wiki/patients/{patient_dir}/entities/"
+    patient_entity_pages = [
+        f for f in combined.get("files_written", [])
+        if f.startswith(date_page_prefix)
+        and not f.endswith("_timeline.md")
+        and (kb.wiki_root / f).exists()
+    ]
+
+    if len(patient_entity_pages) < 2:
+        return  # nothing to merge
+
+    # Derive patient ID from patient_dir (strip trailing _N suffixes like _1, _2)
+    patient_id = patient_dir.upper()
+
+    log.info(
+        "=== PATIENT TIMELINE MERGE  patient=%s  pages=%d: %s ===",
+        patient_dir, len(patient_entity_pages), patient_entity_pages,
+    )
+
+    # Read all pages
+    pages_text = []
+    for i, p in enumerate(sorted(patient_entity_pages), 1):
+        content = (kb.wiki_root / p).read_text(encoding="utf-8")
+        pages_text.append(f"--- PAGE {i} ({p.split('/')[-1]}) ---\n{content}")
+
+    prompt = (
+        f"Merge these {len(patient_entity_pages)} date-specific patient encounter pages "
+        f"for patient {patient_id} into ONE unified chronological timeline page.\n\n"
+        + "\n\n".join(pages_text)
+    )
+
+    llm = get_llm_client()
+    resp = llm.create_message(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[_MERGE_TIMELINE_TOOL],
+        system=_MERGE_TIMELINE_SYSTEM,
+        max_tokens=16_000,
+    )
+
+    total_in  = resp.usage.input_tokens
+    total_out = resp.usage.output_tokens
+    cost = log_call("merge_patient_timeline", patient_dir, total_in, total_out, model=MODEL, kb_name=kb.name)
+
+    tool_block = next((b for b in resp.content if b.type == "tool_use"), None)
+    if not tool_block:
+        log.warning("_merge_patient_timeline_pages: no tool_use returned — skipping merge")
+        combined["cost_usd"] += cost
+        return
+
+    merged_content = tool_block.input.get("content", "")
+    timeline_path = f"wiki/patients/{patient_dir}/entities/{patient_id}_timeline.md"
+
+    diff = compute_diff(timeline_path, merged_content, "write", kb)
+    execute_file_op(timeline_path, merged_content, "write", kb)
+    _embed_page(timeline_path, merged_content, kb)
+
+    log.info(
+        "_merge_patient_timeline_pages: written %s  +%d lines  cost=$%.4f",
+        timeline_path, diff["added"], cost,
+    )
+
+    # Delete the individual date pages and remove from combined
+    for p in patient_entity_pages:
+        full = kb.wiki_root / p
+        if full.exists():
+            full.unlink()
+            log.info("  Deleted: %s", p)
+
+    # Update combined: replace date pages with single timeline page
+    combined["files_written"] = [
+        f for f in combined["files_written"] if f not in patient_entity_pages
+    ]
+    combined["files_written"].append(timeline_path)
+    combined["diffs"] = [d for d in combined["diffs"] if d.get("path") not in patient_entity_pages]
+    combined["diffs"].append(diff)
+    combined["cost_usd"]      += cost
+    combined["input_tokens"]  += total_in
+    combined["output_tokens"] += total_out
+
+    from .activity_log import append_event
+    append_event(kb.wiki_dir, {
+        "operation": "consolidate",
+        "kb": kb.name,
+        "source": f"{patient_dir} patient timeline merge",
+        "files_written": [timeline_path],
+        "gaps_opened": [],
+        "gaps_closed": [],
+        "tokens_in": total_in,
+        "tokens_out": total_out,
+        "cost_usd": cost,
+        "file_diffs": {diff["path"]: {"diff": diff["diff"], "added": diff["added"], "removed": diff["removed"], "is_new": True}},
+    })
+
+
+_CONSOLIDATE_TOOL = {
+    "name": "consolidate_wiki_page",
+    "description": "Return the consolidated, de-duplicated wiki page content.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": (
+                    "The COMPLETE consolidated wiki page markdown including frontmatter. "
+                    "Within each ## section, semantically duplicate bullet points or sentences "
+                    "have been merged into one. No content has been added or removed — only unified."
+                ),
+            },
+        },
+        "required": ["content"],
+    },
+}
+
+_CONSOLIDATE_SYSTEM = f"""You are a wiki editor performing a consolidation pass.
+Your ONLY job is to remove semantic duplicates within sections — do not add, invent, or expand anything.
+{PHI_RULES}
+"""
+
+
+def _consolidate_page(page_path: str, kb: "KBConfig") -> dict | None:
+    """
+    Structural + semantic deduplication for a page written by multiple ingest chunks.
+    1. Run _dedup_sections (structural — merges identical heading blocks).
+    2. Run LLM pass to merge semantically duplicate bullet points within sections.
+    Returns a small result dict with cost/token/diff info, or None if no change.
+    """
+    from .fill_sections_pipeline import _dedup_sections
+    page_full_path = kb.wiki_root / page_path
+    if not page_full_path.exists():
+        log.warning("_consolidate_page: %s not found, skipping", page_path)
+        return None
+
+    original = page_full_path.read_text(encoding="utf-8")
+
+    # Step 1: structural dedup
+    after_structural = _dedup_sections(original)
+
+    # Step 2: LLM semantic dedup
+    llm = get_llm_client()
+    prompt = f"""This wiki page was written in multiple passes (chunked ingestion) and may contain
+semantically duplicate bullet points or sentences within the same section.
+
+Your task:
+- Within each ## section, identify and merge bullet points that say the same thing in different words
+- Keep the most informative version of each point
+- Do NOT add any new information
+- Do NOT remove information that is genuinely distinct
+- Preserve the frontmatter, all section headings, and all cross-references exactly
+- Return the COMPLETE page content
+
+---BEGIN PAGE---
+{after_structural}
+---END PAGE---
+"""
+    resp = llm.create_message(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[_CONSOLIDATE_TOOL],
+        system=_CONSOLIDATE_SYSTEM,
+        max_tokens=16_000,
+    )
+
+    total_in  = resp.usage.input_tokens
+    total_out = resp.usage.output_tokens
+    cost = log_call("consolidate", page_path, total_in, total_out, model=MODEL, kb_name=kb.name)
+
+    tool_block = next((b for b in resp.content if b.type == "tool_use"), None)
+    if tool_block:
+        consolidated = tool_block.input.get("content", "")
+    else:
+        # LLM didn't use tool — fall back to structural dedup only
+        consolidated = after_structural
+
+    if consolidated.strip() == original.strip():
+        log.info("_consolidate_page: no change for %s", page_path)
+        return {"cost_usd": cost, "input_tokens": total_in, "output_tokens": total_out, "diff": None}
+
+    diff = compute_diff(page_path, consolidated, "update", kb)
+    execute_file_op(page_path, consolidated, "update", kb)
+    _embed_page(page_path, consolidated, kb)
+
+    log.info(
+        "_consolidate_page: %s consolidated  +%d/-%d  cost=$%.4f",
+        page_path, diff["added"], diff["removed"], cost,
+    )
+
+    from .activity_log import append_event
+    append_event(kb.wiki_dir, {
+        "operation": "consolidate",
+        "kb": kb.name,
+        "source": "chunked-ingest consolidation",
+        "files_written": [page_path],
+        "gaps_opened": [],
+        "gaps_closed": [],
+        "tokens_in": total_in,
+        "tokens_out": total_out,
+        "cost_usd": cost,
+        "file_diffs": {diff["path"]: {"diff": diff["diff"], "added": diff["added"], "removed": diff["removed"], "is_new": False}},
+    })
+
+    return {"cost_usd": cost, "input_tokens": total_in, "output_tokens": total_out, "diff": diff}

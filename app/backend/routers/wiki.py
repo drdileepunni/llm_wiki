@@ -161,35 +161,73 @@ def get_gaps(kb: KBConfig = Depends(resolve_kb)):
         # Parse frontmatter fields
         referenced_page = ""
         updated = ""
+        placement = "confirmed"
+        times_opened = 1
+        status = ""
         for line in text.splitlines():
             if line.startswith("referenced_page:"):
                 referenced_page = line.split(":", 1)[1].strip()
             elif line.startswith("updated:"):
                 updated = line.split(":", 1)[1].strip()
+            elif line.startswith("placement:"):
+                placement = line.split(":", 1)[1].strip()
+            elif line.startswith("times_opened:"):
+                try:
+                    times_opened = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("status:"):
+                status = line.split(":", 1)[1].strip()
 
         # Parse missing sections list
         missing: list[str] = []
         in_missing = False
+        # Parse specific missing values list
+        missing_values: list[str] = []
+        in_missing_values = False
         for line in text.splitlines():
             if line.strip() == "## Missing Sections":
                 in_missing = True
+                in_missing_values = False
+                continue
+            if line.strip() == "## Specific Missing Values":
+                in_missing_values = True
+                in_missing = False
                 continue
             if in_missing:
                 if line.startswith("##"):
-                    break
-                if line.startswith("- "):
+                    in_missing = False
+                elif line.startswith("- "):
                     item = line[2:].strip()
                     if not item.startswith("RESOLVED:"):
                         missing.append(item)
+            elif in_missing_values:
+                if line.startswith("##"):
+                    in_missing_values = False
+                elif line.startswith("- "):
+                    missing_values.append(line[2:].strip())
 
         if missing and not f.stem.startswith("patient-"):
             stem = f.stem
+            # Enrich with page-level metrics from page_metrics.json
+            page_metrics: dict = {}
+            try:
+                from ..services.page_metrics import get_page as _get_page_metrics
+                page_metrics = _get_page_metrics(referenced_page, kb.wiki_dir)
+            except Exception:
+                pass
             gaps.append({
                 "file": f"wiki/gaps/{f.name}",
                 "title": stem.replace("-", " ").title(),
                 "referenced_page": referenced_page,
                 "missing_sections": missing,
+                "missing_values": missing_values,
+                "placement": placement,
                 "updated": updated,
+                "times_opened": times_opened,
+                "status": status,                          # "persistent" or ""
+                "cds_query_count": page_metrics.get("cds_query_count", 0),
+                "gap_opens": page_metrics.get("gap_opens", times_opened),
             })
 
     return {"gaps": gaps}
@@ -309,6 +347,279 @@ async def rebuild_vectors(background_tasks: BackgroundTasks, kb: KBConfig = Depe
 def vectors_status(kb: KBConfig = Depends(resolve_kb)):
     """Return how many pages are currently embedded."""
     return {"embedded": vs_mod.count(kb.wiki_dir)}
+
+
+@router.get("/quality")
+def get_quality(
+    rescore: bool = Query(False, description="Re-score all pages even if scores already exist"),
+    llm_enhance: bool = Query(False, description="Use LLM to refine borderline scores (costs tokens)"),
+    kb: KBConfig = Depends(resolve_kb),
+):
+    """
+    Return section-level quality scores for all entity/concept pages.
+
+    Default: reads existing section_quality from frontmatter (or scores if absent).
+    rescore=true: forces re-scoring of every page regardless of cached scores.
+    llm_enhance=true: uses the LLM to refine sections scored 1 or 2 by the rule engine.
+
+    Results are sorted worst-first (lowest min_score, then most flags).
+    """
+    from ..services.quality_scorer import (
+        score_page,
+        update_quality_frontmatter,
+        parse_section_quality,
+        llm_enhance_scores,
+        _parse_sections,
+        _parse_subtype,
+    )
+    from collections import Counter
+
+    results = []
+
+    for section_dir in ("entities", "concepts"):
+        d = kb.wiki_dir / section_dir
+        if not d.exists():
+            continue
+
+        for md_file in sorted(d.glob("*.md")):
+            content = md_file.read_text(encoding="utf-8", errors="replace")
+
+            needs_score = rescore or "section_quality:" not in content
+
+            if needs_score:
+                scores = score_page(content)
+                if llm_enhance and scores:
+                    sections = _parse_sections(content)
+                    subtype  = _parse_subtype(content)
+                    scores   = llm_enhance_scores(scores, sections, subtype)
+                if scores:
+                    updated = update_quality_frontmatter(content, scores)
+                    md_file.write_text(updated, encoding="utf-8")
+            else:
+                scores = parse_section_quality(content)
+
+            if not scores:
+                continue
+
+            min_score    = min(d["score"] for d in scores.values())
+            worst        = min(scores, key=lambda s: scores[s]["score"])
+            total_flags  = sum(len(d.get("flags", [])) for d in scores.values())
+
+            results.append({
+                "path":            f"wiki/{section_dir}/{md_file.name}",
+                "title":           md_file.stem.replace("-", " ").title(),
+                "section_quality": scores,
+                "min_score":       min_score,
+                "worst_section":   worst,
+                "total_flags":     total_flags,
+            })
+
+    results.sort(key=lambda r: (r["min_score"], -r["total_flags"]))
+
+    score_dist: Counter = Counter()
+    for r in results:
+        for data in r["section_quality"].values():
+            score_dist[data["score"]] += 1
+
+    return {
+        "total_pages":       len(results),
+        "pages":             results,
+        "score_distribution": {str(k): v for k, v in sorted(score_dist.items())},
+    }
+
+
+@router.post("/defrag")
+async def defrag_wiki(
+    background_tasks: BackgroundTasks,
+    path: str = Query(None, description="Defrag a single page (wiki-relative). Omit to defrag all."),
+    dry_run: bool = Query(False),
+    kb: KBConfig = Depends(resolve_kb),
+):
+    """Resolve scope_contamination flags by moving misplaced content to the correct pages."""
+    from ..services.defrag_pipeline import defrag_page as _defrag_page, defrag_all as _defrag_all
+
+    if dry_run:
+        return await asyncio.to_thread(_defrag_all, kb, True)
+
+    if path:
+        background_tasks.add_task(asyncio.to_thread, _defrag_page, path, kb)
+        return {"status": "started", "mode": "single", "path": path}
+    else:
+        background_tasks.add_task(asyncio.to_thread, _defrag_all, kb)
+        return {"status": "started", "mode": "all"}
+
+
+@router.post("/migrate/scope")
+async def migrate_scope(background_tasks: BackgroundTasks, kb: KBConfig = Depends(resolve_kb)):
+    """Add scope: field to all entity/concept pages that don't have one. Runs in background."""
+    def _run(kb: KBConfig):
+        from ..services.quality_scorer import (
+            parse_scope, update_scope_frontmatter, _default_scope, _parse_subtype
+        )
+        from ..services.activity_log import append_event
+        updated = 0
+        updated_files = []
+        for section in ("entities", "concepts"):
+            d = kb.wiki_dir / section
+            if not d.exists():
+                continue
+            for md_file in sorted(d.glob("*.md")):
+                try:
+                    content = md_file.read_text(encoding="utf-8", errors="replace")
+                    if parse_scope(content):
+                        continue
+                    scope = _default_scope(md_file.stem.replace("-", " ").title(), _parse_subtype(content))
+                    md_file.write_text(update_scope_frontmatter(content, scope), encoding="utf-8")
+                    updated += 1
+                    updated_files.append(f"wiki/{section}/{md_file.name}")
+                except Exception as exc:
+                    log.warning("migrate_scope: %s: %s", md_file.name, exc)
+        log.info("migrate_scope: added scope to %d page(s)", updated)
+        append_event(kb.wiki_dir, {
+            "operation": "migrate",
+            "kb": kb.name,
+            "source": f"Scope Migration — {updated} page(s) updated",
+            "files_written": updated_files,
+            "gaps_opened": [], "gaps_closed": [], "sections_filled": [],
+            "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0,
+            "detail": f"Added scope: field to {updated} entity/concept pages",
+        })
+
+    background_tasks.add_task(asyncio.to_thread, _run, kb)
+    total = sum(len(list((kb.wiki_dir / s).glob("*.md"))) for s in ("entities", "concepts") if (kb.wiki_dir / s).exists())
+    return {"status": "started", "pages_to_scan": total}
+
+
+@router.post("/migrate/reconcile-gaps")
+async def migrate_reconcile_gaps(background_tasks: BackgroundTasks, kb: KBConfig = Depends(resolve_kb)):
+    """Scan all gap files and close any sections already written in the referenced page."""
+    def _run(kb: KBConfig):
+        from ..services.ingest_pipeline import reconcile_gaps
+        from ..services.activity_log import append_event
+        result = reconcile_gaps(kb)
+        append_event(kb.wiki_dir, {
+            "operation": "migrate",
+            "kb": kb.name,
+            "source": f"Gap Reconciliation — {len(result['fully_closed'])} closed, {len(result['partially_resolved'])} trimmed",
+            "files_written": [],
+            "gaps_opened": [],
+            "gaps_closed": result["fully_closed"],
+            "sections_filled": [],
+            "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0,
+            "detail": (
+                f"Checked {result['checked']} gap files. "
+                f"Fully closed: {len(result['fully_closed'])}. "
+                f"Partially resolved: {len(result['partially_resolved'])}. "
+                f"Errors: {len(result['errors'])}."
+            ),
+        })
+
+    background_tasks.add_task(asyncio.to_thread, _run, kb)
+    gaps_count = len(list((kb.wiki_dir / "gaps").glob("*.md"))) if (kb.wiki_dir / "gaps").exists() else 0
+    return {"status": "started", "gaps_to_check": gaps_count}
+
+
+@router.post("/migrate/scan-contamination")
+async def migrate_scan_contamination(background_tasks: BackgroundTasks, kb: KBConfig = Depends(resolve_kb)):
+    """LLM-scan all entity/concept pages for scope contamination and stamp frontmatter flags."""
+    def _run(kb: KBConfig):
+        from ..services.quality_scorer import (
+            check_scope, parse_scope, _default_scope, _parse_subtype,
+            update_contamination_frontmatter, parse_scope_contamination,
+        )
+        pages = [
+            (s, f)
+            for s in ("entities", "concepts")
+            for f in sorted((kb.wiki_dir / s).glob("*.md"))
+            if (kb.wiki_dir / s).exists()
+        ]
+        existing_titles = [f.stem.replace("-", " ").title() for _, f in pages]
+        from ..services.quality_scorer import clear_contamination_frontmatter
+        flagged = 0
+        cleared = 0
+        for section, md_file in pages:
+            try:
+                content = md_file.read_text(encoding="utf-8", errors="replace")
+                title  = md_file.stem.replace("-", " ").title()
+                scope  = parse_scope(content) or _default_scope(title, _parse_subtype(content))
+                result = check_scope(title, content, scope, existing_titles)
+                if not result["clean"]:
+                    md_file.write_text(update_contamination_frontmatter(content, result["violations"]), encoding="utf-8")
+                    flagged += 1
+                    log.info("scan: flagged %s (%d violation(s))", md_file.name, len(result["violations"]))
+                elif parse_scope_contamination(content):
+                    # Previously flagged but now clean — clear the stale flag
+                    md_file.write_text(clear_contamination_frontmatter(content), encoding="utf-8")
+                    cleared += 1
+                    log.info("scan: cleared stale flag on %s", md_file.name)
+            except Exception as exc:
+                log.warning("scan: %s: %s", md_file.name, exc)
+        log.info("migrate_scan_contamination: %d/%d flagged, %d cleared", flagged, len(pages), cleared)
+        from ..services.activity_log import append_event
+        append_event(kb.wiki_dir, {
+            "operation": "migrate",
+            "kb": kb.name,
+            "source": f"Scope Contamination Scan — {flagged}/{len(pages)} flagged, {cleared} stale flags cleared",
+            "files_written": [],
+            "gaps_opened": [], "gaps_closed": [], "sections_filled": [],
+            "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0,
+            "detail": f"Scanned {len(pages)} pages, found contamination on {flagged}, cleared {cleared} stale flags",
+        })
+
+    background_tasks.add_task(asyncio.to_thread, _run, kb)
+    total = sum(len(list((kb.wiki_dir / s).glob("*.md"))) for s in ("entities", "concepts") if (kb.wiki_dir / s).exists())
+    return {"status": "started", "pages_to_scan": total}
+
+
+class FalsePositiveRequest(BaseModel):
+    path: str          # e.g. "wiki/entities/chlordiazepoxide.md"
+    section: str       # section heading of the violation
+    belongs_on: str    # the erroneous target page title
+
+
+@router.post("/false-positive")
+def mark_false_positive(req: FalsePositiveRequest, kb: KBConfig = Depends(resolve_kb)):
+    """
+    Whitelist a scope_contamination violation as a false positive.
+    Adds it to scope_ignore: in frontmatter so it is never re-flagged on future scans.
+    """
+    from ..services.quality_scorer import add_scope_ignore
+
+    rel = req.path.lstrip("/")
+    md_file = kb.wiki_dir.parent / rel
+    if not md_file.exists():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"File not found: {rel}")
+
+    content = md_file.read_text(encoding="utf-8", errors="replace")
+    updated = add_scope_ignore(content, req.section, req.belongs_on)
+    md_file.write_text(updated, encoding="utf-8")
+    log.info("false-positive: whitelisted '%s' → '%s' on %s", req.section, req.belongs_on, md_file.name)
+    return {"status": "ok", "path": rel, "section": req.section, "belongs_on": req.belongs_on}
+
+
+@router.get("/contamination")
+def get_contamination(kb: KBConfig = Depends(resolve_kb)):
+    """Return all pages currently flagged with scope_contamination."""
+    from ..services.quality_scorer import parse_scope_contamination
+    flagged = []
+    for section in ("entities", "concepts"):
+        d = kb.wiki_dir / section
+        if not d.exists():
+            continue
+        for md_file in sorted(d.glob("*.md")):
+            try:
+                content    = md_file.read_text(encoding="utf-8", errors="replace")
+                violations = parse_scope_contamination(content)
+                if violations:
+                    flagged.append({
+                        "path":       f"wiki/{section}/{md_file.name}",
+                        "title":      md_file.stem.replace("-", " ").title(),
+                        "violations": violations,
+                    })
+            except Exception:
+                pass
+    return {"total": len(flagged), "pages": flagged}
 
 
 @router.delete("/contents")

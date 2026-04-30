@@ -154,21 +154,23 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                 elif line.startswith("subtype:"):
                     subtype = line.split(":", 1)[1].strip()
             missing: list[str] = []
+            missing_values: list[str] = []
             resolution_question = ""
             in_missing = False
             in_question = False
+            in_missing_values = False
             for line in text.splitlines():
                 if line.strip() == "## Missing Sections":
-                    in_missing = True
-                    in_question = False
+                    in_missing = True; in_question = False; in_missing_values = False
                     continue
                 if line.strip() == "## Resolution Question":
-                    in_question = True
-                    in_missing = False
+                    in_question = True; in_missing = False; in_missing_values = False
+                    continue
+                if line.strip() == "## Specific Missing Values":
+                    in_missing_values = True; in_missing = False; in_question = False
                     continue
                 if line.startswith("##"):
-                    in_missing = False
-                    in_question = False
+                    in_missing = False; in_question = False; in_missing_values = False
                     continue
                 if in_missing and line.startswith("- "):
                     item = line[2:].strip()
@@ -176,6 +178,8 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                         missing.append(item)
                 if in_question and line.strip() and not resolution_question:
                     resolution_question = line.strip()
+                if in_missing_values and line.startswith("- "):
+                    missing_values.append(line[2:].strip())
             if missing and not f.stem.startswith("patient-"):
                 # Re-route referenced_page through canonical registry so stale
                 # gap files pointing at narrow/renamed pages get consolidated.
@@ -183,6 +187,11 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                 gap_title = f.stem.replace("-", " ").title()
                 canonical_page = _resolve_canonical(gap_title, kb.wiki_dir)
                 effective_page = canonical_page or referenced_page
+                log.info(
+                    "resolve-all: gap=%r  sections=%s  missing_values=%s  question=%s",
+                    gap_title, missing, missing_values,
+                    resolution_question[:100] if resolution_question else "none",
+                )
                 gaps.append({
                     "file": f"wiki/gaps/{f.name}",
                     "title": gap_title,
@@ -190,6 +199,7 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                     "subtype": subtype,
                     "missing_sections": missing,
                     "resolution_question": resolution_question,
+                    "missing_values": missing_values,
                 })
 
     _batches[batch_id]["total_gaps"] = len(gaps)
@@ -222,15 +232,27 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
             prefetched_content=article.get("content", ""),
             skip_quality_gate=gate,
             hint_subtype=gap.get("subtype", ""),
+            missing_values=gap.get("missing_values") or [],
         )
         result = _jobs[job_id].get("result") or {}
         return len(result.get("files_written", []))
 
     async def process_gap(gap):
         try:
+            log.info(
+                "process_gap: title=%r  sections=%s  missing_values=%s  question=%s",
+                gap["title"], gap["missing_sections"],
+                gap.get("missing_values") or [],
+                (gap.get("resolution_question") or "")[:100],
+            )
             articles, _ = await asyncio.to_thread(
-                search_for_gap, gap["title"], gap["missing_sections"], max_results, pool,
+                search_for_gap,
+                gap["title"],
+                gap["missing_sections"],
+                max_results,
+                pool,
                 gap.get("resolution_question", ""),
+                gap.get("missing_values") or [],
             )
             # Run articles sequentially — each writes to the same referenced_page.
             files_written = 0
@@ -241,7 +263,11 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
             if files_written == 0:
                 log.info("resolve-all gap '%s': 0 files written — triggering LLM fallback", gap["title"])
                 llm_articles, _ = await asyncio.to_thread(
-                    _llm_fallback, gap["title"], gap["missing_sections"]
+                    _llm_fallback,
+                    gap["title"],
+                    gap["missing_sections"],
+                    gap.get("resolution_question", ""),
+                    gap.get("missing_values") or [],
                 )
                 for article in llm_articles:
                     await _ingest_article(article, gap, skip_quality_gate=True)
@@ -395,7 +421,12 @@ async def _do_ingest(
     prefetched_content: str = "",
     skip_quality_gate: bool = False,
     hint_subtype: str = "",
+    missing_values: list[str] | None = None,
 ):
+    log.info(
+        "_do_ingest: gap=%r  sections=%s  missing_values=%s  page=%s  skip_quality_gate=%s",
+        gap_title, gap_sections, missing_values or [], referenced_page, skip_quality_gate,
+    )
     try:
         if prefetched_content:
             text = prefetched_content
@@ -421,6 +452,7 @@ async def _do_ingest(
             kb,
             skip_quality_gate,
             hint_subtype,
+            missing_values or [],
         )
         _jobs[job_id] = {"status": "done", "title": title, "result": result, "error": None}
 

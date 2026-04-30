@@ -16,16 +16,19 @@ import {
 import { getStats, createKB, listKBs } from '../api'
 import { useAppState } from '../AppStateContext'
 
-const navItems = [
-  { to: '/ingest',    label: 'Ingest',    icon: ArrowUpTrayIcon },
-  { to: '/chat',      label: 'Chat',      icon: ChatBubbleLeftRightIcon },
-  { to: '/wiki',      label: 'Wiki',      icon: BookOpenIcon },
-  { to: '/assess',         label: 'Assess',    icon: ClipboardDocumentCheckIcon },
-  { to: '/clinical-assess', label: 'Clinical',   icon: BeakerIcon },
-  { to: '/learn',           label: 'Learn',      icon: AcademicCapIcon },
-  { to: '/order-generator', label: 'Orders',     icon: ClipboardDocumentListIcon },
-  { to: '/activity',        label: 'Activity',   icon: BoltIcon },
-  { to: '/dashboard',      label: 'Dashboard', icon: ChartBarIcon },
+const primaryNav = [
+  { to: '/ingest', label: 'Ingest', icon: ArrowUpTrayIcon },
+  { to: '/chat',   label: 'Chat',   icon: ChatBubbleLeftRightIcon },
+  { to: '/wiki',   label: 'Wiki',   icon: BookOpenIcon },
+  { to: '/learn',  label: 'Learn',  icon: AcademicCapIcon },
+]
+
+const toolsNav = [
+  { to: '/assess',          label: 'Assess',    icon: ClipboardDocumentCheckIcon },
+  { to: '/clinical-assess', label: 'Clinical',  icon: BeakerIcon },
+  { to: '/order-generator', label: 'Orders',    icon: ClipboardDocumentListIcon },
+  { to: '/activity',        label: 'Activity',  icon: BoltIcon },
+  { to: '/dashboard',       label: 'Dashboard', icon: ChartBarIcon },
 ]
 
 export default function Layout() {
@@ -95,7 +98,7 @@ export default function Layout() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {navItems.map(({ to, label, icon: Icon }) => (
+          {primaryNav.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -113,8 +116,30 @@ export default function Layout() {
           ))}
         </nav>
 
+        {/* Tools strip */}
+        <div className="px-4 py-3 border-t border-border">
+          <div className="flex items-center gap-1">
+            {toolsNav.map(({ to, label, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                title={label}
+                className={({ isActive }) =>
+                  `p-2 rounded-md transition-colors duration-100 ${
+                    isActive
+                      ? 'text-accent bg-accent/10'
+                      : 'text-muted hover:text-white hover:bg-ink-700'
+                  }`
+                }
+              >
+                <Icon className="w-4 h-4" />
+              </NavLink>
+            ))}
+          </div>
+        </div>
+
         {/* Bottom spend */}
-        <div className="px-4 py-4 border-t border-border">
+        <div className="px-4 py-3 border-t border-border">
           <p className="text-xs text-muted mb-1">Total spend</p>
           <p className="font-mono text-sm text-white">
             {todaySpend !== null ? `$${todaySpend.toFixed(4)}` : '—'}

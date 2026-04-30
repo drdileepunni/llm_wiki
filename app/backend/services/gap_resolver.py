@@ -222,17 +222,32 @@ def _google_search_in_session(browser, query: str) -> list[dict]:
     return hits
 
 
-def _llm_fallback(gap_title: str, gap_sections: list[str], resolution_question: str = "") -> tuple[list[dict], float]:
+def _llm_fallback(
+    gap_title: str,
+    gap_sections: list[str],
+    resolution_question: str = "",
+    missing_values: list[str] | None = None,
+) -> tuple[list[dict], float]:
     """Generate gap content via LLM when PubMed yields 0 articles. Returns (articles, cost_usd)."""
     from google import genai
-    log.info("[gap=%s] LLM fallback using model=%s  sections=%s  question=%s",
-             gap_title, KG_FALLBACK_MODEL, gap_sections, resolution_question[:80] if resolution_question else "none")
+    log.info(
+        "[gap=%s] LLM fallback using model=%s  sections=%s  question=%s  missing_values=%s",
+        gap_title, KG_FALLBACK_MODEL, gap_sections,
+        resolution_question[:80] if resolution_question else "none",
+        missing_values or [],
+    )
     client = genai.Client(api_key=GOOGLE_API_KEY)
     if resolution_question:
+        mv_block = (
+            "\n\nYou MUST include specific values for these data points:\n"
+            + "".join(f"- {v}\n" for v in missing_values)
+            if missing_values else ""
+        )
         prompt = (
             f"You are a senior clinical consultant writing a concise, actionable wiki entry.\n\n"
             f"Answer this specific clinical question precisely and completely:\n"
-            f"**{resolution_question}**\n\n"
+            f"**{resolution_question}**"
+            f"{mv_block}\n\n"
             f"Structure your answer using these headings (## heading):\n"
             + "".join(f"- {s}\n" for s in gap_sections)
             + "\nRequirements:\n"
@@ -346,17 +361,41 @@ def _fetch_article_meta(pmid: str) -> dict:
     }
 
 
-def _is_relevant(article: dict, gap_title: str, gap_sections: list[str]) -> tuple[bool, str, float]:
+def _is_relevant(
+    article: dict,
+    gap_title: str,
+    gap_sections: list[str],
+    resolution_question: str = "",
+    missing_values: list[str] | None = None,
+) -> tuple[bool, str, float]:
     """Returns (is_relevant, reason, cost_usd)."""
     from google import genai
     client = genai.Client(api_key=GOOGLE_API_KEY)
-    log.debug("Checking relevance of '%s' for gap '%s'", article.get("title", "")[:60], gap_title)
+    log.info(
+        "Relevance check: article=%r  gap=%r  question=%s  missing_values=%s",
+        article.get("title", "")[:80], gap_title,
+        resolution_question[:80] if resolution_question else "none",
+        missing_values or [],
+    )
+
+    # Build a rich gap description so the relevance check uses the actual data
+    # points needed, not just the (often generic) section heading.
+    gap_lines = [f'Topic: "{gap_title}"']
+    if resolution_question:
+        gap_lines.append(f'Specific question: "{resolution_question}"')
+    if missing_values:
+        gap_lines.append("Specific missing values:\n" + "\n".join(f"  - {v}" for v in missing_values))
+    elif gap_sections:
+        gap_lines.append(f'Missing sections: {", ".join(gap_sections)}')
+    gap_description = "\n".join(gap_lines)
+
     resp = client.models.generate_content(
         model=_GEMINI_SEARCH_MODEL,
         contents=(
-            f'Gap: "{gap_title}"\nMissing: {", ".join(gap_sections)}\n\n'
+            f"{gap_description}\n\n"
             f"Article: {article['title']}\nAbstract: {article['abstract'][:1000]}\n\n"
-            "Would this fill one or more missing sections?\n"
+            "Would this article contain information to answer the specific question or provide "
+            "the missing values listed above?\n"
             'JSON only: {"relevant": true/false, "reason": "one sentence"}'
         ),
     )
@@ -479,6 +518,7 @@ def search_for_gap(
     max_results: int = 5,
     bb_pool: Optional["BBPool"] = None,
     resolution_question: str = "",
+    missing_values: list[str] | None = None,
 ) -> tuple[list[dict], float]:
     """
     Search Google/PubMed for free full-text articles covering the gap.
@@ -544,7 +584,11 @@ def search_for_gap(
                     log.debug("[gap=%s] PMID %s has no PMC full text — skipping", gap_title, pmid)
                     continue
 
-                relevant, reason, rel_cost = _is_relevant(article, gap_title, gap_sections)
+                relevant, reason, rel_cost = _is_relevant(
+                    article, gap_title, gap_sections,
+                    resolution_question=resolution_question,
+                    missing_values=missing_values,
+                )
                 total_search_cost += rel_cost
                 article["relevant"]         = relevant
                 article["relevance_reason"] = reason
@@ -558,7 +602,7 @@ def search_for_gap(
 
     # ── LLM fallback when PubMed yields nothing ───────────────────────────────
     if not articles:
-        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question)
+        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
         articles.extend(llm_articles)
         total_search_cost += llm_cost
 

@@ -232,6 +232,56 @@ export async function getWikiActivity(kbName, limit = 500) {
   return fetch(`${BASE}/wiki/activity?limit=${limit}`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }
 
+export async function getWikiContamination(kbName) {
+  return fetch(`${BASE}/wiki/contamination`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
+export async function runDefrag(kbName, path = null, dryRun = false) {
+  const params = new URLSearchParams()
+  if (path) params.set('path', path)
+  if (dryRun) params.set('dry_run', 'true')
+  const res = await fetch(`${BASE}/wiki/defrag?${params}`, {
+    method: 'POST',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runMigrateScope(kbName) {
+  const res = await fetch(`${BASE}/wiki/migrate/scope`, {
+    method: 'POST', headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runScanContamination(kbName) {
+  const res = await fetch(`${BASE}/wiki/migrate/scan-contamination`, {
+    method: 'POST', headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runReconcileGaps(kbName) {
+  const res = await fetch(`${BASE}/wiki/migrate/reconcile-gaps`, {
+    method: 'POST', headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function markFalsePositive(kbName, path, section, belongs_on) {
+  const res = await fetch(`${BASE}/wiki/false-positive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ path, section, belongs_on }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function clearWikiContents(kbName) {
   const res = await fetch(`${BASE}/wiki/contents`, {
     method: 'DELETE',
@@ -296,7 +346,7 @@ export async function listPatientSnapshots(patientId) {
   return fetch(`${BASE}/clinical-assess/patients/${encodeURIComponent(patientId)}/snapshots`).then(r => r.json())
 }
 
-export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false, reasoningModel = null) {
+export async function runClinicalAssessment(patientId, kbName, model = null, snapshotNum = null, usePatientContext = false, reasoningModel = null, overwriteRunId = null) {
   const res = await fetch(`${BASE}/clinical-assess/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
@@ -306,6 +356,7 @@ export async function runClinicalAssessment(patientId, kbName, model = null, sna
       reasoning_model: reasoningModel || undefined,
       snapshot_num: snapshotNum != null ? snapshotNum : undefined,
       use_patient_context: usePatientContext,
+      overwrite_run_id: overwriteRunId || undefined,
     }),
   })
   if (!res.ok) throw new Error(await res.text())
@@ -358,6 +409,34 @@ export async function rateSnapshotApi(patientId, runId, snapshotNum, { rating, k
       body: JSON.stringify({ rating, knowledge_gaps }),
     }
   )
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function generateScenario(description, model = null) {
+  const res = await fetch(`${BASE}/clinical-assess/generate-scenario`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ description, model: model || undefined }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runCustomScenario(snapshot, kbName, model = null, reasoningModel = null) {
+  const res = await fetch(`${BASE}/clinical-assess/run-custom`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({
+      clinical_context: snapshot.clinical_context,
+      csv_content: snapshot.csv_content,
+      question: snapshot.question,
+      phase: snapshot.phase || '',
+      difficulty: snapshot.difficulty || '',
+      model: model || undefined,
+      reasoning_model: reasoningModel || undefined,
+    }),
+  })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

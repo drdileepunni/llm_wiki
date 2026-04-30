@@ -19,11 +19,13 @@ from ..config import KBConfig
 from ..dependencies import resolve_kb
 from ..services.clinical_assess_pipeline import (
     delete_clinical_assessment,
+    generate_scenario,
     list_available_patients,
     list_clinical_assessments,
     list_patient_snapshot_info,
     load_clinical_assessment,
     run_clinical_assessment,
+    run_custom_snapshot,
     save_run_comment,
     save_snapshot_rating,
 )
@@ -41,6 +43,7 @@ class RunRequest(BaseModel):
     reasoning_model: str | None = None
     snapshot_num: int | None = None  # None = run all
     use_patient_context: bool = False
+    overwrite_run_id: str | None = None  # if set, overwrite this existing run
 
 
 class RatingRequest(BaseModel):
@@ -49,6 +52,21 @@ class RatingRequest(BaseModel):
 
 class CommentRequest(BaseModel):
     comment: str = ""
+
+
+class GenerateScenarioRequest(BaseModel):
+    description: str
+    model: str | None = None
+
+
+class RunCustomRequest(BaseModel):
+    clinical_context: str
+    csv_content: str
+    question: str
+    phase: str = ""
+    difficulty: str = ""
+    model: str | None = None
+    reasoning_model: str | None = None
 
 
 @router.get("/available")
@@ -123,6 +141,44 @@ def delete_assessment(patient_id: str, run_id: str, kb: KBConfig = Depends(resol
         raise HTTPException(status_code=404, detail=f"No assessment {run_id!r} for {patient_id!r}")
 
 
+@router.post("/generate-scenario")
+def generate_scenario_endpoint(req: GenerateScenarioRequest):
+    """Generate a synthetic snapshot from a free-text scenario description."""
+    try:
+        result = generate_scenario(req.description, model=req.model)
+        return {"snapshot": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/run-custom")
+async def run_custom_endpoint(
+    req: RunCustomRequest,
+    background_tasks: BackgroundTasks,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    job_id = str(uuid.uuid4())[:8]
+    snapshot_data = {
+        "clinical_context": req.clinical_context,
+        "csv_content": req.csv_content,
+        "question": req.question,
+        "phase": req.phase,
+        "difficulty": req.difficulty,
+    }
+    _jobs[job_id] = {"status": "running", "patient_id": "scenario", "result": None, "error": None}
+    background_tasks.add_task(_do_run_custom, job_id, snapshot_data, kb, req.model, req.reasoning_model)
+    return {"job_id": job_id}
+
+
+async def _do_run_custom(job_id: str, snapshot_data: dict, kb: KBConfig, model: str | None, reasoning_model: str | None):
+    try:
+        result = await asyncio.to_thread(run_custom_snapshot, snapshot_data, kb, model, reasoning_model)
+        _jobs[job_id] = {"status": "done", "patient_id": result["patient_id"], "result": result, "error": None}
+    except Exception as exc:
+        log.error("Custom scenario assessment failed: %s", exc)
+        _jobs[job_id] = {"status": "error", "patient_id": "scenario", "result": None, "error": str(exc)}
+
+
 @router.post("/run")
 async def run_endpoint(
     req: RunRequest,
@@ -131,13 +187,13 @@ async def run_endpoint(
 ):
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {"status": "running", "patient_id": req.patient_id, "result": None, "error": None}
-    background_tasks.add_task(_do_run, job_id, req.patient_id, kb, req.model, req.reasoning_model, req.snapshot_num, req.use_patient_context)
+    background_tasks.add_task(_do_run, job_id, req.patient_id, kb, req.model, req.reasoning_model, req.snapshot_num, req.use_patient_context, req.overwrite_run_id)
     return {"job_id": job_id}
 
 
-async def _do_run(job_id: str, patient_id: str, kb: KBConfig, model: str | None = None, reasoning_model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False):
+async def _do_run(job_id: str, patient_id: str, kb: KBConfig, model: str | None = None, reasoning_model: str | None = None, snapshot_num: int | None = None, use_patient_context: bool = False, overwrite_run_id: str | None = None):
     try:
-        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb, model, snapshot_num, use_patient_context, reasoning_model)
+        result = await asyncio.to_thread(run_clinical_assessment, patient_id, kb, model, snapshot_num, use_patient_context, reasoning_model, overwrite_run_id)
         _jobs[job_id] = {"status": "done", "patient_id": patient_id, "result": result, "error": None}
     except Exception as exc:
         log.error("Clinical assessment failed for %r: %s", patient_id, exc)

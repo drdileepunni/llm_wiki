@@ -79,6 +79,9 @@ def _call(
 
 # ── Compact timeline representation ────────────────────────────────────────────
 
+MAX_TIMELINE_ROWS = 500  # cap sent to event-window identification to avoid huge prompts
+
+
 def _compact(df: pd.DataFrame, max_summary: int = 90) -> str:
     rows = ["row|time|category|event_type|summary"]
     for i, r in df.iterrows():
@@ -90,6 +93,15 @@ def _compact(df: pd.DataFrame, max_summary: int = 90) -> str:
     return "\n".join(rows)
 
 
+def _sample_df(df: pd.DataFrame, max_rows: int = MAX_TIMELINE_ROWS) -> pd.DataFrame:
+    """Uniformly downsample a timeline to at most max_rows rows, preserving temporal order."""
+    if len(df) <= max_rows:
+        return df
+    step = len(df) / max_rows
+    indices = [int(i * step) for i in range(max_rows)]
+    return df.iloc[indices]
+
+
 # ── Phase A: Gemini calls ──────────────────────────────────────────────────────
 
 def _get_event_windows(df: pd.DataFrame, client, num_snapshots: int = 5) -> list[dict]:
@@ -98,12 +110,15 @@ def _get_event_windows(df: pd.DataFrame, client, num_snapshots: int = 5) -> list
     Each window ends at a trigger event: abnormal lab, abnormal vital, or SBAR raised.
     Returns list of dicts with: start_row, end_row, phase, difficulty, context, next_action
     """
-    n = len(df)
-    tl = _compact(df)
+    sampled = _sample_df(df)
+    n = len(df)       # keep original row count for range clamping
+    tl = _compact(sampled)
 
+    ns = len(sampled)
+    note = f" (downsampled from {n} to {ns} rows)" if ns < n else ""
     prompt = f"""You are identifying {num_snapshots} clinically significant event windows from an ICU timeline.
 
-TIMELINE ({n} rows, 0-indexed):
+TIMELINE ({ns} rows, 0-indexed{note}):
 {tl}
 
 For each window, identify:
@@ -135,7 +150,7 @@ Rules:
 - Pick triggers from different clinical domains where possible (e.g. not all vitals)
 """
 
-    raw = _call(client, prompt, max_tokens=2000, thinking=False)
+    raw = _call(client, prompt, max_tokens=4000, thinking=False)
     return _parse_event_windows(raw, n, num_snapshots)
 
 
@@ -232,7 +247,7 @@ Respond with ONLY valid JSON (no markdown, no code blocks, just raw JSON):
 
 Write at senior-resident level. Be specific with numbers and drug names."""
 
-    result = _call(client, prompt, max_tokens=2000, thinking=False)
+    result = _call(client, prompt, max_tokens=4000, thinking=False)
 
     # Parse JSON response
     if isinstance(result, dict):

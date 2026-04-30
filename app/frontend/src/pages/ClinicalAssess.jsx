@@ -3,7 +3,13 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   PlayIcon,
+  ArrowPathIcon,
   ArrowTopRightOnSquareIcon,
+  PencilIcon,
+  CheckIcon,
+  XMarkIcon,
+  DocumentDuplicateIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -18,6 +24,8 @@ import {
   saveRunComment,
   deleteClinicalAssessment,
   generateOrders,
+  generateScenario,
+  runCustomScenario,
 } from '../api'
 import CostBadge from '../components/CostBadge'
 import { useAppState } from '../AppStateContext'
@@ -428,9 +436,17 @@ function OrderCard({ order }) {
 
 // ── Snapshot row ──────────────────────────────────────────────────────────────
 
-function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle, ordersCache }) {
+function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onToggle, ordersCache, onFork }) {
   const [saving, setSaving] = useState(false)
   const [viewMode, setViewMode] = useState('rendered') // 'rendered' | 'raw' | 'orders'
+  // Inline editing
+  const [editField, setEditField] = useState(null) // 'context' | 'question' | 'timeline'
+  const [editContext, setEditContext] = useState(snap.clinical_context || '')
+  const [editQuestion, setEditQuestion] = useState(snap.question || '')
+  const [editCsv, setEditCsv] = useState(snap.csv_content || '')
+  const isDirty = editContext !== (snap.clinical_context || '') ||
+    editQuestion !== (snap.question || '') ||
+    editCsv !== (snap.csv_content || '')
   const cacheKey = `${runId}-${snap.snapshot_num}`
   const [ordersResult, setOrdersResult] = useState(() => ordersCache?.current[cacheKey] ?? null)
   const [ordersLoading, setOrdersLoading] = useState(false)
@@ -525,28 +541,101 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
       {/* Expanded body */}
       {isOpen && (
         <div className="px-4 py-4 bg-ink-950 border-t border-border">
-          {/* Context: clinical context + timeline + question */}
+          {/* Context: clinical context + timeline + question — with inline editing */}
           <div className="mb-5 space-y-3">
-            {snap.clinical_context && (
-              <div>
-                <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Clinical Context</p>
+            {/* Fork / dirty actions bar */}
+            <div className="flex items-center justify-end gap-2">
+              {isDirty && (
+                <>
+                  <button
+                    onClick={() => { setEditContext(snap.clinical_context || ''); setEditQuestion(snap.question || ''); setEditCsv(snap.csv_content || ''); setEditField(null) }}
+                    className="flex items-center gap-1 text-[10px] text-muted hover:text-white border border-border rounded px-2 py-1 transition-colors"
+                  >
+                    <XMarkIcon className="w-3 h-3" /> Reset
+                  </button>
+                  <button
+                    onClick={() => onFork?.({ clinical_context: editContext, csv_content: editCsv, question: editQuestion, phase: snap.phase, difficulty: snap.difficulty })}
+                    className="flex items-center gap-1 text-[10px] text-accent border border-accent/40 rounded px-2 py-1 bg-accent/10 hover:bg-accent/20 transition-colors"
+                  >
+                    <PlayIcon className="w-3 h-3" /> Run edited version
+                  </button>
+                </>
+              )}
+              {!isDirty && (
+                <button
+                  onClick={() => onFork?.({ clinical_context: snap.clinical_context || '', csv_content: snap.csv_content || '', question: snap.question || '', phase: snap.phase, difficulty: snap.difficulty })}
+                  title="Fork to Scenario builder"
+                  className="flex items-center gap-1 text-[10px] text-muted hover:text-white border border-border rounded px-2 py-1 transition-colors"
+                >
+                  <DocumentDuplicateIcon className="w-3 h-3" /> Fork
+                </button>
+              )}
+            </div>
+
+            {/* Clinical Context */}
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <p className="text-[10px] uppercase tracking-widest text-muted">Clinical Context</p>
+                <button onClick={() => setEditField(editField === 'context' ? null : 'context')} className="text-muted hover:text-white transition-colors">
+                  {editField === 'context' ? <CheckIcon className="w-3 h-3" /> : <PencilIcon className="w-3 h-3" />}
+                </button>
+              </div>
+              {editField === 'context' ? (
+                <textarea
+                  value={editContext}
+                  onChange={e => setEditContext(e.target.value)}
+                  rows={3}
+                  className="w-full text-xs text-white/80 bg-ink-800 border border-accent/40 rounded-lg p-3 leading-relaxed resize-y focus:outline-none focus:border-accent"
+                />
+              ) : (
                 <p className="text-xs text-white/70 bg-ink-900 border border-border rounded-lg p-3 leading-relaxed">
-                  {snap.clinical_context}
+                  {editContext || snap.clinical_context}
                 </p>
-              </div>
-            )}
-            {snap.csv_content && (
+              )}
+            </div>
+
+            {/* Timeline */}
+            {(snap.csv_content || editCsv) && (
               <div>
-                <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Timeline</p>
-                <TimelineTable csv={snap.csv_content} />
+                <div className="flex items-center gap-2 mb-1">
+                  <p className="text-[10px] uppercase tracking-widest text-muted">Timeline</p>
+                  <button onClick={() => setEditField(editField === 'timeline' ? null : 'timeline')} className="text-muted hover:text-white transition-colors">
+                    {editField === 'timeline' ? <CheckIcon className="w-3 h-3" /> : <PencilIcon className="w-3 h-3" />}
+                  </button>
+                </div>
+                {editField === 'timeline' ? (
+                  <textarea
+                    value={editCsv}
+                    onChange={e => setEditCsv(e.target.value)}
+                    rows={12}
+                    className="w-full text-[11px] font-mono text-white/80 bg-ink-800 border border-accent/40 rounded-lg p-3 leading-relaxed resize-y focus:outline-none focus:border-accent"
+                    placeholder="timestamp_ist,event_category,event_type,actor_name,actor_role,summary"
+                  />
+                ) : (
+                  <TimelineTable csv={editCsv || snap.csv_content} />
+                )}
               </div>
             )}
-            {snap.question && (
-              <div>
-                <p className="text-[10px] uppercase tracking-widest text-muted mb-1">Question</p>
-                <p className="text-xs text-white/80 italic">{snap.question}</p>
+
+            {/* Question */}
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <p className="text-[10px] uppercase tracking-widest text-muted">Question</p>
+                <button onClick={() => setEditField(editField === 'question' ? null : 'question')} className="text-muted hover:text-white transition-colors">
+                  {editField === 'question' ? <CheckIcon className="w-3 h-3" /> : <PencilIcon className="w-3 h-3" />}
+                </button>
               </div>
-            )}
+              {editField === 'question' ? (
+                <textarea
+                  value={editQuestion}
+                  onChange={e => setEditQuestion(e.target.value)}
+                  rows={2}
+                  className="w-full text-xs text-white/80 bg-ink-800 border border-accent/40 rounded-lg p-3 leading-relaxed resize-y focus:outline-none focus:border-accent"
+                />
+              ) : (
+                <p className="text-xs text-white/80 italic">{editQuestion || snap.question}</p>
+              )}
+            </div>
           </div>
 
           {/* Clinical Summary — collapsed accordion */}
@@ -993,7 +1082,214 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
 
 // ── Run panel (left panel bottom) ────────────────────────────────────────────
 
-function RunPanel({ activeKB, onRunDone }) {
+// ── Scenario Editor (renders in the right panel) ─────────────────────────────
+
+function ScenarioEditor({ activeKB, draftScenario, onClearDraft, onRunDone, onClose }) {
+  const [scenarioDesc, setScenarioDesc] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [scenarioCtx, setScenarioCtx] = useState('')
+  const [scenarioQ, setScenarioQ] = useState('')
+  const [scenarioCsv, setScenarioCsv] = useState('')
+  const [scenarioPhase, setScenarioPhase] = useState('')
+  const [scenarioDiff, setScenarioDiff] = useState('')
+  const [scenarioModel, setScenarioModel] = useState('')
+  const [scenarioReasoningModel, setScenarioReasoningModel] = useState('')
+  const [running, setRunning] = useState(false)
+  const [jobId, setJobId] = useState(null)
+  const [error, setError] = useState(null)
+  const hasScenario = !!(scenarioCtx || scenarioQ || scenarioCsv)
+  // toggle between CSV textarea and rendered table
+  const [csvMode, setCsvMode] = useState('table') // 'table' | 'raw'
+
+  useEffect(() => {
+    if (!draftScenario) return
+    setScenarioCtx(draftScenario.clinical_context || '')
+    setScenarioQ(draftScenario.question || '')
+    setScenarioCsv(draftScenario.csv_content || '')
+    setScenarioPhase(draftScenario.phase || '')
+    setScenarioDiff(draftScenario.difficulty || '')
+  }, [draftScenario])
+
+  useEffect(() => {
+    if (!jobId) return
+    const interval = setInterval(async () => {
+      try {
+        const job = await clinicalAssessJobStatus(jobId)
+        if (job.status === 'done' || job.status === 'error') {
+          clearInterval(interval)
+          setJobId(null)
+          setRunning(false)
+          if (job.status === 'error') setError(job.error || 'Assessment failed')
+          else { onRunDone(); onClose() }
+        }
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [jobId, onRunDone, onClose])
+
+  const handleGenerate = async () => {
+    if (!scenarioDesc.trim()) return
+    setGenerating(true); setError(null)
+    try {
+      const { snapshot } = await generateScenario(scenarioDesc.trim())
+      setScenarioCtx(snapshot.clinical_context || '')
+      setScenarioQ(snapshot.question || '')
+      setScenarioCsv(snapshot.csv_content || '')
+      setScenarioPhase(snapshot.phase || '')
+      setScenarioDiff(snapshot.difficulty || '')
+      setCsvMode('table')
+    } catch (err) { setError(err.message) }
+    finally { setGenerating(false) }
+  }
+
+  const handleRunScenario = async () => {
+    if (!scenarioCsv || !scenarioQ) return
+    setRunning(true); setError(null)
+    try {
+      const { job_id } = await runCustomScenario(
+        { clinical_context: scenarioCtx, csv_content: scenarioCsv, question: scenarioQ, phase: scenarioPhase, difficulty: scenarioDiff },
+        activeKB, scenarioModel || null, scenarioReasoningModel || null
+      )
+      setJobId(job_id)
+    } catch (err) { setError(err.message); setRunning(false) }
+  }
+
+  const clearScenario = () => {
+    setScenarioDesc(''); setScenarioCtx(''); setScenarioQ(''); setScenarioCsv('')
+    setScenarioPhase(''); setScenarioDiff(''); onClearDraft?.()
+  }
+
+  return (
+    <div className="px-8 py-6 max-w-4xl">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Scenario Builder</h2>
+          <p className="text-xs text-muted mt-0.5">Generate a synthetic case or edit fields manually, then run the assessment</p>
+        </div>
+        <button onClick={onClose} className="text-muted hover:text-white transition-colors">
+          <XMarkIcon className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Generate row */}
+      <div className="mb-6">
+        <p className="text-[10px] uppercase tracking-widest text-muted mb-2">Generate from description</p>
+        <div className="flex gap-2">
+          <input
+            value={scenarioDesc}
+            onChange={e => setScenarioDesc(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleGenerate() }}
+            placeholder="e.g. acute pancreatitis Day 2 with worsening abdominal pain"
+            disabled={generating || running}
+            className="flex-1 bg-ink-900 border border-border rounded-lg px-3 py-2 text-sm text-white placeholder:text-muted focus:outline-none focus:border-accent"
+          />
+          <button onClick={handleGenerate} disabled={generating || running || !scenarioDesc.trim()}
+            className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg text-sm text-muted hover:text-white hover:border-white/30 transition-colors disabled:opacity-40 whitespace-nowrap">
+            <SparklesIcon className="w-4 h-4" />
+            {generating ? 'Generating…' : 'Generate'}
+          </button>
+        </div>
+        {generating && <p className="text-xs text-muted animate-pulse mt-2">Building scenario…</p>}
+      </div>
+
+      {hasScenario && (
+        <div className="space-y-5">
+          {/* Phase + Difficulty + Models row */}
+          <div className="grid grid-cols-4 gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Phase</p>
+              <select value={scenarioPhase} onChange={e => setScenarioPhase(e.target.value)}
+                className="w-full bg-ink-900 border border-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent">
+                <option value="">—</option>
+                {['EVOLVING','ESCALATION','DETERIORATION','MANAGEMENT','LATE'].map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Difficulty</p>
+              <select value={scenarioDiff} onChange={e => setScenarioDiff(e.target.value)}
+                className="w-full bg-ink-900 border border-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent">
+                <option value="">—</option>
+                {['EASY','MEDIUM','HARD'].map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Grounding model</p>
+              <select value={scenarioModel} onChange={e => setScenarioModel(e.target.value)} disabled={running}
+                className="w-full bg-ink-900 border border-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent">
+                {AVAILABLE_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Reasoning model</p>
+              <select value={scenarioReasoningModel} onChange={e => setScenarioReasoningModel(e.target.value)} disabled={running}
+                className="w-full bg-ink-900 border border-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent">
+                {REASONING_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Clinical Context */}
+          <div>
+            <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Clinical Context</p>
+            <textarea value={scenarioCtx} onChange={e => setScenarioCtx(e.target.value)} rows={3} disabled={running}
+              className="w-full bg-ink-900 border border-border rounded-lg px-3 py-2.5 text-sm text-white/80 leading-relaxed resize-y focus:outline-none focus:border-accent" />
+          </div>
+
+          {/* Timeline */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] uppercase tracking-widest text-muted">Timeline</p>
+              <div className="flex gap-1">
+                {['table', 'raw'].map(m => (
+                  <button key={m} onClick={() => setCsvMode(m)}
+                    className={`text-[10px] border rounded px-2 py-0.5 transition-colors ${csvMode === m ? 'border-accent text-accent bg-accent/10' : 'border-border text-muted hover:text-white/60'}`}>
+                    {m === 'table' ? 'Preview' : 'CSV'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {csvMode === 'table' ? (
+              <TimelineTable csv={scenarioCsv} />
+            ) : (
+              <textarea value={scenarioCsv} onChange={e => setScenarioCsv(e.target.value)} rows={12} disabled={running}
+                className="w-full bg-ink-900 border border-border rounded-lg px-3 py-2.5 text-[11px] font-mono text-white/80 leading-relaxed resize-y focus:outline-none focus:border-accent"
+                placeholder="timestamp_ist,event_category,event_type,actor_name,actor_role,summary" />
+            )}
+          </div>
+
+          {/* Question */}
+          <div>
+            <p className="text-[10px] uppercase tracking-widest text-muted mb-1.5">Question</p>
+            <textarea value={scenarioQ} onChange={e => setScenarioQ(e.target.value)} rows={2} disabled={running}
+              className="w-full bg-ink-900 border border-border rounded-lg px-3 py-2.5 text-sm text-white/80 leading-relaxed resize-y focus:outline-none focus:border-accent" />
+          </div>
+
+          {error && <p className="text-xs text-red-400">{error}</p>}
+
+          <div className="flex gap-3 pt-1">
+            <button onClick={clearScenario} disabled={running}
+              className="px-4 py-2 border border-border rounded-lg text-sm text-muted hover:text-white transition-colors disabled:opacity-40">
+              Clear
+            </button>
+            <button onClick={handleRunScenario} disabled={running || !scenarioCsv || !scenarioQ}
+              className="flex items-center gap-2 px-6 py-2 bg-accent hover:bg-accent/80 rounded-lg text-sm text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              <PlayIcon className="w-4 h-4" />
+              {running ? 'Running assessment…' : 'Run Assessment'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Run panel (patient only — scenario opens in right panel) ──────────────────
+
+function RunPanel({ activeKB, onRunDone, onOpenScenario, hasDraft }) {
+  const [running, setRunning] = useState(false)
+  const [jobId, setJobId] = useState(null)
+  const [error, setError] = useState(null)
   const [availablePatients, setAvailablePatients] = useState([])
   const [selectedPatient, setSelectedPatient] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
@@ -1001,9 +1297,6 @@ function RunPanel({ activeKB, onRunDone }) {
   const [selectedSnapshot, setSelectedSnapshot] = useState('1')
   const [availableSnapshots, setAvailableSnapshots] = useState([])
   const [usePatientContext, setUsePatientContext] = useState(true)
-  const [running, setRunning] = useState(false)
-  const [jobId, setJobId] = useState(null)
-  const [error, setError] = useState(null)
 
   useEffect(() => {
     listAvailablePatients()
@@ -1022,114 +1315,80 @@ function RunPanel({ activeKB, onRunDone }) {
       .catch(() => setAvailableSnapshots([]))
   }, [selectedPatient])
 
-  const handleRun = async () => {
-    if (!selectedPatient) return
-    setRunning(true)
-    setError(null)
-    try {
-      const snapNum = selectedSnapshot !== '' ? parseInt(selectedSnapshot, 10) : null
-      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext, selectedReasoningModel || null)
-      setJobId(job_id)
-    } catch (err) {
-      setError(err.message)
-      setRunning(false)
-    }
-  }
-
   useEffect(() => {
     if (!jobId) return
     const interval = setInterval(async () => {
       try {
         const job = await clinicalAssessJobStatus(jobId)
         if (job.status === 'done' || job.status === 'error') {
-          clearInterval(interval)
-          setJobId(null)
-          setRunning(false)
-          if (job.status === 'error') {
-            setError(job.error || 'Assessment failed')
-          } else {
-            onRunDone()
-          }
+          clearInterval(interval); setJobId(null); setRunning(false)
+          if (job.status === 'error') setError(job.error || 'Assessment failed')
+          else onRunDone()
         }
       } catch {}
     }, 3000)
     return () => clearInterval(interval)
   }, [jobId, onRunDone])
 
+  const handleRun = async () => {
+    if (!selectedPatient) return
+    setRunning(true); setError(null)
+    try {
+      const snapNum = selectedSnapshot !== '' ? parseInt(selectedSnapshot, 10) : null
+      const { job_id } = await runClinicalAssessment(selectedPatient, activeKB, selectedModel || null, snapNum, usePatientContext, selectedReasoningModel || null)
+      setJobId(job_id)
+    } catch (err) { setError(err.message); setRunning(false) }
+  }
+
   return (
-    <div className="px-4 py-4 border-t border-border">
-      <p className="text-xs text-muted mb-2">Run new case assessment</p>
+    <div className="border-t border-border px-4 py-4 space-y-2">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs text-muted">Run case assessment</p>
+        <button onClick={onOpenScenario}
+          className={`flex items-center gap-1.5 text-[10px] border rounded px-2 py-1 transition-colors ${
+            hasDraft
+              ? 'border-accent text-accent bg-accent/10 hover:bg-accent/20'
+              : 'border-border text-muted hover:text-white hover:border-white/30'
+          }`}>
+          <SparklesIcon className="w-3 h-3" />
+          Scenario{hasDraft && <span className="w-1.5 h-1.5 rounded-full bg-accent ml-0.5" />}
+        </button>
+      </div>
       {availablePatients.length === 0 ? (
-        <p className="text-xs text-muted italic mb-2">No patients found in timelines folder.</p>
+        <p className="text-xs text-muted italic">No patients found in timelines folder.</p>
       ) : (
-        <select
-          value={selectedPatient}
-          onChange={e => setSelectedPatient(e.target.value)}
-          disabled={running}
-          className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
-        >
-          {availablePatients.map(p => (
-            <option key={p} value={p}>{p}</option>
-          ))}
+        <select value={selectedPatient} onChange={e => setSelectedPatient(e.target.value)} disabled={running}
+          className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent">
+          {availablePatients.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
       )}
-      <label className="block text-xs text-muted mb-0.5 font-mono">Grounding model</label>
-      <select
-        value={selectedModel}
-        onChange={e => setSelectedModel(e.target.value)}
-        disabled={running}
-        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
-      >
-        {AVAILABLE_MODELS.map(m => (
-          <option key={m.value} value={m.value}>{m.label}</option>
-        ))}
+      <label className="block text-xs text-muted font-mono">Grounding model</label>
+      <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)} disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent">
+        {AVAILABLE_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
       </select>
-      <label className="block text-xs text-muted mb-0.5 font-mono">Reasoning model</label>
-      <select
-        value={selectedReasoningModel}
-        onChange={e => setSelectedReasoningModel(e.target.value)}
-        disabled={running}
-        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
-      >
-        {REASONING_MODELS.map(m => (
-          <option key={m.value} value={m.value}>{m.label}</option>
-        ))}
+      <label className="block text-xs text-muted font-mono">Reasoning model</label>
+      <select value={selectedReasoningModel} onChange={e => setSelectedReasoningModel(e.target.value)} disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent">
+        {REASONING_MODELS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
       </select>
-      <select
-        value={selectedSnapshot}
-        onChange={e => setSelectedSnapshot(e.target.value)}
-        disabled={running}
-        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent mb-2"
-      >
+      <select value={selectedSnapshot} onChange={e => setSelectedSnapshot(e.target.value)} disabled={running}
+        className="w-full bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-accent">
         <option value="">All snapshots</option>
-        {availableSnapshots.map(s => (
-          <option key={s.num} value={s.num}>{s.label}</option>
-        ))}
+        {availableSnapshots.map(s => <option key={s.num} value={s.num}>{s.label}</option>)}
       </select>
-      {/* Patient context toggle */}
-      <button
-        onClick={() => setUsePatientContext(v => !v)}
-        disabled={running}
-        className={`w-full flex items-center justify-between px-3 py-2 rounded border text-xs font-mono mb-2 transition-colors disabled:opacity-40 ${
-          usePatientContext
-            ? 'bg-purple-950/40 border-purple-700/60 text-purple-300'
-            : 'bg-ink-800 border-border text-muted'
-        }`}
-      >
+      <button onClick={() => setUsePatientContext(v => !v)} disabled={running}
+        className={`w-full flex items-center justify-between px-3 py-2 rounded border text-xs font-mono transition-colors disabled:opacity-40 ${
+          usePatientContext ? 'bg-purple-950/40 border-purple-700/60 text-purple-300' : 'bg-ink-800 border-border text-muted'
+        }`}>
         <span>Patient context in search</span>
         <span className={`w-8 h-4 rounded-full relative transition-colors ${usePatientContext ? 'bg-purple-500' : 'bg-ink-600'}`}>
           <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${usePatientContext ? 'left-4' : 'left-0.5'}`} />
         </span>
       </button>
-
-      {error && (
-        <p className="text-xs text-red-400 mb-2">{error}</p>
-      )}
-      <button
-        onClick={handleRun}
-        disabled={running || !selectedPatient}
-        className="flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-xs text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full justify-center"
-      >
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <button onClick={handleRun} disabled={running || !selectedPatient}
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-xs text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full justify-center">
         <PlayIcon className="w-3.5 h-3.5" />
         {running ? 'Running…' : 'Run Assessment'}
       </button>
@@ -1146,6 +1405,11 @@ export default function ClinicalAssess() {
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
   const ordersCache = useRef({}) // { [runId-snapshotNum]: ordersResult } — persists across unmounts
+  const [draftScenario, setDraftScenario] = useState(null)
+  const [scenarioMode, setScenarioMode] = useState(false)
+  const [rerunning, setRerunning] = useState(false)
+  const [rerunJobId, setRerunJobId] = useState(null)
+  const [rerunError, setRerunError] = useState(null)
 
   const fetchList = useCallback(async () => {
     try {
@@ -1233,6 +1497,34 @@ export default function ClinicalAssess() {
     }
   }
 
+  const handleRerun = async () => {
+    if (!detail) return
+    setRerunning(true); setRerunError(null)
+    try {
+      const { job_id } = await runClinicalAssessment(
+        detail.patient_id, activeKB, detail.model || null, null, false, null, detail.run_id
+      )
+      setRerunJobId(job_id)
+    } catch (err) {
+      setRerunError(err.message); setRerunning(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!rerunJobId) return
+    const interval = setInterval(async () => {
+      try {
+        const job = await clinicalAssessJobStatus(rerunJobId)
+        if (job.status === 'done' || job.status === 'error') {
+          clearInterval(interval); setRerunJobId(null); setRerunning(false)
+          if (job.status === 'error') setRerunError(job.error || 'Rerun failed')
+          else fetchDetail({ patient_id: detail.patient_id, run_id: detail.run_id })
+        }
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [rerunJobId, detail, fetchDetail])
+
   const totalCost = detail?.snapshots?.reduce((s, snap) => s + (snap.cost_usd || 0), 0) ?? 0
 
   const ratedValues = Object.values(ratings)
@@ -1278,12 +1570,25 @@ export default function ClinicalAssess() {
           })()}
         </div>
 
-        <RunPanel activeKB={activeKB} onRunDone={handleRunDone} />
+        <RunPanel
+          activeKB={activeKB}
+          onRunDone={handleRunDone}
+          onOpenScenario={() => setScenarioMode(true)}
+          hasDraft={!!draftScenario}
+        />
       </div>
 
       {/* Right panel */}
       <div className="flex-1 overflow-y-auto">
-        {!selectedRun ? (
+        {scenarioMode ? (
+          <ScenarioEditor
+            activeKB={activeKB}
+            draftScenario={draftScenario}
+            onClearDraft={() => setDraftScenario(null)}
+            onRunDone={handleRunDone}
+            onClose={() => setScenarioMode(false)}
+          />
+        ) : !selectedRun ? (
           <div className="flex items-center justify-center h-full text-muted text-sm">
             Select a run or start a new assessment
           </div>
@@ -1295,9 +1600,21 @@ export default function ClinicalAssess() {
           <div className="px-8 py-6">
             {/* Header */}
             <div className="mb-6">
-              <h1 className="text-lg font-semibold text-white font-mono mb-1">
-                {detail.patient_id}
-              </h1>
+              <div className="flex items-start justify-between gap-4 mb-1">
+                <h1 className="text-lg font-semibold text-white font-mono">
+                  {detail.patient_id}
+                </h1>
+                <button
+                  onClick={handleRerun}
+                  disabled={rerunning}
+                  title="Re-run this assessment (overwrites this run)"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-border text-xs text-muted hover:text-white hover:border-white/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                >
+                  <ArrowPathIcon className={`w-3.5 h-3.5 ${rerunning ? 'animate-spin' : ''}`} />
+                  {rerunning ? 'Rerunning…' : 'Rerun'}
+                </button>
+              </div>
+              {rerunError && <p className="text-xs text-red-400 mb-2">{rerunError}</p>}
               <div className="flex items-center gap-3 text-xs text-muted flex-wrap">
                 <span className="font-mono text-white/40">{detail.run_id}</span>
                 <span className="text-border">·</span>
@@ -1365,6 +1682,7 @@ export default function ClinicalAssess() {
                   isOpen={openSnap === snap.snapshot_num}
                   onToggle={() => setOpenSnap(n => n === snap.snapshot_num ? null : snap.snapshot_num)}
                   ordersCache={ordersCache}
+                  onFork={snap => { setDraftScenario(snap); setScenarioMode(true) }}
                 />
               ))}
             </div>

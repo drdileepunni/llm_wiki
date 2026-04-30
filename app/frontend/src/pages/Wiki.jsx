@@ -15,7 +15,116 @@ import {
   XMarkIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline'
-import { getWikiTree, getWikiFile, saveWikiFile, deleteWikiFile, searchWiki } from '../api'
+import { getWikiTree, getWikiFile, saveWikiFile, deleteWikiFile, searchWiki, runDefrag } from '../api'
+
+// ── Quality badge ─────────────────────────────────────────────────────────────
+
+const QUALITY_COLORS = {
+  0: 'bg-red-950   text-red-400   border-red-800',
+  1: 'bg-red-950   text-red-400   border-red-800',
+  2: 'bg-amber-950 text-amber-400 border-amber-800',
+  3: 'bg-sky-950   text-sky-400   border-sky-800',
+  4: 'bg-emerald-950 text-emerald-400 border-emerald-800',
+}
+const QUALITY_LABELS = ['Stub', 'Sparse', 'Partial', 'Adequate', 'Complete']
+
+function QualityBadge({ score, flags }) {
+  const colorClass = QUALITY_COLORS[score] ?? QUALITY_COLORS[0]
+  const label = QUALITY_LABELS[score] ?? '?'
+  return (
+    <span
+      className={`ml-1.5 inline-flex items-center text-[9px] px-1.5 py-0.5 rounded border font-mono leading-none select-none ${colorClass}`}
+      title={label}
+    >
+      {score}/4
+    </span>
+  )
+}
+
+/** Parse scope_contamination block from YAML frontmatter into list of violations */
+function parseScopeContamination(text) {
+  const fmMatch = text.match(/^---\r?\n([\s\S]*?)\n---/)
+  if (!fmMatch) return []
+  const lines = fmMatch[1].split('\n')
+  const violations = []
+  let inSC = false
+  let current = null
+
+  for (const line of lines) {
+    if (line.startsWith('scope_contamination:')) { inSC = true; continue }
+    if (inSC) {
+      if (!/^\s/.test(line)) { inSC = false; if (current) violations.push(current); current = null; continue }
+      if (/^\s{2}-/.test(line)) {
+        if (current) violations.push(current)
+        current = {}
+        const m = line.match(/section:\s+"?([^"]+)"?/)
+        if (m) current.section = m[1]
+      } else if (current) {
+        const mb = line.match(/belongs_on:\s+"?([^"]+)"?/)
+        if (mb) current.belongs_on = mb[1]
+        const me = line.match(/excerpt:\s+"?([^"]*)"?/)
+        if (me) current.excerpt = me[1]
+        const mn = line.match(/is_new_page:\s+(true|false)/)
+        if (mn) current.is_new_page = mn[1] === 'true'
+      }
+    }
+  }
+  if (current) violations.push(current)
+  return violations
+}
+
+function ContaminationBadge({ violations, onDefrag }) {
+  if (!violations?.length) return null
+  const targets = [...new Set(violations.map(v => v.belongs_on).filter(Boolean))]
+  return (
+    <span
+      className="ml-1.5 inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded border
+        bg-orange-950 text-orange-400 border-orange-800 font-mono leading-none cursor-pointer
+        hover:bg-orange-900 transition-colors"
+      title={`Scope contamination — content may belong on: ${targets.join(', ')}`}
+      onClick={e => { e.stopPropagation(); onDefrag?.() }}
+    >
+      ⚠ mixed
+    </span>
+  )
+}
+
+/** Parse section_quality block from YAML frontmatter into {SectionName: {score, flags}} */
+function parseSectionQuality(text) {
+  const fmMatch = text.match(/^---\r?\n([\s\S]*?)\n---/)
+  if (!fmMatch) return {}
+  const lines = fmMatch[1].split('\n')
+  const result = {}
+  let inSQ = false
+  let currentSection = null
+
+  for (const line of lines) {
+    if (line.startsWith('section_quality:')) {
+      inSQ = true
+      continue
+    }
+    if (inSQ) {
+      if (!/^\s/.test(line)) { inSQ = false; continue }
+      // Section name line: '  "SectionName":' or '  SectionName:'
+      const sectionMatch = line.match(/^\s{2}"?([^":\n]+)"?:\s*$/)
+      if (sectionMatch) {
+        currentSection = sectionMatch[1].trim()
+        result[currentSection] = { score: 0, flags: [] }
+        continue
+      }
+      if (currentSection) {
+        const scoreMatch = line.match(/^\s{4}score:\s*(\d+)/)
+        if (scoreMatch) { result[currentSection].score = parseInt(scoreMatch[1]); continue }
+        const flagsMatch = line.match(/^\s{4}flags:\s*\[([^\]]*)\]/)
+        if (flagsMatch) {
+          const fs = flagsMatch[1].trim()
+          result[currentSection].flags = fs ? fs.split(',').map(s => s.trim()).filter(Boolean) : []
+        }
+      }
+    }
+  }
+  return result
+}
 
 // ── Slug / index helpers ──────────────────────────────────────────────────────
 
@@ -50,9 +159,9 @@ function preprocessWikiLinks(text) {
 }
 
 // ── Markdown component factory ────────────────────────────────────────────────
-// Takes a slugIndex + navigate fn so wikilinks open articles inside the viewer.
+// Takes slugIndex, navigate fn, and sectionQuality map for quality badges.
 
-function buildMdComponents(slugIndex, onNavigate) {
+function buildMdComponents(slugIndex, onNavigate, sectionQuality = {}) {
   return {
     p({ children })      { return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p> },
     ul({ children })     { return <ul className="list-disc list-outside ml-5 mb-3 space-y-1">{children}</ul> },
@@ -61,7 +170,28 @@ function buildMdComponents(slugIndex, onNavigate) {
     strong({ children }) { return <strong className="font-semibold text-white">{children}</strong> },
     em({ children })     { return <em className="italic text-white/75">{children}</em> },
     h1({ children })     { return <h1 className="text-xl font-bold text-white mt-6 mb-3 pb-1 border-b border-border">{children}</h1> },
-    h2({ children })     { return <h2 className="text-base font-bold text-white mt-4 mb-2">{children}</h2> },
+    h2({ children }) {
+      const text = Array.isArray(children) ? children.join('') : String(children ?? '')
+      const quality = sectionQuality[text]
+      const flags = quality?.flags ?? []
+      return (
+        <div className="mt-4 mb-2">
+          <h2 className="text-base font-bold text-white flex items-center">
+            <span>{children}</span>
+            {quality !== undefined && <QualityBadge score={quality.score} flags={flags} />}
+          </h2>
+          {flags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {flags.map(f => (
+                <span key={f} className="text-[9px] px-1.5 py-0.5 rounded bg-ink-800 text-muted/80 font-mono border border-border/60">
+                  {f.replace(/^(missing_|no_)/, '').replace(/_/g, ' ')}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    },
     h3({ children })     { return <h3 className="text-sm font-semibold text-white/90 mt-3 mb-1">{children}</h3> },
     code({ inline, children }) {
       return inline
@@ -254,8 +384,6 @@ export default function Wiki() {
     if (dirty && !confirm('You have unsaved changes. Discard and open new file?')) return
     setSelectedPath(path)
     setMode('preview')
-    setSearchQuery('')
-    setSearchResults(null)
   }, [dirty])
 
   // Debounced search
@@ -316,10 +444,31 @@ export default function Wiki() {
     return () => window.removeEventListener('keydown', handler)
   }, [handleSave])
 
-  // Memoised markdown components with wikilink navigation wired in
+  // Parse section quality + scope contamination from current file's frontmatter
+  const sectionQuality    = useMemo(() => parseSectionQuality(content),    [content])
+  const contaminations    = useMemo(() => parseScopeContamination(content), [content])
+  const [defraging, setDefraging] = useState(false)
+
+  const handleDefrag = useCallback(async () => {
+    if (!selectedPath) return
+    if (!confirm(`Defrag "${selectedPath.split('/').pop()}"? The LLM will move misplaced content to the correct pages.`)) return
+    setDefraging(true)
+    try {
+      await runDefrag(activeKB, selectedPath)
+      // Reload the file after defrag
+      const d = await getWikiFile(selectedPath, activeKB)
+      setContent(d.content); setSavedContent(d.content)
+    } catch (e) {
+      alert('Defrag failed: ' + e.message)
+    } finally {
+      setDefraging(false)
+    }
+  }, [selectedPath, activeKB])
+
+  // Memoised markdown components with wikilink navigation and quality badges
   const mdComponents = useMemo(
-    () => buildMdComponents(slugIndex, handleSelect),
-    [slugIndex, handleSelect]
+    () => buildMdComponents(slugIndex, handleSelect, sectionQuality),
+    [slugIndex, handleSelect, sectionQuality]
   )
 
   const fileName = selectedPath ? selectedPath.split('/').pop() : null
@@ -407,6 +556,19 @@ export default function Wiki() {
                   : saveStatus === 'error' ? <><ExclamationCircleIcon className="w-3 h-3 text-red-400" /> Error</>
                   : saving ? 'Saving…'
                   : <>Save <span className="text-white/30 font-mono ml-1">⌘S</span></>}
+              </button>
+            )}
+            {selectedPath && contaminations.length > 0 && (
+              <button
+                onClick={handleDefrag}
+                disabled={defraging}
+                title={`Scope contamination — content may belong on: ${[...new Set(contaminations.map(v => v.belongs_on))].join(', ')}`}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium
+                  text-orange-400/80 hover:text-orange-400 hover:bg-orange-950/40 border border-transparent
+                  hover:border-orange-800/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <span className="text-[10px]">⚠</span>
+                {defraging ? 'Defraging…' : `Mixed (${contaminations.length})`}
               </button>
             )}
             {selectedPath && (
