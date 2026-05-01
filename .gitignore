@@ -15,3 +15,4 @@ kbs/agent_school/assessments/*
 .timeline_cache/*
 timelines/*
 kbs/agent_school/learn_runs/*
+app/logs/*

@@ -1,3 +1,4 @@
+import json
 import logging
 import difflib
 import re
@@ -435,6 +436,38 @@ def _parse_gap_missing_values(text: str) -> list[str]:
     return items
 
 
+_GAP_HISTORY_FILE = "gap_history.json"
+
+def _load_gap_history(gaps_dir: Path) -> dict:
+    p = gaps_dir / _GAP_HISTORY_FILE
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_gap_history(gaps_dir: Path, history: dict) -> None:
+    gaps_dir.mkdir(parents=True, exist_ok=True)
+    (gaps_dir / _GAP_HISTORY_FILE).write_text(
+        json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _parse_gap_section_times_opened(text: str) -> dict:
+    """Parse section_times_opened JSON dict from gap file frontmatter."""
+    for line in text.splitlines():
+        if line.startswith("section_times_opened:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+        if line.strip() == "---" and text.splitlines().index(line) > 0:
+            break
+    return {}
+
+
 def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> list[str]:
     """Write or merge gap files into wiki/gaps/ from the plan's knowledge_gaps output."""
     gaps_dir = kb.wiki_dir / "gaps"
@@ -466,10 +499,17 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         existing_missing: set[str] = set()
         existing_question: str = ""
         existing_times_opened: int = 0
+        existing_section_times: dict = {}
+
+        # Load persistent history (survives gap file deletion on resolve)
+        history = _load_gap_history(gaps_dir)
+        historical_section_times: dict = history.get(stem, {})
+
         if gap_path.exists():
             existing_text = gap_path.read_text(encoding="utf-8")
             existing_missing = _parse_gap_missing(existing_text)
             existing_question = _parse_gap_resolution_question(existing_text)
+            existing_section_times = _parse_gap_section_times_opened(existing_text)
             for line in existing_text.splitlines():
                 if line.startswith("created:"):
                     created = line.split(":", 1)[1].strip().strip('"')
@@ -478,6 +518,10 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
                         existing_times_opened = int(line.split(":", 1)[1].strip())
                     except ValueError:
                         pass
+
+        # Merge: existing file counts + persistent history (take max to avoid double-counting)
+        for s, cnt in historical_section_times.items():
+            existing_section_times[s] = max(existing_section_times.get(s, 0), cnt)
 
         merged = sorted(existing_missing | missing)
         if not merged:
@@ -509,6 +553,15 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         )
         merged_mv = list(dict.fromkeys(existing_mv + incoming_mv))  # dedup, preserve order
 
+        # Increment per-section counters for every incoming section
+        section_times: dict = dict(existing_section_times)
+        for s in missing:
+            section_times[s] = section_times.get(s, 0) + 1
+
+        # Persist to gap_history.json so counts survive gap file deletion
+        history[stem] = section_times
+        _save_gap_history(gaps_dir, history)
+
         title = stem.replace("-", " ").title()
         rel_gap = f"wiki/gaps/{stem}.md"
         times_opened = existing_times_opened + 1
@@ -516,6 +569,7 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
         subtype_line = f"subtype: {subtype}\n" if subtype else ""
         placement_line = f"placement: {placement}\n"
         persistent_line = "status: persistent\n" if is_persistent else ""
+        section_times_line = f"section_times_opened: {json.dumps(section_times, ensure_ascii=False)}\n"
         missing_values_block = (
             f"\n\n## Specific Missing Values\n\n"
             + "\n".join(f"- {v}" for v in merged_mv)
@@ -529,6 +583,7 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
             f"{placement_line}"
             f"{persistent_line}"
             f"times_opened: {times_opened}\n"
+            f"{section_times_line}"
             f"referenced_page: {page}\n"
             f"tags: [gap]\n"
             f"created: {created}\n"

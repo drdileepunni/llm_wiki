@@ -141,6 +141,10 @@ export async function getWikiGaps(kbName) {
   return fetch(`${BASE}/wiki/gaps`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }
 
+export async function getGapIntelligence(kbName) {
+  return fetch(`${BASE}/wiki/gap-intelligence`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
 export async function createGap(title, missing_sections, kbName) {
   const res = await fetch(`${BASE}/wiki/gaps`, {
     method: 'POST',
@@ -433,6 +437,7 @@ export async function runCustomScenario(snapshot, kbName, model = null, reasonin
       question: snapshot.question,
       phase: snapshot.phase || '',
       difficulty: snapshot.difficulty || '',
+      display_name: snapshot.display_name || undefined,
       model: model || undefined,
       reasoning_model: reasoningModel || undefined,
     }),
@@ -495,6 +500,78 @@ export async function listLearnRuns(kbName) {
 }
 
 // ── Order generation ───────────────────────────────────────────────────────────
+
+// ── Log capture ────────────────────────────────────────────────────────────────
+
+export async function startLogCapture() {
+  const res = await fetch(`${BASE}/logs/capture/start`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function stopLogCapture() {
+  const res = await fetch(`${BASE}/logs/capture/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getLogCaptureStatus() {
+  return fetch(`${BASE}/logs/capture/status`).then(r => r.json())
+}
+
+export async function listLogFiles() {
+  return fetch(`${BASE}/logs/files`).then(r => r.json())
+}
+
+// ── Viva (teacher-student loop) ────────────────────────────────────────────────
+
+export async function startViva(topic, maxTurns = 8, model = null, kbName) {
+  const res = await fetch(`${BASE}/viva/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ topic, max_turns: maxTurns, model: model || undefined }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function runVivaTurn(sessionId, model = null, kbName) {
+  const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}/turn`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ model: model || undefined }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function listVivaSessions(kbName) {
+  return fetch(`${BASE}/viva/`, { headers: kbHeaders(kbName) }).then(r => r.json())
+}
+
+export async function getVivaSession(sessionId, kbName) {
+  return fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}`, {
+    headers: kbHeaders(kbName),
+  }).then(r => r.json())
+}
+
+export async function forkVivaSession(sessionId, kbName) {
+  const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}/fork`, {
+    method: 'POST',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteVivaSession(sessionId, kbName) {
+  const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
 
 export async function generateOrders({ recommendations, cpmrn, patientType, model }, kbName) {
   const res = await fetch(`${BASE}/orders/generate`, {

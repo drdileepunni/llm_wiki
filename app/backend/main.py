@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, logs
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -17,11 +17,23 @@ log = logging.getLogger("wiki")
 app = FastAPI(title="LLM Wiki")
 
 
+_POLL_PREFIXES = (
+    "/api/viva/viva_",
+    "/api/learn/jobs/",
+    "/api/clinical-assess/jobs/",
+    "/api/resolve/batch/",
+    "/api/resolve/jobs/",
+    "/health",
+)
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    log.info("→ %s %s", request.method, request.url.path)
+    is_poll = request.method == "GET" and any(request.url.path.startswith(p) for p in _POLL_PREFIXES)
+    if not is_poll:
+        log.info("→ %s %s", request.method, request.url.path)
     response = await call_next(request)
-    log.info("← %s %s  [%d]", request.method, request.url.path, response.status_code)
+    if not is_poll:
+        log.info("← %s %s  [%d]", request.method, request.url.path, response.status_code)
     return response
 
 app.add_middleware(
@@ -41,11 +53,22 @@ app.include_router(assess.router)
 app.include_router(clinical_assess.router)
 app.include_router(learn.router)
 app.include_router(order_gen.router)
+app.include_router(viva.router)
+app.include_router(logs.router)
 
 @app.on_event("startup")
 def startup():
     init_db()
     _seed_canonical_registries()
+    _attach_log_capture()
+
+def _attach_log_capture():
+    from .services.log_capture import capture_handler
+    root = logging.getLogger()
+    if capture_handler not in root.handlers:
+        root.addHandler(capture_handler)
+    log.info("Log capture handler attached")
+
 
 def _seed_canonical_registries():
     from .config import list_kbs, get_kb

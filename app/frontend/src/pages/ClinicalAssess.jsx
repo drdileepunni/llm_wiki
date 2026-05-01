@@ -44,6 +44,29 @@ function preprocessWikiLinks(text, vaultName = DEFAULT_VAULT) {
   })
 }
 
+const _GAP_MARKER_RE = /(\(value not in wiki[^)]*\))/gi
+const _GAP_MARKER_TEST = /\(value not in wiki/i
+
+function renderStepWithGaps(text, vaultName = DEFAULT_VAULT) {
+  if (!text) return null
+  const parts = text.split(_GAP_MARKER_RE)
+  return parts.map((part, idx) => {
+    if (_GAP_MARKER_TEST.test(part)) {
+      return (
+        <span key={idx} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 mx-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-400 text-[10px] font-medium leading-none">
+          {part}
+        </span>
+      )
+    }
+    const processed = preprocessWikiLinks(part, vaultName)
+    return (
+      <ReactMarkdown key={idx} remarkPlugins={[remarkGfm]} components={{ ...mdComponents, p({ children }) { return <>{children}</> } }}>
+        {processed}
+      </ReactMarkdown>
+    )
+  })
+}
+
 const mdComponents = {
   a({ href, children }) {
     if (href?.startsWith(WIKI_LINK_PREFIX)) {
@@ -348,19 +371,31 @@ function RunCard({ run, isSelected, onSelect, onDelete }) {
 
 function PatientGroup({ patientId, runs, selectedRunId, onSelect, onDelete }) {
   const [open, setOpen] = useState(false)
+  const isSingle = runs.length === 1
+  const label = (isSingle && runs[0].display_name) ? runs[0].display_name : patientId
+
+  function handleHeader() {
+    if (isSingle) onSelect(runs[0])
+    else setOpen(v => !v)
+  }
+
+  const isHeaderSelected = isSingle && selectedRunId === runs[0].run_id
+
   return (
     <div>
       <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center gap-2 px-4 py-2 bg-ink-900 border-b border-border sticky top-0 z-10 hover:bg-ink-800 transition-colors text-left"
+        onClick={handleHeader}
+        className={`w-full flex items-center gap-2 px-4 py-2 bg-ink-900 border-b border-border sticky top-0 z-10 hover:bg-ink-800 transition-colors text-left ${
+          isHeaderSelected ? 'border-l-2 border-l-accent bg-accent/10' : ''
+        }`}
       >
-        {open
+        {!isSingle && (open
           ? <ChevronDownIcon className="w-3 h-3 text-muted flex-shrink-0" />
-          : <ChevronRightIcon className="w-3 h-3 text-muted flex-shrink-0" />}
-        <span className="text-xs font-mono font-semibold text-white/80 flex-1">{patientId}</span>
+          : <ChevronRightIcon className="w-3 h-3 text-muted flex-shrink-0" />)}
+        <span className="text-xs font-mono font-semibold text-white/80 flex-1">{label}</span>
         <span className="text-[10px] text-muted font-mono">{runs.length}</span>
       </button>
-      {open && runs.map(r => (
+      {!isSingle && open && runs.map(r => (
         <RunCard
           key={r.run_id}
           run={r}
@@ -801,9 +836,7 @@ function SnapshotRow({ snap, patientId, runId, activeKB, onRated, isOpen, onTogg
                                 <span className="flex-shrink-0 w-4 h-4 rounded-full bg-emerald-900/60 border border-emerald-700/50 text-emerald-400 text-[9px] font-bold flex items-center justify-center mt-0.5">
                                   {i + 1}
                                 </span>
-                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                                  {preprocessWikiLinks(item)}
-                                </ReactMarkdown>
+                                <span className="flex-1 leading-snug">{renderStepWithGaps(item)}</span>
                               </li>
                             ))}
                           </ol>
@@ -1092,6 +1125,7 @@ function ScenarioEditor({ activeKB, draftScenario, onClearDraft, onRunDone, onCl
   const [scenarioCsv, setScenarioCsv] = useState('')
   const [scenarioPhase, setScenarioPhase] = useState('')
   const [scenarioDiff, setScenarioDiff] = useState('')
+  const [scenarioDisplayName, setScenarioDisplayName] = useState('')
   const [scenarioModel, setScenarioModel] = useState('')
   const [scenarioReasoningModel, setScenarioReasoningModel] = useState('')
   const [running, setRunning] = useState(false)
@@ -1137,6 +1171,7 @@ function ScenarioEditor({ activeKB, draftScenario, onClearDraft, onRunDone, onCl
       setScenarioCsv(snapshot.csv_content || '')
       setScenarioPhase(snapshot.phase || '')
       setScenarioDiff(snapshot.difficulty || '')
+      setScenarioDisplayName(snapshot.display_name || '')
       setCsvMode('table')
     } catch (err) { setError(err.message) }
     finally { setGenerating(false) }
@@ -1147,7 +1182,7 @@ function ScenarioEditor({ activeKB, draftScenario, onClearDraft, onRunDone, onCl
     setRunning(true); setError(null)
     try {
       const { job_id } = await runCustomScenario(
-        { clinical_context: scenarioCtx, csv_content: scenarioCsv, question: scenarioQ, phase: scenarioPhase, difficulty: scenarioDiff },
+        { clinical_context: scenarioCtx, csv_content: scenarioCsv, question: scenarioQ, phase: scenarioPhase, difficulty: scenarioDiff, display_name: scenarioDisplayName },
         activeKB, scenarioModel || null, scenarioReasoningModel || null
       )
       setJobId(job_id)
@@ -1156,7 +1191,7 @@ function ScenarioEditor({ activeKB, draftScenario, onClearDraft, onRunDone, onCl
 
   const clearScenario = () => {
     setScenarioDesc(''); setScenarioCtx(''); setScenarioQ(''); setScenarioCsv('')
-    setScenarioPhase(''); setScenarioDiff(''); onClearDraft?.()
+    setScenarioPhase(''); setScenarioDiff(''); setScenarioDisplayName(''); onClearDraft?.()
   }
 
   return (

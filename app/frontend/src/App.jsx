@@ -11,6 +11,8 @@ import ClinicalAssess from './pages/ClinicalAssess'
 import Learn from './pages/Learn'
 import OrderGenerator from './pages/OrderGenerator'
 import Activity from './pages/Activity'
+import GapIntelligence from './pages/GapIntelligence'
+import VivaSession from './pages/VivaSession'
 
 export default function App() {
   return (
@@ -29,6 +31,8 @@ export default function App() {
             <Route path="learn" element={<Learn />} />
             <Route path="order-generator" element={<OrderGenerator />} />
             <Route path="activity" element={<Activity />} />
+            <Route path="gap-intelligence" element={<GapIntelligence />} />
+            <Route path="viva" element={<VivaSession />} />
           </Route>
         </Routes>
       </BrowserRouter>

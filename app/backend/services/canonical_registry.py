@@ -274,12 +274,18 @@ def resolve(concept: str, wiki_dir: Path, llm=None) -> str:
     )
     prompt = (
         f"Clinical concept to file: {normalised}\n\n"
-        f"Existing canonical pages (prefer reusing one if it fits, score would have been below threshold):\n"
-        f"{existing_table}\n\n"
-        "If the concept fits an existing page, return that path. "
-        "If it's genuinely a new topic, return a new broad entity/concept path — "
-        "e.g. 'entities/central-venous-catheter.md', NOT 'entities/central-venous-catheter-contraindications.md'. "
-        "NEVER include section-heading words (Dosing, Contraindications, Mechanism, Indications, etc.) in the page name."
+        f"Existing canonical pages:\n{existing_table}\n\n"
+        "REUSE an existing page ONLY if this concept IS that entity — i.e., the concept is a "
+        "natural sub-topic of that page. Examples of correct reuse:\n"
+        "  'Noradrenaline' → entities/vasopressors.md (noradrenaline IS a vasopressor)\n"
+        "  'IV Furosemide dose' → entities/furosemide.md (it IS furosemide dosing)\n\n"
+        "DO NOT reuse just because the drug is used in the same clinical scenario:\n"
+        "  'Rifaximin' must NOT go on entities/laxatives.md (rifaximin is an antibiotic, not a laxative)\n"
+        "  'Ammonia' must NOT go on entities/laxatives.md (ammonia is a biomarker)\n"
+        "  'Sedation' must NOT go on entities/laxatives.md (unrelated)\n\n"
+        "If there is no clearly matching existing page, create a NEW broad entity path. "
+        "E.g. 'entities/rifaximin.md', 'entities/ammonia.md', 'entities/sedation.md'. "
+        "NEVER include section-heading words (Dosing, Contraindications, Mechanism, etc.) in the name."
     )
 
     try:
@@ -288,8 +294,9 @@ def resolve(concept: str, wiki_dir: Path, llm=None) -> str:
             tools=[_RESOLVE_TOOL],
             system=(
                 "You assign clinical concepts to broad canonical wiki pages. "
-                "Prefer broad topic pages over narrow stubs. "
-                "Existing canonical pages are listed; reuse them when the concept fits."
+                "Only reuse an existing page if this concept IS that entity or a clear sub-topic of it. "
+                "Never group unrelated drugs or biomarkers onto the same page just because they "
+                "appear in the same clinical scenario."
             ),
             max_tokens=256,
             force_tool=True,

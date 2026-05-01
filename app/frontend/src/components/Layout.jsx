@@ -12,8 +12,11 @@ import {
   PlusIcon,
   ClipboardDocumentListIcon,
   BoltIcon,
+  ExclamationTriangleIcon,
+  UserGroupIcon,
+  StopCircleIcon,
 } from '@heroicons/react/24/outline'
-import { getStats, createKB, listKBs } from '../api'
+import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus } from '../api'
 import { useAppState } from '../AppStateContext'
 
 const primaryNav = [
@@ -21,24 +24,61 @@ const primaryNav = [
   { to: '/chat',   label: 'Chat',   icon: ChatBubbleLeftRightIcon },
   { to: '/wiki',   label: 'Wiki',   icon: BookOpenIcon },
   { to: '/learn',  label: 'Learn',  icon: AcademicCapIcon },
+  { to: '/viva',   label: 'Viva',   icon: UserGroupIcon },
 ]
 
 const toolsNav = [
   { to: '/assess',          label: 'Assess',    icon: ClipboardDocumentCheckIcon },
   { to: '/clinical-assess', label: 'Clinical',  icon: BeakerIcon },
   { to: '/order-generator', label: 'Orders',    icon: ClipboardDocumentListIcon },
-  { to: '/activity',        label: 'Activity',  icon: BoltIcon },
-  { to: '/dashboard',       label: 'Dashboard', icon: ChartBarIcon },
+  { to: '/activity',         label: 'Activity',  icon: BoltIcon },
+  { to: '/gap-intelligence', label: 'Gaps',      icon: ExclamationTriangleIcon },
+  { to: '/dashboard',        label: 'Dashboard', icon: ChartBarIcon },
 ]
 
 export default function Layout() {
   const [todaySpend, setTodaySpend] = useState(null)
   const { activeKB, switchKB, kbList, setKbList } = useAppState()
   const navigate = useNavigate()
+  const [capturing, setCapturing] = useState(false)
+  const [captureLines, setCaptureLines] = useState(0)
+  const [captureError, setCaptureError] = useState(null)
 
   useEffect(() => {
     getStats().then(s => setTodaySpend(s.total_cost_usd)).catch(() => {})
   }, [])
+
+  // Poll capture status while active so line count updates live
+  useEffect(() => {
+    if (!capturing) return
+    const id = setInterval(() => {
+      getLogCaptureStatus()
+        .then(s => setCaptureLines(s.lines))
+        .catch(() => {})
+    }, 2000)
+    return () => clearInterval(id)
+  }, [capturing])
+
+  async function toggleCapture() {
+    setCaptureError(null)
+    try {
+      if (!capturing) {
+        await startLogCapture()
+        setCapturing(true)
+        setCaptureLines(0)
+      } else {
+        const result = await stopLogCapture()
+        setCapturing(false)
+        // Trigger browser download via the download endpoint
+        const a = document.createElement('a')
+        a.href = `/api/logs/download/${result.filename}`
+        a.download = result.filename
+        a.click()
+      }
+    } catch (e) {
+      setCaptureError(e.message)
+    }
+  }
 
   async function handleNewKB() {
     const name = window.prompt('New knowledge base name (e.g. "philosophy"):')
@@ -138,12 +178,40 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* Bottom spend */}
-        <div className="px-4 py-3 border-t border-border">
-          <p className="text-xs text-muted mb-1">Total spend</p>
-          <p className="font-mono text-sm text-white">
-            {todaySpend !== null ? `$${todaySpend.toFixed(4)}` : '—'}
-          </p>
+        {/* Bottom: spend + log capture */}
+        <div className="px-4 py-3 border-t border-border space-y-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-muted">Total spend</p>
+              <p className="font-mono text-sm text-white">
+                {todaySpend !== null ? `$${todaySpend.toFixed(4)}` : '—'}
+              </p>
+            </div>
+            <button
+              onClick={toggleCapture}
+              title={capturing ? `Stop capture (${captureLines} lines) — saves to file` : 'Start log capture'}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-mono transition-colors ${
+                capturing
+                  ? 'text-red-400 bg-red-400/10 hover:bg-red-400/20'
+                  : 'text-muted hover:text-white hover:bg-ink-700'
+              }`}
+            >
+              {capturing ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse flex-shrink-0" />
+                  {captureLines}
+                </>
+              ) : (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-muted/40 flex-shrink-0" />
+                  REC
+                </>
+              )}
+            </button>
+          </div>
+          {captureError && (
+            <p className="text-[10px] text-red-400 truncate">{captureError}</p>
+          )}
         </div>
       </aside>
 

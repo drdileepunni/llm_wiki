@@ -71,6 +71,383 @@ def _gap_already_covered(entity: str, section: str, wiki_dir: Path) -> bool:
 
 log = logging.getLogger("wiki.chat_pipeline")
 
+_NOT_IN_WIKI_PATTERN = re.compile(
+    r"value not in wiki|not in wiki|per local protocol|consult local protocol|"
+    r"dose not available|doses per local|specific dose|see local protocol|"
+    r"refer to local|local guidelines",
+    re.IGNORECASE,
+)
+
+_SCAN_GAPS_TOOL = {
+    "name": "extract_gaps",
+    "description": "Extract structured knowledge gaps from clinical action steps that are missing specific values (doses, settings, targets).",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "gaps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "The drug, device, or clinical entity whose value is missing. E.g. 'Furosemide', 'Non-Invasive Ventilation', 'Enoxaparin'. Never a vague term.",
+                        },
+                        "section_heading": {
+                            "type": "string",
+                            "description": "The wiki section where this value belongs. E.g. 'Dosing', 'Monitoring Parameters', 'Ventilator Settings', 'Targets'. Must be a section name, not a raw value.",
+                        },
+                        "resolution_question": {
+                            "type": "string",
+                            "description": "A single precise clinical question whose answer fills this gap. Make it specific to the patient context. E.g. 'What is the initial IV furosemide dose in acute decompensated heart failure with preserved EF?' not 'What is the furosemide dose?'",
+                        },
+                        "missing_values": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Specific data points missing, each including the clinical context. "
+                                "One item per distinct value. ALWAYS append 'for [clinical condition/scenario]' "
+                                "so the value is unambiguous when filed out of context. "
+                                "E.g. ['Initial IV furosemide bolus dose (mg) for acute decompensated heart failure', "
+                                "'Lactulose dose for hepatic encephalopathy', "
+                                "'IPAP/EPAP settings for acute hypercapnic respiratory failure']"
+                            ),
+                        },
+                        "subtype": {
+                            "type": "string",
+                            "enum": ["medication", "investigation", "procedure", "condition", "default"],
+                            "description": "Page type for the wiki entry.",
+                        },
+                    },
+                    "required": ["entity", "section_heading", "resolution_question", "missing_values", "subtype"],
+                },
+            },
+        },
+        "required": ["gaps"],
+    },
+}
+
+
+def _values_present_in_section(section_text: str, missing_values: list[str], llm, entity: str = "") -> bool:
+    """
+    Ask the LLM whether the specific values in missing_values are explicitly
+    stated in section_text. Returns True only if ALL values are present.
+    A fast yes/no call — no tool use, minimal tokens.
+    """
+    if not section_text.strip() or not missing_values:
+        return False
+    values_list = "\n".join(f"- {v}" for v in missing_values)
+    entity_clause = f" specifically about '{entity}'" if entity else ""
+    prompt = (
+        f"Wiki section content:\n{section_text[:1500]}\n\n"
+        f"Are ALL of the following specific clinical values explicitly stated "
+        f"(as actual numbers, doses, or settings){entity_clause} in the section above?\n{values_list}\n\n"
+        "Answer NO if the section discusses a related but different topic (e.g. sedation monitoring "
+        "when the question is about neurological assessment frequency, or laxative dosing when the "
+        "question is about a specific antibiotic dose).\n"
+        "Reply with only: YES or NO"
+    )
+    try:
+        response = llm.create_message(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            system="You are a precise fact-checker. Answer only YES or NO.",
+            max_tokens=5,
+            force_tool=False,
+            thinking_budget=0,
+        )
+        answer = next((b.text for b in response.content if hasattr(b, "text") and b.text), "NO")
+        return answer.strip().upper().startswith("YES")
+    except Exception as exc:
+        log.debug("_values_present_in_section error (non-fatal): %s", exc)
+        return False
+
+
+_GAP_CONFIRM_THRESHOLD = 0.75  # higher than _GAP_COVER_THRESHOLD to avoid cross-topic false positives
+
+def _get_section_text(entity: str, section: str, wiki_dir: Path, threshold: float = _GAP_CONFIRM_THRESHOLD) -> str:
+    """
+    Retrieve the best-matching section text from the wiki for entity+section.
+    Returns empty string if nothing found above threshold.
+    Uses a higher default (0.80) than retrieval so borderline cross-topic matches
+    don't suppress gap registration.
+    """
+    query = f"{entity} {section}".strip()
+    try:
+        hits = vs_mod.search_sections(query, wiki_dir, top_k=3)
+        if not hits or hits[0]["score"] < threshold:
+            return ""
+        hit = hits[0]
+        full_path = wiki_dir / hit["path"]
+        if not full_path.exists():
+            return ""
+        content = full_path.read_text(encoding="utf-8")
+        section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else ""
+        return section_text or content[:800]
+    except Exception as exc:
+        log.debug("_get_section_text error (non-fatal): %s", exc)
+        return ""
+
+
+def _rewrite_grounded_steps(
+    steps: list[str],
+    kb: "KBConfig",
+    llm,
+) -> tuple[list[str], tuple[int, int], set[int]]:
+    """
+    For each step containing a 'value not in wiki' marker, attempt a targeted
+    wiki lookup. If the specific value is found, rewrite the step with it.
+    If not found, leave the marker unchanged (scan_text_gaps will file the gap).
+    Returns (rewritten_steps, (total_input_tokens, total_output_tokens), failed_indices).
+    failed_indices: step indices where the marker could not be resolved — scan_text_gaps
+    should skip content verification for these and always file a KG.
+    """
+    flagged_indices = [i for i, s in enumerate(steps) if _NOT_IN_WIKI_PATTERN.search(s)]
+    if not flagged_indices:
+        return steps, (0, 0), set()
+
+    log.info("CDS Step 4: rewriting %d steps with unresolved markers", len(flagged_indices))
+    total_in = total_out = 0
+    result = list(steps)
+    failed: set[int] = set()
+
+    for i in flagged_indices:
+        step = steps[i]
+        marker_count = len(_NOT_IN_WIKI_PATTERN.findall(step))
+
+        # Extract one search phrase per distinct missing entity.
+        # Multi-marker steps need multiple queries so each entity gets its own hit.
+        extract_resp = llm.create_message(
+            messages=[{"role": "user", "content": (
+                f"Clinical step ({marker_count} missing value(s) marked):\n{step}\n\n"
+                "Each '(value not in wiki — consult local protocol)' placeholder refers to a "
+                "specific missing clinical value. List ONE short wiki search phrase per distinct "
+                "missing entity — drug, device, or parameter. Return a JSON array of strings, "
+                "e.g. [\"rapid sequence intubation induction agent dose\", \"mechanical ventilation tidal volume PEEP FiO2\"] "
+                "or [\"furosemide IV bolus dose heart failure\"] for a single marker. "
+                "IMPORTANT: always spell out abbreviations fully — write 'rapid sequence intubation' not 'RSI', "
+                "'non-invasive ventilation' not 'NIV', 'mean arterial pressure' not 'MAP'. "
+                "No explanation, JSON only."
+            )}],
+            tools=[],
+            system="You extract clinical wiki search queries. Spell out all abbreviations fully. Return a JSON array of short phrases, one per distinct missing entity.",
+            max_tokens=120,
+            force_tool=False,
+            thinking_budget=0,
+        )
+        total_in  += extract_resp.usage.input_tokens
+        total_out += extract_resp.usage.output_tokens
+        raw = next((b.text for b in extract_resp.content if hasattr(b, "text") and b.text), "").strip()
+
+        # Parse the JSON list; fall back to treating the whole response as one query
+        import json as _json
+        try:
+            queries = _json.loads(raw)
+            if not isinstance(queries, list):
+                queries = [str(queries)]
+        except Exception:
+            queries = [raw] if raw else []
+
+        queries = [q.strip() for q in queries if isinstance(q, str) and q.strip()]
+        if not queries:
+            failed.add(i)
+            continue
+
+        # Search for each query independently; collect unique (path, section) hits
+        seen_keys: set[tuple] = set()
+        context_blocks: list[str] = []
+        any_hit = False
+
+        for query in queries:
+            hits = vs_mod.search_sections(query, kb.wiki_dir, top_k=3)
+            if not hits or hits[0]["score"] < _GAP_COVER_THRESHOLD:
+                log.info("  Step 4: no wiki hit for %r (top=%.2f)", query, hits[0]["score"] if hits else 0)
+                continue
+            hit = hits[0]
+            key = (hit["path"], hit.get("section", ""))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            full_path = kb.wiki_dir / hit["path"]
+            if not full_path.exists():
+                continue
+            content = full_path.read_text(encoding="utf-8")
+            section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else content[:1200]
+            if not section_text:
+                section_text = content[:1200]
+            log.info("  Step 4: [%r] → %s#%s (score=%.2f)", query, hit["path"], hit["section"], hit["score"])
+            context_blocks.append(f"### {hit['path']}#{hit.get('section','')}\n{section_text[:1200]}")
+            any_hit = True
+
+        if not any_hit:
+            log.info("  Step 4: no wiki hits across %d queries for step %d — marking as gap", len(queries), i)
+            failed.add(i)
+            continue
+
+        # One rewrite pass with all found sections as combined context
+        combined_context = "\n\n".join(context_blocks)
+        rewrite_resp = llm.create_message(
+            messages=[{"role": "user", "content": (
+                f"Wiki sections:\n{combined_context}\n\n"
+                f"Clinical step to rewrite:\n{step}\n\n"
+                "Replace EVERY '(value not in wiki — consult local protocol)' placeholder with "
+                "the exact numeric value from the wiki sections above. "
+                "STRICT RULE: only substitute values explicitly stated as numbers in the sections. "
+                "If a value is not explicitly present, leave that placeholder unchanged. "
+                "Do not add citations or file path references. "
+                "Return only the rewritten step text, nothing else."
+            )}],
+            tools=[],
+            system="You are a precise clinical editor. Substitute only values explicitly present in the wiki sections. Never invent or estimate.",
+            max_tokens=400,
+            force_tool=False,
+            thinking_budget=0,
+        )
+        total_in  += rewrite_resp.usage.input_tokens
+        total_out += rewrite_resp.usage.output_tokens
+
+        rewritten = next((b.text for b in rewrite_resp.content if hasattr(b, "text") and b.text), "").strip()
+        if not rewritten:
+            failed.add(i)
+        elif _NOT_IN_WIKI_PATTERN.search(rewritten):
+            # Some markers still remain — partial fill is still useful; mark as gap for the unfilled ones
+            log.info("  Step 4: partial rewrite for step %d (%d markers remain) — keeping rewritten version, marking as gap",
+                     i, len(_NOT_IN_WIKI_PATTERN.findall(rewritten)))
+            result[i] = rewritten if rewritten != step else step
+            failed.add(i)
+        elif rewritten != step:
+            log.info("  Step 4: rewrote step %d (%d→%d chars)", i, len(step), len(rewritten))
+            result[i] = rewritten
+
+    return result, (total_in, total_out), failed
+
+
+def scan_text_gaps(
+    steps: list[str],
+    clinical_context: str,
+    kb: "KBConfig",
+    model: str | None = None,
+    source_name: str = "text-gap-scan",
+    force_gap_step_texts: set[str] | None = None,
+) -> list[str]:
+    """
+    Scan immediate_next_steps for '(value not in wiki)' markers, extract structured
+    KGs via LLM, then for each candidate verify whether the specific missing values
+    are actually present in the wiki section (not just whether the section exists).
+    Only skips if the values are explicitly stated. Writes gap files for all others.
+
+    force_gap_step_texts: steps that Step 4 already tried and failed to rewrite.
+    Content verification is bypassed for gaps extracted from these steps — the
+    wiki clearly doesn't have the specific value, so always file the KG.
+
+    Returns list of gap file paths written.
+    """
+    flagged = [s for s in steps if _NOT_IN_WIKI_PATTERN.search(s)]
+    if not flagged:
+        return []
+
+    log.info("scan_text_gaps: %d flagged steps to process", len(flagged))
+    llm = get_llm_client(model=model)
+
+    steps_text = "\n".join(f"- {s}" for s in flagged)
+    prompt = (
+        f"Clinical context: {clinical_context}\n\n"
+        "The following clinical action steps are missing specific numeric values — doses, "
+        "settings, targets, or rates. They contain phrases like 'value not in wiki', "
+        "'per local protocol', 'consult local protocol', or similar placeholders.\n\n"
+        f"{steps_text}\n\n"
+        "For each missing value, call extract_gaps with one entry per distinct entity+value. "
+        "Be specific: name the exact drug/device/parameter, the wiki section it belongs to, "
+        "a precise question to resolve it, and the exact values needed. "
+        f"IMPORTANT: in missing_values, always include the clinical context from above "
+        f"('{clinical_context[:80]}...') — e.g. 'Lactulose dose for hepatic encephalopathy', "
+        f"not just 'Lactulose dose'."
+    )
+
+    response = llm.create_message(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[_SCAN_GAPS_TOOL],
+        system="You are a clinical knowledge gap analyst. Extract structured gaps from clinical action steps that are missing specific values.",
+        max_tokens=2000,
+        force_tool=True,
+        thinking_budget=0,
+    )
+
+    tool_input = next(
+        (b.input for b in response.content if hasattr(b, "input")),
+        None,
+    )
+    if not tool_input:
+        log.warning("scan_text_gaps: LLM returned no tool call")
+        return []
+
+    raw_gaps = tool_input.get("gaps", [])
+    log.info("scan_text_gaps: LLM extracted %d gap candidates", len(raw_gaps))
+
+    _forced = force_gap_step_texts or set()
+
+    from .canonical_registry import resolve as _resolve_canonical
+    gap_entries: list[dict] = []
+    for g in raw_gaps:
+        entity = g.get("entity", "").strip()
+        section = g.get("section_heading", "").strip()
+        missing_values = g.get("missing_values") or []
+        if not entity or not section:
+            continue
+
+        # If Step 4 already tried and failed to fill this entity's marker, skip
+        # content verification — the wiki clearly doesn't have the specific value.
+        step4_failed = any(entity.lower() in s.lower() for s in _forced)
+
+        # Check whether the specific values are explicitly in the wiki section.
+        # A section existing with generic content is NOT sufficient to skip.
+        section_text = _get_section_text(entity, section, kb.wiki_dir)
+        if section_text and not step4_failed:
+            if _values_present_in_section(section_text, missing_values, llm, entity=entity):
+                log.info(
+                    "  scan_text_gaps: skipping '%s / %s' — specific values confirmed in wiki",
+                    entity, section,
+                )
+                continue
+            else:
+                log.info(
+                    "  scan_text_gaps: '%s / %s' — page exists but specific values missing → filing gap",
+                    entity, section,
+                )
+        elif step4_failed:
+            log.info(
+                "  scan_text_gaps: '%s / %s' — Step 4 already failed to fill → filing gap (bypassing content check)",
+                entity, section,
+            )
+        else:
+            log.info(
+                "  scan_text_gaps: '%s / %s' — no wiki page found → filing gap",
+                entity, section,
+            )
+
+        page = _resolve_canonical(entity, kb.wiki_dir, llm)
+        gap_entries.append({
+            "page": page,
+            "missing_sections": [section],
+            "resolution_question": g.get("resolution_question", ""),
+            "missing_values": missing_values,
+            "subtype": g.get("subtype", "default"),
+            "placement": "confirmed" if section_text else "approximate",
+            "_entity": entity,
+        })
+
+    if not gap_entries:
+        log.info("scan_text_gaps: no new gaps after content verification")
+        return []
+
+    try:
+        written = write_gap_files(gap_entries, kb, source_name=source_name)
+        log.info("scan_text_gaps: wrote %d gap files: %s", len(written), written)
+        return written
+    except Exception as exc:
+        log.warning("scan_text_gaps: write_gap_files failed: %s", exc)
+        return []
+
 
 def _traverse_links(seed_paths: set[str], wiki_dir: Path, max_additional: int = 3) -> list[str]:
     """Follow [[wiki links]] one hop from seed pages. Returns additional page paths."""
@@ -288,7 +665,8 @@ _CDS_SYNTHESIZE_TOOL = {
                     "monitoring checkpoints (e.g. 'recheck glucose in 30 min'). "
                     "Use ONLY wiki-grounded values for specific numeric parameters. "
                     "If a value was not found in the wiki, state the clinical action WITHOUT the specific number "
-                    "and add '(value not in wiki — consult local protocol)'. "
+                    "and add exactly the text '(value not in wiki — consult local protocol)' — "
+                    "never paraphrase this as 'per local protocol', 'doses per local protocol', or any other variant. "
                     "Never write a vague action like 'intubate the patient' or 'give dextrose' without full detail. "
                     "Order by clinical urgency."
                 ),
@@ -637,6 +1015,18 @@ QUERY RULES — read carefully:
             if synth_block:
                 immediate_next_steps = synth_block.input.get("immediate_next_steps", [])
 
+        # Step 4: rewrite any remaining markers where the wiki actually has the value
+        _step4_failed_texts: set[str] = set()
+        if immediate_next_steps:
+            steps_before_rewrite = list(immediate_next_steps)
+            immediate_next_steps, rewrite_tokens, failed_idx = _rewrite_grounded_steps(
+                immediate_next_steps, kb, llm
+            )
+            total_input  += rewrite_tokens[0]
+            total_output += rewrite_tokens[1]
+            # Collect the original text of steps Step 4 couldn't resolve
+            _step4_failed_texts = {steps_before_rewrite[i] for i in failed_idx if i < len(steps_before_rewrite)}
+
         # Register gap files for ungrounded parameters.
         # Pre-write vector check is only run when Step 2 retrieval score was LOW (<0.60)
         # meaning the wiki page wasn't found. If score ≥ 0.60 and still grounded=false,
@@ -716,9 +1106,12 @@ QUERY RULES — read carefully:
             kb_name=kb.name,
         )
         log.info(
-            "=== CHAT END (cds)  direction=%d  params=%d(ungrounded=%d)  gap=%s  in=%d  out=%d  cost=$%.4f ===",
+            "=== CHAT END (cds)  direction=%d  params=%d(ungrounded=%d)  gap=%s  "
+            "markers_remaining=%d  in=%d  out=%d  cost=$%.4f ===",
             len(clinical_direction), len(specific_parameters), len(ungrounded),
-            gap_written, total_input, total_output, cost,
+            gap_written,
+            sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s)),
+            total_input, total_output, cost,
         )
         return {
             "mode": "cds",
@@ -731,6 +1124,7 @@ QUERY RULES — read carefully:
             "monitoring_followup": monitoring_followup,
             "alternative_considerations": alternative_considerations,
             "pages_consulted": pages,
+            "_step4_failed_texts": _step4_failed_texts,
             "wiki_links": list(set(wiki_links)),
             "input_tokens": total_input,
             "output_tokens": total_output,

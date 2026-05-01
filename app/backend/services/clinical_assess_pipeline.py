@@ -18,7 +18,7 @@ from ..config import MODEL, KBConfig
 TIMELINES_BASE = Path("/Users/drdileepunni/github_/llm_wiki/timelines")
 from .llm_client import get_llm_client
 from .token_tracker import log_call, calculate_cost
-from .chat_pipeline import run_chat
+from .chat_pipeline import run_chat, scan_text_gaps
 
 log = logging.getLogger("wiki.clinical_assess")
 
@@ -273,6 +273,7 @@ def list_clinical_assessments(kb: KBConfig) -> list[dict]:
                     "model":          data.get("model"),
                     "avg_rating":     avg_rating,
                     "comment":        data.get("comment", ""),
+                    "display_name":   data.get("display_name", ""),
                 })
             except Exception as exc:
                 log.warning("Skipping corrupt clinical assessment %s: %s", f.name, exc)
@@ -355,6 +356,19 @@ def run_clinical_assessment(patient_id: str, kb: KBConfig, model: str | None = N
         snap["gap_entity"]                = result.get("gap_entity") or None
         snap["gap_sections"]              = result.get("gap_sections") or []
 
+        # ── Step 3: Post-run scan for any remaining (value not in wiki) markers ──
+        text_gaps = scan_text_gaps(
+            steps=result.get("immediate_next_steps", []),
+            clinical_context=snap.get("clinical_context", snap["question"]),
+            kb=kb,
+            model=model,
+            source_name=f"text-gap-scan: {case['patient_id']} snap={snap['snapshot_num']}",
+            force_gap_step_texts=result.get("_step4_failed_texts"),
+        )
+        if text_gaps:
+            existing = snap.get("gap_sections") or []
+            snap["gap_sections"] = existing + [g.split("/")[-1].replace(".md", "") for g in text_gaps]
+
     # Restore user-authored fields when overwriting an existing run
     if overwrite_run_id:
         old_path = _clinical_assess_path(case["patient_id"], run_id, kb)
@@ -407,6 +421,7 @@ Generate a synthetic ICU/hospital patient scenario for: "{description}"
 
 Output ONLY a valid JSON object with these exact keys:
 {{
+  "display_name": "2-3 word title for this scenario (e.g. 'Septic Shock', 'ARDS Wean', 'DKA Crisis'). Title case, no punctuation.",
   "clinical_context": "2-3 sentences describing the patient presentation, relevant history, and current status.",
   "question": "A specific focused clinical question about the most appropriate next action.",
   "phase": "one of exactly: EVOLVING | ESCALATION | DETERIORATION | MANAGEMENT | LATE",
@@ -451,6 +466,7 @@ def generate_scenario(description: str, model: str | None = None) -> dict:
             raise ValueError(f"LLM response missing key: {key!r}")
 
     return {
+        "display_name": data.get("display_name", ""),
         "clinical_context": data["clinical_context"],
         "question": data["question"],
         "phase": data.get("phase", "EVOLVING").upper(),
@@ -468,6 +484,7 @@ def run_custom_snapshot(
     reasoning_model: str | None = None,
     overwrite_run_id: str | None = None,
     overwrite_patient_id: str | None = None,
+    display_name: str | None = None,
 ) -> dict:
     """Run the clinical assessment pipeline on a user-provided custom snapshot."""
     run_id = overwrite_run_id if overwrite_run_id else datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -522,6 +539,19 @@ def run_custom_snapshot(
     snap["gap_entity"] = result.get("gap_entity") or None
     snap["gap_sections"] = result.get("gap_sections") or []
 
+    text_gaps = scan_text_gaps(
+        steps=result.get("immediate_next_steps", []),
+        clinical_context=snap.get("clinical_context", snap["question"]),
+        kb=kb,
+        model=model,
+        source_name=f"text-gap-scan: {patient_id}",
+        force_gap_step_texts=result.get("_step4_failed_texts"),
+    )
+    if text_gaps:
+        snap["gap_sections"] = (snap.get("gap_sections") or []) + [
+            g.split("/")[-1].replace(".md", "") for g in text_gaps
+        ]
+
     # Restore user-authored fields when overwriting
     comment_to_keep = ""
     if overwrite_run_id:
@@ -538,6 +568,15 @@ def run_custom_snapshot(
             except Exception:
                 pass
 
+    # When overwriting, preserve existing display_name if no new one provided
+    if overwrite_run_id and not display_name:
+        old_path = _clinical_assess_path(patient_id, overwrite_run_id, kb)
+        if old_path.exists():
+            try:
+                display_name = json.loads(old_path.read_text(encoding="utf-8")).get("display_name", "")
+            except Exception:
+                pass
+
     run_result = {
         "patient_id": patient_id,
         "run_id": run_id,
@@ -546,6 +585,7 @@ def run_custom_snapshot(
         "model": result.get("model"),
         "snapshots": [snap],
         "comment": comment_to_keep,
+        "display_name": display_name or "",
     }
 
     out_path = _clinical_assess_path(patient_id, run_id, kb)

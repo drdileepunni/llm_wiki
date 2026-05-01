@@ -233,6 +233,125 @@ def get_gaps(kb: KBConfig = Depends(resolve_kb)):
     return {"gaps": gaps}
 
 
+@router.get("/gap-intelligence")
+def get_gap_intelligence(kb: KBConfig = Depends(resolve_kb)):
+    """
+    Returns three datasets for the Gap Intelligence view:
+    - open_gaps: current unresolved gap files
+    - persistent_gaps: entries in gap_history.json where any section was filed >= 2 times
+    - scope_contamination: wiki pages flagged with scope_contamination in their frontmatter
+    """
+    from ..services.ingest_pipeline import _load_gap_history
+    import json as _json
+
+    gaps_dir = kb.wiki_dir / "gaps"
+    history = _load_gap_history(gaps_dir) if gaps_dir.exists() else {}
+
+    # ── Open gaps (current gap files) ────────────────────────────────────────
+    open_gaps = []
+    open_stems: set[str] = set()
+    if gaps_dir.exists():
+        for f in sorted(gaps_dir.glob("*.md")):
+            if f.stem.startswith("patient-"):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            referenced_page, placement, times_opened = "", "confirmed", 1
+            section_times: dict = {}
+            for line in text.splitlines():
+                if line.startswith("referenced_page:"):
+                    referenced_page = line.split(":", 1)[1].strip()
+                elif line.startswith("placement:"):
+                    placement = line.split(":", 1)[1].strip()
+                elif line.startswith("times_opened:"):
+                    try: times_opened = int(line.split(":", 1)[1].strip())
+                    except ValueError: pass
+                elif line.startswith("section_times_opened:"):
+                    try: section_times = _json.loads(line.split(":", 1)[1].strip())
+                    except Exception: pass
+            # Merge with history
+            for s, cnt in history.get(f.stem, {}).items():
+                section_times[s] = max(section_times.get(s, 0), cnt)
+
+            missing, missing_values, resolution_question = [], [], ""
+            in_m = in_mv = in_q = False
+            for line in text.splitlines():
+                if line.strip() == "## Missing Sections": in_m = True; in_mv = in_q = False; continue
+                if line.strip() == "## Specific Missing Values": in_mv = True; in_m = in_q = False; continue
+                if line.strip() == "## Resolution Question": in_q = True; in_m = in_mv = False; continue
+                if line.startswith("##"): in_m = in_mv = in_q = False; continue
+                if in_m and line.startswith("- ") and not line[2:].strip().startswith("RESOLVED:"):
+                    missing.append(line[2:].strip())
+                if in_mv and line.startswith("- "): missing_values.append(line[2:].strip())
+                if in_q and line.strip() and not resolution_question: resolution_question = line.strip()
+
+            if missing:
+                open_stems.add(f.stem)
+                open_gaps.append({
+                    "stem": f.stem,
+                    "title": f.stem.replace("-", " ").title(),
+                    "referenced_page": referenced_page,
+                    "missing_sections": missing,
+                    "missing_values": missing_values,
+                    "resolution_question": resolution_question,
+                    "placement": placement,
+                    "times_opened": times_opened,
+                    "section_times_opened": section_times,
+                    "max_section_opens": max(section_times.values()) if section_times else times_opened,
+                })
+
+    # ── Persistent gaps (from history, any section >= 2, whether open or closed) ──
+    persistent_gaps = []
+    for stem, sections in sorted(history.items()):
+        max_opens = max(sections.values()) if sections else 0
+        if max_opens >= 2:
+            is_open = stem in open_stems
+            persistent_gaps.append({
+                "stem": stem,
+                "title": stem.replace("-", " ").title(),
+                "section_times_opened": sections,
+                "max_section_opens": max_opens,
+                "is_open": is_open,
+            })
+    persistent_gaps.sort(key=lambda x: x["max_section_opens"], reverse=True)
+
+    # ── Scope contamination ──────────────────────────────────────────────────
+    scope_contamination = []
+    for prefix in ("entities", "concepts"):
+        d = kb.wiki_dir / prefix
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.md")):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if "scope_contamination:" not in text:
+                continue
+            violations = []
+            in_sc = False
+            for line in text.splitlines():
+                if line.strip().startswith("scope_contamination:"):
+                    in_sc = True; continue
+                if in_sc:
+                    if line.startswith("  - section:"):
+                        violations.append({"section": line.split(":", 1)[1].strip()})
+                    elif line.startswith("    belongs_on:") and violations:
+                        violations[-1]["belongs_on"] = line.split(":", 1)[1].strip()
+                    elif line.startswith("    excerpt:") and violations:
+                        violations[-1]["excerpt"] = line.split(":", 1)[1].strip().strip('"')
+                    elif not line.startswith(" ") and not line.startswith("\t"):
+                        break
+            if violations:
+                scope_contamination.append({
+                    "path": f"{prefix}/{f.name}",
+                    "title": f.stem.replace("-", " ").title(),
+                    "violations": violations,
+                })
+
+    return {
+        "open_gaps": open_gaps,
+        "persistent_gaps": persistent_gaps,
+        "scope_contamination": scope_contamination,
+    }
+
+
 class CreateGapRequest(BaseModel):
     title: str
     missing_sections: list[str]

@@ -244,18 +244,22 @@ def _llm_fallback(
             if missing_values else ""
         )
         prompt = (
-            f"You are a senior clinical consultant writing a concise, actionable wiki entry.\n\n"
-            f"Answer this specific clinical question precisely and completely:\n"
-            f"**{resolution_question}**"
+            "You are a medical reference author writing a GENERALIZABLE wiki page — "
+            "not a case note or patient-specific answer.\n"
+            "The question below was raised by a specific clinical case, but your answer must "
+            "describe the standard evidence-based approach applicable to ANY patient with this "
+            "condition. Do NOT reference the specific patient's age, sex, or presentation. "
+            "Write for a broad clinical audience.\n\n"
+            f"Clinical question (use for topic scope only):\n**{resolution_question}**"
             f"{mv_block}\n\n"
             f"Structure your answer using these headings (## heading):\n"
             + "".join(f"- {s}\n" for s in gap_sections)
             + "\nRequirements:\n"
-            "- Answer the question directly — do not write a general reference article.\n"
-            "- Include specific values, doses, ranges, or protocols where relevant.\n"
+            "- Write generalizable clinical knowledge — doses, ranges, protocols that apply broadly.\n"
+            "- Include specific numeric values, doses, and titration ranges where known.\n"
             "- 2-4 paragraphs per section. Plain prose, no bullet spam.\n"
             "- Cite evidence or guidelines where known (e.g. NICE, SSC, ARDSNet).\n"
-            "- If the answer depends on patient factors, state the decision logic explicitly."
+            "- If the answer varies by patient factors, state the decision logic (e.g. 'in renal impairment, reduce dose to...') without referring to the specific case patient."
         )
     else:
         prompt = (

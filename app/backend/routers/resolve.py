@@ -148,11 +148,27 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
             text = f.read_text(encoding="utf-8", errors="replace")
             referenced_page = ""
             subtype = ""
+            section_times_opened: dict = {}
             for line in text.splitlines():
                 if line.startswith("referenced_page:"):
                     referenced_page = line.split(":", 1)[1].strip()
                 elif line.startswith("subtype:"):
                     subtype = line.split(":", 1)[1].strip()
+                elif line.startswith("section_times_opened:"):
+                    import json as _json
+                    try:
+                        section_times_opened = _json.loads(line.split(":", 1)[1].strip())
+                    except Exception:
+                        section_times_opened = {}
+
+            # Merge with persistent history so resolved+reopened gaps still escalate
+            try:
+                from ..services.ingest_pipeline import _load_gap_history
+                history = _load_gap_history(gaps_dir)
+                for s, cnt in history.get(f.stem, {}).items():
+                    section_times_opened[s] = max(section_times_opened.get(s, 0), cnt)
+            except Exception:
+                pass
             missing: list[str] = []
             missing_values: list[str] = []
             resolution_question = ""
@@ -200,6 +216,7 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                     "missing_sections": missing,
                     "resolution_question": resolution_question,
                     "missing_values": missing_values,
+                    "section_times_opened": section_times_opened,
                 })
 
     _batches[batch_id]["total_gaps"] = len(gaps)
@@ -237,31 +254,32 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
         result = _jobs[job_id].get("result") or {}
         return len(result.get("files_written", []))
 
+    _SECTION_LLM_THRESHOLD = 2  # go straight to LLM if any section has been filed this many times
+
     async def process_gap(gap):
         try:
+            section_times = gap.get("section_times_opened") or {}
+            escalated_sections = [
+                s for s in gap["missing_sections"]
+                if section_times.get(s, 0) >= _SECTION_LLM_THRESHOLD
+            ]
+            use_llm_directly = bool(escalated_sections)
+
             log.info(
-                "process_gap: title=%r  sections=%s  missing_values=%s  question=%s",
+                "process_gap: title=%r  sections=%s  missing_values=%s  question=%s  escalated=%s",
                 gap["title"], gap["missing_sections"],
                 gap.get("missing_values") or [],
                 (gap.get("resolution_question") or "")[:100],
+                escalated_sections or "none",
             )
-            articles, _ = await asyncio.to_thread(
-                search_for_gap,
-                gap["title"],
-                gap["missing_sections"],
-                max_results,
-                pool,
-                gap.get("resolution_question", ""),
-                gap.get("missing_values") or [],
-            )
-            # Run articles sequentially — each writes to the same referenced_page.
-            files_written = 0
-            for article in articles:
-                files_written += await _ingest_article(article, gap)
 
-            # LLM fallback if PubMed articles were found but nothing got written.
-            if files_written == 0:
-                log.info("resolve-all gap '%s': 0 files written — triggering LLM fallback", gap["title"])
+            files_written = 0
+
+            if use_llm_directly:
+                log.info(
+                    "resolve-all gap '%s': sections %s filed %d+ times — skipping PubMed, using LLM directly",
+                    gap["title"], escalated_sections, _SECTION_LLM_THRESHOLD,
+                )
                 llm_articles, _ = await asyncio.to_thread(
                     _llm_fallback,
                     gap["title"],
@@ -270,7 +288,32 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
                     gap.get("missing_values") or [],
                 )
                 for article in llm_articles:
-                    await _ingest_article(article, gap, skip_quality_gate=True)
+                    files_written += await _ingest_article(article, gap, skip_quality_gate=True)
+            else:
+                articles, _ = await asyncio.to_thread(
+                    search_for_gap,
+                    gap["title"],
+                    gap["missing_sections"],
+                    max_results,
+                    pool,
+                    gap.get("resolution_question", ""),
+                    gap.get("missing_values") or [],
+                )
+                for article in articles:
+                    files_written += await _ingest_article(article, gap)
+
+                # LLM fallback if PubMed articles were found but nothing got written.
+                if files_written == 0:
+                    log.info("resolve-all gap '%s': 0 files written — triggering LLM fallback", gap["title"])
+                    llm_articles, _ = await asyncio.to_thread(
+                        _llm_fallback,
+                        gap["title"],
+                        gap["missing_sections"],
+                        gap.get("resolution_question", ""),
+                        gap.get("missing_values") or [],
+                    )
+                    for article in llm_articles:
+                        await _ingest_article(article, gap, skip_quality_gate=True)
         except Exception as exc:
             log.warning("resolve-all gap '%s' search failed: %s", gap["title"], exc)
         finally:

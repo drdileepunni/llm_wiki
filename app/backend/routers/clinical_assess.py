@@ -67,6 +67,7 @@ class RunCustomRequest(BaseModel):
     difficulty: str = ""
     model: str | None = None
     reasoning_model: str | None = None
+    display_name: str | None = None
 
 
 @router.get("/available")
@@ -166,13 +167,13 @@ async def run_custom_endpoint(
         "difficulty": req.difficulty,
     }
     _jobs[job_id] = {"status": "running", "patient_id": "scenario", "result": None, "error": None}
-    background_tasks.add_task(_do_run_custom, job_id, snapshot_data, kb, req.model, req.reasoning_model)
+    background_tasks.add_task(_do_run_custom, job_id, snapshot_data, kb, req.model, req.reasoning_model, req.display_name)
     return {"job_id": job_id}
 
 
-async def _do_run_custom(job_id: str, snapshot_data: dict, kb: KBConfig, model: str | None, reasoning_model: str | None):
+async def _do_run_custom(job_id: str, snapshot_data: dict, kb: KBConfig, model: str | None, reasoning_model: str | None, display_name: str | None = None):
     try:
-        result = await asyncio.to_thread(run_custom_snapshot, snapshot_data, kb, model, reasoning_model)
+        result = await asyncio.to_thread(run_custom_snapshot, snapshot_data, kb, model, reasoning_model, display_name=display_name)
         _jobs[job_id] = {"status": "done", "patient_id": result["patient_id"], "result": result, "error": None}
     except Exception as exc:
         log.error("Custom scenario assessment failed: %s", exc)
