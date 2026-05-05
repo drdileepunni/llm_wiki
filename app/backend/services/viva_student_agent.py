@@ -36,6 +36,7 @@ from .emr import (
     get_vital_trend,
     get_recent_notes_for_patient,
     get_active_orders,
+    get_patient_demographics,
 )
 from ..config import MODEL, KBConfig
 
@@ -138,6 +139,15 @@ STUDENT_TOOLS = [
             "required": ["parameter"],
         },
     },
+    {
+        "name": "get_patient_history",
+        "description": (
+            "Get the patient's background history: demographics, known diagnoses, "
+            "home medications (pre-admission), allergies, and weight/height. "
+            "Always call this first when home medications or chronic conditions are relevant."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 _SYSTEM = """\
@@ -195,6 +205,8 @@ def _run_tool(name: str, inputs: dict, cpmrn: str) -> str:
                 parameter=inputs["parameter"],
                 hours=inputs.get("hours", 4),
             )
+        elif name == "get_patient_history":
+            result = get_patient_demographics(cpmrn)
         else:
             result = {"error": f"Unknown tool: {name}"}
     except Exception as exc:

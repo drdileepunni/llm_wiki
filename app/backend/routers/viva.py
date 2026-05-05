@@ -42,6 +42,7 @@ from ..services.emr import (
     upsert_dummy_patient,
     VIVA_DUMMY_CPMRN,
 )
+from ..services.emr.db import get_db
 from ..services.order_gen_pipeline import run_order_generation
 from ..services.viva_simulator import simulate_and_write, write_patient_state
 
@@ -74,6 +75,7 @@ class DummyPatientRequest(BaseModel):
     egfr: float | None = None
     allergies: list[str] = []
     diagnoses: list[str] = []
+    home_meds: list[str] = []
 
 
 class PlaceOrderRequest(BaseModel):
@@ -117,6 +119,144 @@ def place_order(req: PlaceOrderRequest):
     return result
 
 
+@router.get("/patient/live-state")
+def get_viva_patient_live_state():
+    """
+    Return a structured snapshot of the dummy patient's current MongoDB state:
+    latest vitals, all recent lab documents, IO summary, active orders, and
+    recent clinical notes. Used to populate the Patient Chart drawer in the UI.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    cpmrn = VIVA_DUMMY_CPMRN
+    p = get_db().patients.find_one({"CPMRN": cpmrn})
+
+    if not p:
+        return {
+            "vitals": None,
+            "labs": [],
+            "io": {"period_hours": 12, "entries_counted": 0, "total_urine_ml": 0,
+                   "total_intake_ml": 0, "net_balance_ml": 0, "urine_rate_ml_per_hr": 0},
+            "orders": {"medications": [], "labs": [], "procedures": [],
+                       "diets": [], "vents": [], "bloods": []},
+            "notes": [],
+            "vitals_history_count": 0,
+            "history": {"home_medications": [], "diagnoses": [], "allergies": []},
+        }
+
+    # ── Latest vitals ─────────────────────────────────────────────────────────
+    vitals_list = sorted(p.get("vitals", []), key=lambda v: v.get("timestamp", ""), reverse=True)
+    latest_vitals = None
+    if vitals_list:
+        v = vitals_list[0]
+        latest_vitals = {
+            "timestamp":      v.get("timestamp"),
+            "SpO2":           v.get("daysSpO2"),
+            "HR":             v.get("daysHR"),
+            "RR":             v.get("daysRR"),
+            "BP":             v.get("daysBP"),
+            "MAP":            v.get("daysMAP"),
+            "Temperature":    v.get("daysTemperature"),
+            "TemperatureUnit":v.get("daysTemperatureUnit", "C"),
+            "FiO2":           v.get("daysFiO2"),
+            "OxygenFlow":     v.get("daysOxygenFlow"),
+            "TherapyDevice":  v.get("daysTherapyDevice"),
+            "AVPU":           v.get("daysAVPU"),
+            "CVP":            v.get("daysCVP"),
+            "VentMode":       v.get("daysVentMode"),
+            "VentPEEP":       v.get("daysVentPEEP"),
+            "VentPIP":        v.get("daysVentPip"),
+            "VentRRSet":      v.get("daysVentRRset"),
+            "isIntubated":    (p.get("isIntubated") or {}).get("value"),
+            "isNIV":          (p.get("isNIV") or {}).get("value"),
+            "isHFNC":         (p.get("isHFNC") or {}).get("value"),
+            "dataBy":         v.get("dataBy"),
+        }
+
+    # ── All lab documents (most recent first, up to 10) ───────────────────────
+    docs = p.get("documents", [])
+    lab_docs = sorted(
+        [d for d in docs if d.get("category") == "labs"],
+        key=lambda d: d.get("reportedAt", ""),
+        reverse=True,
+    )
+    labs = []
+    for doc in lab_docs[:10]:
+        attrs_raw = doc.get("attributes") or {}
+        attrs_display = {}
+        for key, val in attrs_raw.items():
+            if isinstance(val, dict):
+                attrs_display[key] = {
+                    "value": val.get("value"),
+                    "normalRange": {
+                        "min": (val.get("errorRange") or {}).get("min"),
+                        "max": (val.get("errorRange") or {}).get("max"),
+                    },
+                }
+        labs.append({
+            "name":       doc.get("name"),
+            "reportedAt": doc.get("reportedAt"),
+            "text":       doc.get("text"),
+            "attributes": attrs_display,
+        })
+
+    # ── IO summary (last 12 h) ─────────────────────────────────────────────────
+    io_hours = 12
+    cutoff = (_dt.utcnow() - _td(hours=io_hours)).isoformat()
+    io_entries = [e for e in p.get("io", []) if e.get("timestamp", "") >= cutoff]
+    total_urine  = sum(e.get("urine_ml", 0)  for e in io_entries)
+    total_intake = sum(e.get("intake_ml", 0) for e in io_entries)
+    io_summary = {
+        "period_hours":       io_hours,
+        "entries_counted":    len(io_entries),
+        "total_urine_ml":     total_urine,
+        "total_intake_ml":    total_intake,
+        "net_balance_ml":     total_intake - total_urine,
+        "urine_rate_ml_per_hr": round(total_urine / io_hours, 1),
+    }
+
+    # ── Active orders ──────────────────────────────────────────────────────────
+    active = (p.get("orders") or {}).get("active") or {}
+    orders = {
+        "medications": active.get("medications", []),
+        "labs":        active.get("labs", []),
+        "procedures":  active.get("procedures", []),
+        "diets":       active.get("diets", []),
+        "vents":       active.get("vents", []),
+        "bloods":      active.get("bloods", []),
+    }
+
+    # ── Recent clinical notes (non-lab documents, last 5) ─────────────────────
+    note_docs = sorted(
+        [d for d in docs if d.get("category") != "labs"],
+        key=lambda d: d.get("reportedAt", ""),
+        reverse=True,
+    )
+    notes = [
+        {
+            "category":   d.get("category"),
+            "name":       d.get("name"),
+            "text":       d.get("text", ""),
+            "reportedAt": d.get("reportedAt"),
+        }
+        for d in note_docs[:5]
+    ]
+
+    return {
+        "vitals":               latest_vitals,
+        "labs":                 labs,
+        "io":                   io_summary,
+        "orders":               orders,
+        "notes":                notes,
+        "vitals_history_count": len(vitals_list),
+        "history": {
+            "home_medications": p.get("home_medications", []),
+            "diagnoses":        p.get("chronic", []),
+            "allergies":        p.get("allergies", []),
+        },
+    }
+
+
 # ── Session endpoints ──────────────────────────────────────────────────────────
 
 @router.post("/start")
@@ -125,9 +265,26 @@ async def start_viva(req: StartRequest, kb: KBConfig = Depends(resolve_kb)):
     session_id = f"viva_{uuid.uuid4().hex[:8]}"
     model = req.model
 
-    trajectory = await asyncio.to_thread(generate_trajectory, req.topic, model)
+    # Build patient context string from MongoDB (home meds, diagnoses, allergies)
+    patient_context = ""
+    try:
+        from ..services.emr import get_dummy_patient as _gdp
+        _pt = _gdp()
+        if _pt:
+            parts = []
+            if _pt.get("home_meds"):
+                parts.append("Home medications: " + ", ".join(_pt["home_meds"]))
+            if _pt.get("diagnoses"):
+                parts.append("Known diagnoses: " + ", ".join(_pt["diagnoses"]))
+            if _pt.get("allergies"):
+                parts.append("Allergies: " + ", ".join(_pt["allergies"]))
+            patient_context = "\n".join(parts)
+    except Exception as _exc:
+        log.warning("Could not fetch patient context for teacher: %s", _exc)
+
+    trajectory = await asyncio.to_thread(generate_trajectory, req.topic, model, patient_context)
     first_scenario = await asyncio.to_thread(
-        generate_first_scenario, req.topic, trajectory, model
+        generate_first_scenario, req.topic, trajectory, model, patient_context
     )
 
     # Wipe all clinical chart data so the teacher's patient_state seeds a clean slate

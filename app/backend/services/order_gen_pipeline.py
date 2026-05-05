@@ -228,25 +228,36 @@ _TOOL_SUBMIT_ORDERS = {
                         "orderable_name": {"type": "string", "description": "Matched orderable name from catalog, or null if not found"},
                         "order_details": {
                             "type": "object",
-                            "description": "Structured order fields",
+                            "description": (
+                                "REQUIRED for every order. Populate all applicable fields — "
+                                "never submit an order with order_details omitted or all fields empty. "
+                                "For meds: quantity + unit + route + frequency are mandatory. "
+                                "For monitoring/procedures: put the clinical target or instruction in instructions. "
+                                "For vents: put mode/PEEP/FiO2/TV/RR in instructions."
+                            ),
                             "properties": {
-                                "name": {"type": "string"},
-                                "quantity": {"type": "string"},
-                                "unit": {"type": "string"},
-                                "route": {"type": "string"},
-                                "form": {"type": "string"},
+                                "quantity": {"type": "string", "description": "Numeric dose amount, e.g. '20', '5', '0.3'. Required for med orders."},
+                                "unit": {"type": "string", "description": "Dose unit, e.g. 'mg', 'mcg/min', 'mg/kg', 'mL/hr'. Required for med orders."},
+                                "route": {"type": "string", "description": "Administration route, e.g. 'IV', 'oral', 'sublingual', 'SC'. Required for med orders."},
+                                "form": {"type": "string", "description": "Formulation, e.g. 'bolus', 'infusion', 'tablet', 'patch'."},
                                 "frequency": {
                                     "type": "string",
                                     "description": (
-                                        "Use ONLY these formats: 'once', 'continuous', 'daily', "
+                                        "Use ONLY: 'once', 'continuous', 'daily', "
                                         "'every N hours', 'every N minutes', 'every N days' "
                                         "where N is a single integer. "
-                                        "Never use ranges (e.g. '1-2 hours'), never append qualifiers "
-                                        "like 'initially' or 'then as clinically indicated' — "
-                                        "put those in the instructions field instead."
+                                        "Never use ranges (e.g. '1-2 hours'). "
+                                        "Put titration instructions in the instructions field instead."
                                     ),
                                 },
-                                "instructions": {"type": "string"},
+                                "instructions": {
+                                    "type": "string",
+                                    "description": (
+                                        "Clinical instructions, titration targets, monitoring targets, "
+                                        "or vent settings. Examples: 'Titrate by 5 mcg/min every 5 min to MAP >65', "
+                                        "'Target SpO2 94-98%', 'Mode: CPAP, PEEP 10, FiO2 0.4'."
+                                    ),
+                                },
                             },
                         },
                         "dose_calculation": {"type": "string", "description": "Dose calculation string if weight-based, e.g. '10 mg/kg × 65 kg = 650 mg'"},
@@ -768,14 +779,31 @@ def run_order_generation(
     for name in _catalog_created:
         _catalog_lines.append(f'  - CREATED orderable: "{name}" — use this exact name as orderable_name')
 
+    # Build per-recommendation parameter reminder — echo Phase 0 extractions so the
+    # model doesn't drop them when writing order_details in Phase 2.
+    _param_lines: list[str] = []
+    for idx, (rec, rec_intents) in enumerate(zip(recommendations, intents)):
+        for intent in rec_intents:
+            params = intent.get("parameters", "")
+            if params:
+                q = intent.get("catalog_query", "")
+                _param_lines.append(f"  [{q}] → {params}")
+
     phase2_msg = (
-        "You now have all the data needed. Call submit_orders with the structured orders for every recommendation. "
-        "Remember to include the extracted parameters (mode, TV, RR, PEEP, FiO2, dose, etc.) in each order's instructions field."
+        "You now have all the data needed. Call submit_orders ONCE with all orders.\n\n"
+        "CRITICAL: Every order MUST populate order_details with quantity, unit, route, frequency, "
+        "and instructions — do NOT omit order_details or leave its fields empty. "
+        "For monitoring and procedure orders put the clinical target/instructions in the instructions field. "
+        "For ventilator orders put mode/PEEP/FiO2/TV/RR in instructions."
     )
+    if _param_lines:
+        phase2_msg += (
+            "\n\nExtracted parameters from Phase 0 — copy these into each order's order_details fields:\n"
+            + "\n".join(_param_lines)
+        )
     if _catalog_lines:
         phase2_msg += (
-            "\n\nIMPORTANT — catalog lookup results from this session. "
-            "You MUST use these exact orderable_name values in your submit_orders call:\n"
+            "\n\nCatalog lookup results — use these exact orderable_name values:\n"
             + "\n".join(_catalog_lines)
             + "\n\nDo NOT use '—' or null for orderable_name if the name appears above."
         )

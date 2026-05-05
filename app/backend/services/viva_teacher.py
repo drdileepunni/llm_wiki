@@ -143,10 +143,16 @@ B) Case complete JSON:
 """
 
 
-def generate_trajectory(topic: str, model: str | None = None) -> str:
+def _patient_context_section(patient_context: str) -> str:
+    if not patient_context:
+        return ""
+    return f"\n\nPATIENT BACKGROUND (already set up in the simulator — incorporate into the case):\n{patient_context}\n"
+
+
+def generate_trajectory(topic: str, model: str | None = None, patient_context: str = "") -> str:
     """Generate the private examiner trajectory for a viva topic."""
     llm = get_llm_client(model=model)
-    prompt = _TRAJECTORY_PROMPT.format(topic=topic)
+    prompt = _TRAJECTORY_PROMPT.format(topic=topic) + _patient_context_section(patient_context)
     response = llm.create_message(
         messages=[{"role": "user", "content": prompt}],
         tools=[],
@@ -160,10 +166,11 @@ def generate_trajectory(topic: str, model: str | None = None) -> str:
     return text
 
 
-def generate_first_scenario(topic: str, trajectory: str, model: str | None = None) -> dict:
+def generate_first_scenario(topic: str, trajectory: str, model: str | None = None, patient_context: str = "") -> dict:
     """Generate the opening scenario for turn 1."""
     llm = get_llm_client(model=model)
-    prompt = _FIRST_SCENARIO_PROMPT.format(trajectory=trajectory)
+    context_section = _patient_context_section(patient_context)
+    prompt = _FIRST_SCENARIO_PROMPT.format(trajectory=trajectory) + context_section
     response = llm.create_message(
         messages=[{"role": "user", "content": prompt}],
         tools=[],

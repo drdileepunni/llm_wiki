@@ -587,6 +587,12 @@ export async function getVivaPatient() {
   return fetch(`${BASE}/viva/patient`).then(r => r.json())
 }
 
+export async function getVivaPatientLiveState() {
+  const res = await fetch(`${BASE}/viva/patient/live-state`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function createVivaPatient(details) {
   const res = await fetch(`${BASE}/viva/patient`, {
     method: 'POST',

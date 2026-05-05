@@ -43,6 +43,7 @@ def get_patient_demographics(cpmrn: str) -> dict[str, Any]:
         "bloodGroup": p.get("bloodGroup"),
         "allergies": p.get("allergies", []),
         "chronic": p.get("chronic", []),
+        "home_medications": p.get("home_medications", []),
         "hospitalName": p.get("hospitalName"),
         "unitName": p.get("unitName"),
         "bedNo": p.get("bedNo"),
@@ -259,6 +260,7 @@ def upsert_dummy_patient(details: dict) -> dict:
         "heightCm": details.get("height_cm"),
         "allergies": details.get("allergies", []),
         "chronic": details.get("diagnoses", []),
+        "home_medications": details.get("home_meds", []),
         "hospitalName": "Viva Training",
         "unitName": "ICU",
         "isCurrentlyAdmitted": True,
@@ -294,6 +296,7 @@ def get_dummy_patient() -> dict | None:
         "height_cm": p.get("heightCm"),
         "allergies": p.get("allergies", []),
         "diagnoses": p.get("chronic", []),
+        "home_meds": p.get("home_medications", []),
         "creatinine": labs.get("Creatinine"),
         "egfr": labs.get("eGFR"),
     }

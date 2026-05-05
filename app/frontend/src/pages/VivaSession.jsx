@@ -11,6 +11,7 @@ import {
   createVivaPatient,
   placeVivaOrder,
   getVivaProvenance,
+  getVivaPatientLiveState,
 } from '../api'
 import { useAppState } from '../AppStateContext'
 import {
@@ -29,6 +30,7 @@ import {
   CheckIcon,
   ExclamationTriangleIcon,
   QuestionMarkCircleIcon,
+  CircleStackIcon,
 } from '@heroicons/react/24/outline'
 
 const MODEL_OPTIONS = [
@@ -71,6 +73,13 @@ const ACTION_COLOR = {
   new:  'text-green-400 bg-green-400/10',
   edit: 'text-amber-400 bg-amber-400/10',
   stop: 'text-red-400 bg-red-400/10',
+}
+
+// Returns true for values that should not be displayed (not applicable)
+function isNA(val) {
+  if (!val) return true
+  const s = String(val).trim().toLowerCase()
+  return s === 'n/a' || s === 'na' || s === '—' || s === '-' || s === 'none' || s === 'null'
 }
 
 function badge(label, colorClass) {
@@ -395,19 +404,19 @@ function OrderCard({ order, onPlace, onIgnore, onWhy }) {
               </div>
             ) : (
               <div className="grid grid-cols-3 gap-x-3 gap-y-0.5 text-xs">
-                {editedDetails.quantity && (
-                  <span><span className="text-muted">dose </span><span className="text-white">{editedDetails.quantity} {editedDetails.unit}</span></span>
+                {!isNA(editedDetails.quantity) && (
+                  <span><span className="text-muted">dose </span><span className="text-white">{editedDetails.quantity}{!isNA(editedDetails.unit) ? ` ${editedDetails.unit}` : ''}</span></span>
                 )}
-                {editedDetails.route && (
+                {!isNA(editedDetails.route) && (
                   <span><span className="text-muted">route </span><span className="text-white">{editedDetails.route}</span></span>
                 )}
-                {editedDetails.frequency && (
+                {!isNA(editedDetails.frequency) && (
                   <span><span className="text-muted">freq </span><span className="text-white">{editedDetails.frequency}</span></span>
                 )}
-                {editedDetails.form && (
+                {!isNA(editedDetails.form) && (
                   <span><span className="text-muted">form </span><span className="text-white">{editedDetails.form}</span></span>
                 )}
-                {editedDetails.instructions && (
+                {!isNA(editedDetails.instructions) && (
                   <span className="col-span-3 text-white/70 italic text-[11px]">{editedDetails.instructions}</span>
                 )}
               </div>
@@ -658,6 +667,346 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy, onRerun
   )
 }
 
+// ── Patient chart drawer — tab sub-components ──────────────────────────────────
+
+function VitalsTab({ vitals, historyCount }) {
+  if (!vitals) return <p className="text-muted text-xs italic py-4">No vitals recorded yet.</p>
+
+  const respSupport = vitals.isIntubated ? 'Intubated' : vitals.isNIV ? 'NIV' : vitals.isHFNC ? 'HFNC' : null
+
+  const rows = [
+    { label: 'SpO₂',  value: vitals.SpO2,        unit: '%',    alarm: v => v < 92 },
+    { label: 'HR',    value: vitals.HR,           unit: 'bpm',  alarm: v => v > 100 || v < 60 },
+    { label: 'RR',    value: vitals.RR,           unit: '/min', alarm: v => v > 20 },
+    { label: 'BP',    value: vitals.BP,           unit: 'mmHg' },
+    { label: 'MAP',   value: vitals.MAP,          unit: 'mmHg', alarm: v => v < 65 },
+    { label: 'Temp',  value: vitals.Temperature,  unit: `°${vitals.TemperatureUnit || 'C'}`, alarm: v => v > 38.5 || v < 36 },
+    { label: 'FiO₂',  value: vitals.FiO2 != null ? `${Math.round(vitals.FiO2 * 100)}%` : null },
+    vitals.TherapyDevice && { label: 'Device', value: vitals.TherapyDevice },
+    vitals.AVPU        && { label: 'AVPU',   value: vitals.AVPU },
+    vitals.CVP != null && { label: 'CVP',    value: vitals.CVP, unit: 'cmH₂O' },
+  ].filter(Boolean)
+
+  const ventRows = (vitals.isIntubated || vitals.isNIV || vitals.isHFNC) ? [
+    vitals.VentMode            && { label: 'Mode',   value: vitals.VentMode },
+    vitals.VentPEEP != null    && { label: 'PEEP',   value: vitals.VentPEEP,  unit: 'cmH₂O' },
+    vitals.VentPIP  != null    && { label: 'PIP',    value: vitals.VentPIP,   unit: 'cmH₂O' },
+    vitals.VentRRSet != null   && { label: 'RR set', value: vitals.VentRRSet, unit: '/min' },
+  ].filter(Boolean) : []
+
+  return (
+    <div className="space-y-3">
+      {respSupport && (
+        <span className="inline-block text-[10px] px-1.5 py-0.5 rounded font-mono bg-cyan-400/10 text-cyan-400 border border-cyan-400/20 uppercase tracking-wider">
+          {respSupport}
+        </span>
+      )}
+
+      <div className="grid grid-cols-2 gap-1.5">
+        {rows.map(({ label, value, unit, alarm }) => {
+          if (value == null) return null
+          const numVal = typeof value === 'number' ? value : null
+          const isAlarm = alarm && numVal != null && alarm(numVal)
+          return (
+            <div key={label} className="bg-ink-800 rounded p-2">
+              <div className="text-[9px] text-muted uppercase tracking-wider">{label}</div>
+              <div className={`text-sm font-mono font-medium ${isAlarm ? 'text-red-400' : 'text-white'}`}>
+                {String(value)}{unit && <span className="text-[10px] text-muted ml-0.5">{unit}</span>}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {ventRows.length > 0 && (
+        <div>
+          <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Ventilator</p>
+          <div className="grid grid-cols-2 gap-1.5">
+            {ventRows.map(({ label, value, unit }) => (
+              <div key={label} className="bg-ink-800 rounded p-2">
+                <div className="text-[9px] text-muted uppercase tracking-wider">{label}</div>
+                <div className="text-sm font-mono font-medium text-cyan-400">
+                  {String(value)}{unit && <span className="text-[10px] text-muted ml-0.5">{unit}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <p className="text-[9px] text-muted font-mono">
+        {historyCount} snapshot{historyCount !== 1 ? 's' : ''}
+        {vitals.timestamp && ` · ${new Date(vitals.timestamp).toLocaleTimeString()}`}
+        {vitals.dataBy && ` · ${vitals.dataBy}`}
+      </p>
+    </div>
+  )
+}
+
+function LabsTab({ labs }) {
+  if (!labs || labs.length === 0) return <p className="text-muted text-xs italic py-4">No labs on file.</p>
+  return (
+    <div className="space-y-3">
+      {labs.map((doc, i) => (
+        <div key={i} className="bg-ink-800 rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-1.5 bg-ink-700">
+            <span className="text-[10px] font-semibold text-white uppercase tracking-wider">{doc.name}</span>
+            {doc.reportedAt && (
+              <span className="text-[9px] text-muted font-mono">{new Date(doc.reportedAt).toLocaleTimeString()}</span>
+            )}
+          </div>
+          {doc.text && Object.keys(doc.attributes || {}).length === 0 ? (
+            <p className="px-3 py-2 text-xs text-white/80 leading-relaxed">{doc.text}</p>
+          ) : (
+            <div className="px-3 py-2 space-y-1">
+              {Object.entries(doc.attributes || {}).map(([key, attr]) => {
+                const val = attr.value
+                const { min, max } = attr.normalRange || {}
+                const numVal = parseFloat(val)
+                const outOfRange = !isNaN(numVal) && min != null && max != null && (numVal < min || numVal > max)
+                return (
+                  <div key={key} className="flex items-center justify-between text-xs">
+                    <span className="text-muted">{key}</span>
+                    <div className="flex items-center gap-2">
+                      <span className={`font-mono font-medium ${outOfRange ? 'text-red-400' : 'text-white'}`}>{val}</span>
+                      {min != null && max != null && (
+                        <span className="text-[9px] text-muted/60 font-mono">{min}–{max}</span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+              {doc.text && <p className="text-[10px] text-white/60 italic pt-1 leading-relaxed">{doc.text}</p>}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function IOTab({ io }) {
+  if (!io) return <p className="text-muted text-xs italic py-4">No IO data.</p>
+  const balance = io.net_balance_ml ?? 0
+  const balanceColor = balance > 2000 ? 'text-red-400' : balance > 500 ? 'text-amber-400' : 'text-white'
+  const balanceStr = balance >= 0 ? `+${balance}` : String(balance)
+
+  const rows = [
+    { label: 'Urine output', value: `${io.total_urine_ml} mL` },
+    { label: 'Urine rate',   value: `${io.urine_rate_ml_per_hr} mL/hr` },
+    { label: 'Total intake', value: `${io.total_intake_ml} mL` },
+    { label: 'Net balance',  value: `${balanceStr} mL`, color: balanceColor },
+  ]
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[9px] text-muted uppercase tracking-widest">Last {io.period_hours} h</p>
+      {rows.map(({ label, value, color }) => (
+        <div key={label} className="flex items-center justify-between bg-ink-800 rounded px-3 py-2">
+          <span className="text-xs text-muted">{label}</span>
+          <span className={`text-sm font-mono font-medium ${color || 'text-white'}`}>{value}</span>
+        </div>
+      ))}
+      <p className="text-[9px] text-muted font-mono">{io.entries_counted} IO entr{io.entries_counted === 1 ? 'y' : 'ies'} in period</p>
+    </div>
+  )
+}
+
+function OrdersTab({ orders }) {
+  if (!orders) return <p className="text-muted text-xs italic py-4">No orders.</p>
+  const sections = [
+    { key: 'medications', label: 'Medications', color: 'text-blue-300' },
+    { key: 'labs',        label: 'Labs',        color: 'text-purple-300' },
+    { key: 'procedures',  label: 'Procedures',  color: 'text-teal-300' },
+    { key: 'vents',       label: 'Ventilation', color: 'text-cyan-300' },
+    { key: 'diets',       label: 'Diet',        color: 'text-green-300' },
+    { key: 'bloods',      label: 'Blood',       color: 'text-red-300' },
+  ]
+  const hasAny = sections.some(s => (orders[s.key] || []).length > 0)
+  if (!hasAny) return <p className="text-muted text-xs italic py-4">No active orders.</p>
+
+  return (
+    <div className="space-y-4">
+      {sections.map(({ key, label, color }) => {
+        const items = orders[key] || []
+        if (!items.length) return null
+        return (
+          <div key={key}>
+            <p className={`text-[9px] uppercase tracking-widest mb-1.5 ${color}`}>{label} ({items.length})</p>
+            <div className="space-y-1">
+              {items.map((item, i) => (
+                <div key={i} className="bg-ink-800 rounded px-3 py-2">
+                  <p className="text-xs text-white font-medium">
+                    {item.name || item.investigation || item.pType || '—'}
+                  </p>
+                  <p className="text-[10px] text-muted font-mono mt-0.5">
+                    {[
+                      !isNA(item.quantity) && `${item.quantity}${!isNA(item.unit) ? ` ${item.unit}` : ''}`.trim(),
+                      !isNA(item.route) && item.route,
+                      !isNA(item.frequency) && item.frequency,
+                      !isNA(item.discipline) && item.discipline,
+                    ].filter(Boolean).join(' · ')}
+                    {!isNA(item.instructions) && ` — ${item.instructions}`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function NotesTab({ notes }) {
+  if (!notes || notes.length === 0) return <p className="text-muted text-xs italic py-4">No notes on file.</p>
+  const CAT_COLOR = { event: 'text-amber-400', nursing: 'text-blue-400', ecg: 'text-purple-400', imaging: 'text-teal-400' }
+  return (
+    <div className="space-y-3">
+      {notes.map((note, i) => (
+        <div key={i} className="bg-ink-800 rounded-lg px-3 py-2.5 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className={`text-[9px] font-mono uppercase tracking-wider ${CAT_COLOR[note.category] || 'text-muted'}`}>
+              {note.category}{note.name && note.name !== 'Event Note' ? ` · ${note.name}` : ''}
+            </span>
+            {note.reportedAt && (
+              <span className="text-[9px] text-muted font-mono flex-shrink-0">
+                {new Date(note.reportedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-white/80 leading-relaxed">{note.text}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function HistoryTab({ history }) {
+  if (!history) return <p className="text-muted text-xs italic py-4">No history data.</p>
+  const { home_medications = [], diagnoses = [], allergies = [] } = history
+  const Section = ({ label, items, color = 'text-white/80' }) => (
+    <div className="bg-ink-800 rounded-lg px-3 py-2.5 space-y-1.5">
+      <span className="text-[9px] font-mono uppercase tracking-wider text-muted">{label}</span>
+      {items.length === 0
+        ? <p className="text-xs text-muted italic">None recorded</p>
+        : <ul className="space-y-0.5">{items.map((item, i) => (
+            <li key={i} className={`text-xs ${color}`}>{item}</li>
+          ))}</ul>
+      }
+    </div>
+  )
+  return (
+    <div className="space-y-3">
+      <Section label="Home Medications" items={home_medications} color="text-emerald-300" />
+      <Section label="Diagnoses / PMHx" items={diagnoses} />
+      <Section label="Allergies" items={allergies} color="text-red-400" />
+    </div>
+  )
+}
+
+// ── Patient chart drawer ───────────────────────────────────────────────────────
+
+const CHART_TABS = ['vitals', 'labs', 'io', 'orders', 'notes', 'hx']
+
+function PatientChartDrawer({ onClose, refreshTrigger }) {
+  const [tab, setTab] = useState('vitals')
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [lastRefresh, setLastRefresh] = useState(null)
+
+  async function refresh() {
+    setLoading(true)
+    setError(null)
+    try {
+      const d = await getVivaPatientLiveState()
+      setData(d)
+      setLastRefresh(new Date())
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { refresh() }, [])
+  useEffect(() => { if (refreshTrigger > 0) refresh() }, [refreshTrigger])
+
+  return (
+    <div className="fixed right-0 top-0 h-full w-96 bg-ink-900 border-l border-border z-40 flex flex-col shadow-2xl">
+
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-ink-800 flex-shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <CircleStackIcon className="w-4 h-4 text-accent flex-shrink-0" />
+          <span className="text-xs font-semibold text-white">Patient Chart</span>
+          {lastRefresh && (
+            <span className="text-[9px] text-muted font-mono">{lastRefresh.toLocaleTimeString()}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={refresh}
+            disabled={loading}
+            title="Refresh from MongoDB"
+            className="p-1.5 rounded text-muted hover:text-white disabled:opacity-40 transition-colors"
+          >
+            <ArrowPathIcon className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          <button onClick={onClose} className="p-1.5 rounded text-muted hover:text-white transition-colors">
+            <XMarkIcon className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex border-b border-border flex-shrink-0 bg-ink-800/50">
+        {CHART_TABS.map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`flex-1 text-[10px] uppercase tracking-wider py-2 transition-colors ${
+              tab === t
+                ? 'text-accent border-b-2 border-accent -mb-px'
+                : 'text-muted hover:text-white'
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        {loading && !data ? (
+          <div className="flex items-center gap-2 text-muted text-xs py-8 justify-center">
+            <ClockIcon className="w-4 h-4 animate-spin" /> Loading…
+          </div>
+        ) : error ? (
+          <p className="text-red-400 text-xs py-4">{error}</p>
+        ) : !data ? (
+          <p className="text-muted text-xs italic py-4">No patient found. Create a dummy patient first.</p>
+        ) : (
+          <>
+            {tab === 'vitals'  && <VitalsTab  vitals={data.vitals} historyCount={data.vitals_history_count} />}
+            {tab === 'labs'    && <LabsTab    labs={data.labs} />}
+            {tab === 'io'      && <IOTab      io={data.io} />}
+            {tab === 'orders'  && <OrdersTab  orders={data.orders} />}
+            {tab === 'notes'   && <NotesTab   notes={data.notes} />}
+            {tab === 'hx'      && <HistoryTab history={data.history} />}
+          </>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="px-4 py-2 border-t border-border bg-ink-800/50 flex-shrink-0">
+        <p className="text-[9px] text-muted font-mono">MongoDB · VIVA_DUMMY_001</p>
+      </div>
+    </div>
+  )
+}
+
 // ── Dummy patient panel ────────────────────────────────────────────────────────
 
 const DEFAULT_PATIENT_FORM = {
@@ -670,6 +1019,7 @@ const DEFAULT_PATIENT_FORM = {
   egfr: 75,
   allergies: '',
   diagnoses: '',
+  home_meds: '',
 }
 
 function patientToForm(p) {
@@ -684,6 +1034,7 @@ function patientToForm(p) {
     egfr: p.egfr ?? 75,
     allergies: (p.allergies || []).join(', '),
     diagnoses: (p.diagnoses || []).join(', '),
+    home_meds: (p.home_meds || []).join('\n'),
   }
 }
 
@@ -723,6 +1074,7 @@ function PatientPanel({ patient, onSaved }) {
         egfr: form.egfr !== '' ? Number(form.egfr) : null,
         allergies: form.allergies ? form.allergies.split(',').map(s => s.trim()).filter(Boolean) : [],
         diagnoses: form.diagnoses ? form.diagnoses.split(',').map(s => s.trim()).filter(Boolean) : [],
+        home_meds: form.home_meds ? form.home_meds.split('\n').map(s => s.trim()).filter(Boolean) : [],
       }
       const data = await createVivaPatient(payload)
       onSaved(data.patient)
@@ -797,6 +1149,16 @@ function PatientPanel({ patient, onSaved }) {
             {field('eGFR', 'egfr', 'number', 'e.g. 75')}
             <div className="col-span-2">{field('Allergies (comma-sep)', 'allergies', 'text', 'penicillin, NSAID')}</div>
             <div className="col-span-2">{field('Diagnoses (comma-sep)', 'diagnoses', 'text', 'T2DM, CKD')}</div>
+            <div className="col-span-2">
+              <label className="block text-[9px] text-muted uppercase tracking-wider mb-0.5">Home Medications (one per line)</label>
+              <textarea
+                value={form.home_meds}
+                placeholder={'Lasix 40mg PO BID\nMetformin 500mg PO BD'}
+                onChange={e => setForm(f => ({ ...f, home_meds: e.target.value }))}
+                rows={3}
+                className="w-full bg-ink-700 border border-border rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-accent resize-none"
+              />
+            </div>
           </div>
           {err && <p className="text-red-400 text-xs">{err}</p>}
           <button
@@ -930,6 +1292,8 @@ export default function VivaSession() {
   const [patient, setPatient] = useState(null)
   const [pendingTurnOrders, setPendingTurnOrders] = useState(false)
   const [provenance, setProvenance] = useState(null) // { order, orderRunId }
+  const [chartOpen, setChartOpen] = useState(false)
+  const [chartRefreshTrigger, setChartRefreshTrigger] = useState(0)
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -999,6 +1363,7 @@ export default function VivaSession() {
             : s
         )
       )
+      setChartRefreshTrigger(t => t + 1)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -1142,6 +1507,18 @@ export default function VivaSession() {
                 </p>
               </div>
               <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setChartOpen(o => !o)}
+                  title={chartOpen ? 'Close patient chart' : 'View live MongoDB patient chart'}
+                  className={`flex items-center gap-1.5 text-xs border px-2.5 py-1.5 rounded transition-colors ${
+                    chartOpen
+                      ? 'text-accent border-accent/60 bg-accent/10'
+                      : 'text-muted hover:text-white border-border hover:border-accent/50'
+                  }`}
+                >
+                  <CircleStackIcon className="w-3.5 h-3.5" />
+                  Chart
+                </button>
                 {isComplete && !session.forked_from && (
                   <button
                     onClick={() => handleFork(session.session_id)}
@@ -1233,6 +1610,13 @@ export default function VivaSession() {
           order={provenance.order}
           orderRunId={provenance.orderRunId}
           onClose={() => setProvenance(null)}
+        />
+      )}
+
+      {chartOpen && (
+        <PatientChartDrawer
+          onClose={() => setChartOpen(false)}
+          refreshTrigger={chartRefreshTrigger}
         />
       )}
     </div>
