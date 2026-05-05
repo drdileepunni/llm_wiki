@@ -522,6 +522,7 @@ def run_custom_snapshot(
     )
 
     snap["timeline_summary"] = summary
+    snap["chat_run_id"] = result.get("chat_run_id")
     snap["agent_answer"] = result["answer"]
     snap["immediate_next_steps"] = result.get("immediate_next_steps", [])
     snap["clinical_direction"] = result.get("clinical_direction", [])

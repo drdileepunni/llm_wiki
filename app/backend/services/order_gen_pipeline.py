@@ -16,13 +16,16 @@ Pipeline:
 import json
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from ..config import MODEL, _default_kb
+from ..config import MODEL, TRACES_DIR, _default_kb
 from .llm_client import get_llm_client
 from .token_tracker import log_call, calculate_cost
-from .emr import get_patient_demographics, search_orderables
+from .emr import get_patient_demographics, search_orderables, create_orderable
 from . import vector_store as vs_mod
 from .ingest_pipeline import write_gap_files
+from .provenance_logger import write_trace
 
 log = logging.getLogger("wiki.order_gen")
 
@@ -80,6 +83,9 @@ _TOOL_EXTRACT_INTENTS = {
                             "description": (
                                 "Short 1-3 word term to search the EMR catalog "
                                 "(e.g. 'ventilator', 'noradrenaline', 'ABG', 'dextrose', 'etomidate'). "
+                                "For procedures and imaging, ALWAYS include the body part or region "
+                                "to avoid ambiguity (e.g. 'CT angiography head', 'CT head', "
+                                "'X-ray chest', 'ultrasound abdomen', 'arterial line radial'). "
                                 "Use the rules table when a match applies."
                             ),
                         },
@@ -117,14 +123,24 @@ For each recommendation:
 4. Map the recommendation to an order with specific quantity, unit, route, frequency
 5. For ventilator orders: put mode/TV/RR/PEEP/FiO2 into the instructions field
 
+ACTIVE ORDERS COMPARISON:
+- If active_orders are provided, compare every recommendation against them before generating
+- If the same drug/item is already active: set action="edit", existing_order_no=<the orderNo>, \
+  from_dose=<current dose string>, to_dose=<new dose string>
+- If you are asked to discontinue something active: set action="stop", existing_order_no=<orderNo>
+- Otherwise: action="new"
+
 Rules:
-- Always search the catalog — never invent an orderable that wasn't found
+- Always search the catalog first. If search returns 0 results, call create_orderable to add it — \
+  never submit an order without a catalog entry
 - Use the pre-analyzed catalog_query and order_type from Phase 0 for each recommendation
 - For monitoring (SpO2 target, HR target, UO target), the instruction text IS the order content; \
   search for a "vital monitoring" or "nursing" procedure orderable
 - For labs, search by test name (e.g. "CBC", "creatinine", "lactate")
 - Confidence: "high" if orderable found and dose is unambiguous; "medium" if approximate; \
-  "low" if no matching orderable found or weight unavailable for weight-based dosing
+  "low" if no matching orderable found, weight unavailable for weight-based dosing, \
+  OR the matched orderable's body part / region does not match the intended one \
+  (e.g. recommendation is "CT angiography head" but best catalog match is "CT angiography lower extremities" — set low)
 - Frequency must be one of: 'once', 'continuous', 'daily', 'every N hours', 'every N minutes', \
   'every N days' where N is a single integer. Never use ranges like '1-2 hours'. \
   Never append qualifiers like 'initially' or 'then as clinically indicated' to frequency — \
@@ -142,6 +158,45 @@ _TOOL_SEARCH_ORDERABLES = {
             "patient_type": {"type": "string", "description": "adult (default), pediatric, or neonatal"},
         },
         "required": ["query"],
+    },
+}
+
+_TOOL_CREATE_ORDERABLE = {
+    "name": "create_orderable",
+    "description": (
+        "Create a new orderable in the EMR catalog when search_orderables returns 0 results. "
+        "Use only when you are clinically certain about the order and no catalog match exists. "
+        "The new entry is immediately available for use in submit_orders."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Specific orderable name including body part for imaging/procedures (e.g. 'CT angiography head', 'X-ray chest AP', 'Ultrasound abdomen')",
+            },
+            "order_type": {
+                "type": "string",
+                "description": "med, lab, procedure, vents, diet, blood, or comm",
+            },
+            "form": {
+                "type": "string",
+                "description": "e.g. 'imaging', 'monitoring', 'tablet', 'injection', 'infusion', 'procedure'",
+            },
+            "frequency": {
+                "type": "string",
+                "description": "once, continuous, daily, every N hours",
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Default clinical instructions for this orderable",
+            },
+            "patient_type": {
+                "type": "string",
+                "description": "adult (default), pediatric, or neonatal",
+            },
+        },
+        "required": ["name", "order_type"],
     },
 }
 
@@ -195,8 +250,34 @@ _TOOL_SUBMIT_ORDERS = {
                             },
                         },
                         "dose_calculation": {"type": "string", "description": "Dose calculation string if weight-based, e.g. '10 mg/kg × 65 kg = 650 mg'"},
-                        "confidence": {"type": "string", "description": "high, medium, or low"},
+                        "confidence": {"type": "string", "description": (
+                            "high — orderable found, body part matches, dose unambiguous; "
+                            "medium — orderable found but dose is approximate; "
+                            "low — no orderable found, OR body part / region mismatch between "
+                            "recommendation and matched orderable (e.g. 'CT angio head' matched to 'CT angio lower extremities'), "
+                            "OR weight unavailable for weight-based dosing"
+                        )},
                         "notes": {"type": "string", "description": "Any caveats or warnings"},
+                        "action": {
+                            "type": "string",
+                            "description": (
+                                "'new' (default) — start a fresh order; "
+                                "'edit' — modify an existing active order (set existing_order_no); "
+                                "'stop' — discontinue an existing active order (set existing_order_no)"
+                            ),
+                        },
+                        "existing_order_no": {
+                            "type": "string",
+                            "description": "orderNo of the currently active order being edited or stopped",
+                        },
+                        "from_dose": {
+                            "type": "string",
+                            "description": "Current dose/rate of the existing order being edited, e.g. '20 mg/hr'",
+                        },
+                        "to_dose": {
+                            "type": "string",
+                            "description": "New dose/rate for the edited order, e.g. '10 mg/hr'",
+                        },
                     },
                     "required": ["recommendation", "order_type", "confidence"],
                 },
@@ -206,7 +287,7 @@ _TOOL_SUBMIT_ORDERS = {
     },
 }
 
-_GATHER_TOOLS = [_TOOL_SEARCH_ORDERABLES, _TOOL_GET_DEMOGRAPHICS]
+_GATHER_TOOLS = [_TOOL_SEARCH_ORDERABLES, _TOOL_CREATE_ORDERABLE, _TOOL_GET_DEMOGRAPHICS]
 
 
 def _execute_tool(name: str, args: dict, cpmrn: str | None) -> str:
@@ -219,6 +300,17 @@ def _execute_tool(name: str, args: dict, cpmrn: str | None) -> str:
                 patient_type=args.get("patient_type", "adult"),
                 limit=5,
             )
+        elif name == "create_orderable":
+            result = create_orderable(
+                name=args["name"],
+                order_type=args["order_type"],
+                form=args.get("form", ""),
+                frequency=args.get("frequency", "once"),
+                instructions=args.get("instructions", ""),
+                patient_type=args.get("patient_type", "adult"),
+            )
+            log.info("  create_orderable  name=%r  type=%r  → created=%s",
+                     args["name"], args["order_type"], result.get("created"))
         elif name == "get_patient_demographics":
             effective_cpmrn = args.get("cpmrn") or cpmrn
             if not effective_cpmrn:
@@ -240,12 +332,15 @@ def _append_turn(messages: list, response) -> list:
         if block.type == "text":
             assistant_content.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
-            assistant_content.append({
+            tc: dict = {
                 "type": "tool_use",
                 "id": block.id or f"call_{block.name}",
                 "name": block.name,
                 "input": block.input,
-            })
+            }
+            if block.thought_signature:
+                tc["thought_signature"] = block.thought_signature
+            assistant_content.append(tc)
     if assistant_content:
         messages.append({"role": "assistant", "content": assistant_content})
     return tool_calls
@@ -409,6 +504,8 @@ def run_order_generation(
     patient_type: str = "adult",
     model: str | None = None,
     kb=None,
+    active_orders: dict | None = None,
+    parent_run_id: str | None = None,
 ) -> dict:
     """
     Three-phase pipeline:
@@ -422,11 +519,30 @@ def run_order_generation(
         kb = _default_kb()
 
     resolved_model = model or MODEL
-    log.info("=== ORDER GEN START  recs=%d  cpmrn=%s  model=%s  kb=%s ===",
-             len(recommendations), cpmrn, resolved_model, kb.name)
+    run_id = str(uuid.uuid4())
+    log.info("=== ORDER GEN START  run_id=%s  recs=%d  cpmrn=%s  model=%s  kb=%s ===",
+             run_id, len(recommendations), cpmrn, resolved_model, kb.name)
 
     llm = get_llm_client(model=model)
     total_input = total_output = 0
+
+    # ── Provenance trace accumulator ──────────────────────────────────────────
+    trace: dict = {
+        "run_id": run_id,
+        "parent_run_id": parent_run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cpmrn": cpmrn,
+        "patient_type": patient_type,
+        "model": resolved_model,
+        "kb": kb.name,
+        "recommendations": recommendations,
+        "phase0": {},
+        "phase1": {"iterations": []},
+        "weight_resolution": None,
+        "phase2": {},
+        "final_orders": [],
+        "tokens": {},
+    }
 
     # ── Phase 0: intent extraction ────────────────────────────────────────────
     _, rules_table = _load_rules()
@@ -442,6 +558,7 @@ def run_order_generation(
                 intent.get("order_type", "—"),
                 intent.get("parameters", "") or "—",
             )
+    trace["phase0"]["intents"] = intents
 
     # ── Build Phase 1 user message with pre-analyzed intents ─────────────────
     rec_lines = []
@@ -467,6 +584,35 @@ def run_order_generation(
         )
     else:
         user_msg += "\n\nNo CPMRN provided — skip weight-based calculations, set confidence to low for any weight-based dosing."
+
+    if active_orders:
+        import json as _json
+        meds = active_orders.get("medications") or []
+        labs = active_orders.get("labs") or []
+        procs = active_orders.get("procedures") or []
+        vents = active_orders.get("vents") or []
+        if any([meds, labs, procs, vents]):
+            active_lines = []
+            for m in meds:
+                active_lines.append(
+                    f"  MED  orderNo={m.get('orderNo','')}  {m.get('name','')}  "
+                    f"{m.get('quantity','')} {m.get('unit','')} {m.get('route','')}  freq={m.get('frequency','')}"
+                )
+            for l in labs:
+                active_lines.append(f"  LAB  orderNo={l.get('orderNo','')}  {l.get('investigation','')}")
+            for p in procs:
+                active_lines.append(f"  PROC orderNo={p.get('orderNo','')}  {p.get('name','')}")
+            for v in vents:
+                active_lines.append(f"  VENT orderNo={v.get('orderNo','')}  {v.get('name','')}  {v.get('instructions','')}")
+            user_msg += (
+                "\n\nCURRENTLY ACTIVE ORDERS ON THIS PATIENT:\n"
+                + "\n".join(active_lines)
+                + "\n\nFor each recommendation, check if it overlaps with an active order above. "
+                "If so: set action='edit' + existing_order_no + from_dose + to_dose. "
+                "If discontinuing something active: action='stop' + existing_order_no. "
+                "New items: action='new'."
+            )
+
     user_msg += "\n\nSearch the orderables catalog for each recommendation now."
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
@@ -488,34 +634,65 @@ def run_order_generation(
                  iteration, response.stop_reason, len(tool_calls),
                  response.usage.input_tokens, response.usage.output_tokens)
 
+        iter_trace: dict = {
+            "iteration": iteration,
+            "stop_reason": response.stop_reason,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+            "tool_calls": [],
+        }
+
         if not tool_calls or response.stop_reason == "end_turn":
+            trace["phase1"]["iterations"].append(iter_trace)
             break
 
         for block in tool_calls:
             if block.name == "search_orderables":
                 log.info("  search_orderables  query=%r  order_type=%r",
                          block.input.get("query"), block.input.get("order_type"))
+            elif block.name == "create_orderable":
+                log.info("  create_orderable  name=%r  type=%r",
+                         block.input.get("name"), block.input.get("order_type"))
             elif block.name == "get_patient_demographics":
                 log.info("  get_patient_demographics  cpmrn=%r", block.input.get("cpmrn"))
             result_text = _execute_tool(block.name, block.input, cpmrn)
+            tc_trace: dict = {"name": block.name, "args": block.input}
             try:
                 result_preview = json.loads(result_text)
                 if block.name == "search_orderables":
                     names = [o.get("name", "?") for o in result_preview.get("orderables", [])]
                     log.info("  → %d matches: %s", result_preview.get("count", 0), names)
+                    tc_trace["result_count"] = result_preview.get("count", 0)
+                    tc_trace["result_summary"] = names
                 elif block.name == "get_patient_demographics":
                     log.info("  → weight=%s kg  height=%s cm  gender=%s",
                              result_preview.get("weightKg", "—"),
                              result_preview.get("heightCm", "—"),
                              result_preview.get("gender", "—"))
+                    tc_trace["result_summary"] = {
+                        "weightKg": result_preview.get("weightKg"),
+                        "heightCm": result_preview.get("heightCm"),
+                        "gender": result_preview.get("gender"),
+                        "age_years": result_preview.get("age_years"),
+                    }
+                elif block.name == "create_orderable":
+                    tc_trace["result_summary"] = {
+                        "created": result_preview.get("created"),
+                        "id": result_preview.get("id"),
+                    }
+                else:
+                    tc_trace["result_summary"] = result_preview
             except Exception:
                 log.info("  → %d chars", len(result_text))
+                tc_trace["result_summary"] = result_text[:200]
+            iter_trace["tool_calls"].append(tc_trace)
             messages.append({"role": "user", "content": [{
                 "type": "tool_result",
                 "tool_use_id": block.id or f"call_{block.name}",
                 "name": block.name,
                 "content": result_text,
             }]})
+        trace["phase1"]["iterations"].append(iter_trace)
 
     # ── Weight resolution ─────────────────────────────────────────────────────
     weight_note = None
@@ -538,16 +715,31 @@ def run_order_generation(
             dosing_weight, weight_note, weight_gap = _resolve_dosing_weight(demo, kb)
             if dosing_weight is not None:
                 is_actual = weight_note.startswith("Actual weight from EMR")
+                weight_source = "actual_emr" if is_actual else (
+                    "ibw_from_height" if "IBW from height" in weight_note else "wiki_default"
+                )
                 conf_instruction = (
                     "This is the actual recorded weight — confidence for weight-based orders may be high."
                     if is_actual else
                     "This weight is ESTIMATED (not recorded in EMR) — set confidence to 'medium' for all weight-based orders."
                 )
+                trace["weight_resolution"] = {
+                    "source": weight_source,
+                    "weight_kg": dosing_weight,
+                    "note": weight_note,
+                    "gap_registered": weight_gap,
+                }
                 messages.append({"role": "user", "content":
                     f"Use {dosing_weight:.1f} kg as the dosing weight for this patient. "
                     f"({weight_note}) {conf_instruction}"
                 })
             else:
+                trace["weight_resolution"] = {
+                    "source": "none",
+                    "weight_kg": None,
+                    "note": weight_note,
+                    "gap_registered": weight_gap,
+                }
                 messages.append({"role": "user", "content":
                     f"No reliable dosing weight available. {weight_note} "
                     f"For weight-based orders, set confidence to low."
@@ -591,8 +783,21 @@ def run_order_generation(
         output_tokens=total_output,
         model=resolved_model,
     )
-    log.info("=== ORDER GEN END  orders=%d  in=%d  out=%d  cost=$%.4f ===",
-             len(orders), total_input, total_output, cost)
+    log.info("=== ORDER GEN END  run_id=%s  orders=%d  in=%d  out=%d  cost=$%.4f ===",
+             run_id, len(orders), total_input, total_output, cost)
+
+    # ── Write provenance trace ────────────────────────────────────────────────
+    trace["phase2"] = {
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+    }
+    trace["final_orders"] = orders
+    trace["tokens"] = {
+        "input": total_input,
+        "output": total_output,
+        "cost_usd": cost,
+    }
+    write_trace(trace, TRACES_DIR)
 
     return {
         "orders": orders,
@@ -601,4 +806,5 @@ def run_order_generation(
         "cost_usd": cost,
         "model": resolved_model,
         "weight_gap_registered": weight_gap,
+        "run_id": run_id,
     }

@@ -278,6 +278,29 @@ def upsert_sections(page_path: str, content: str, wiki_dir: Path) -> int:
     return embedded
 
 
+_DEMAND_ALPHA   = 0.10   # max fractional boost (10%)
+_DEMAND_GAP_NORM   = 10  # gap_opens at which boost saturates to ~76% of max
+_DEMAND_QUERY_NORM = 5   # cds_query_count at which boost saturates
+
+
+def _demand_boost(page_path: str, metrics: dict) -> float:
+    """
+    Return a small additive multiplier [0, _DEMAND_ALPHA] for a page based on
+    how often it is queried and how often it still fails to provide values.
+    Uses tanh so the signal saturates rather than growing unboundedly.
+    """
+    entry = metrics.get(page_path, {})
+    gap_opens   = entry.get("gap_opens", 0)
+    query_count = entry.get("cds_query_count", 0)
+    if gap_opens == 0 and query_count == 0:
+        return 0.0
+    gap_signal   = math.tanh(gap_opens   / _DEMAND_GAP_NORM)
+    query_signal = math.tanh(query_count / _DEMAND_QUERY_NORM)
+    # Both signals must be non-zero for a boost — a page with gaps but zero
+    # queries might just be thinly covered; a queried page with zero gaps is fine.
+    return _DEMAND_ALPHA * (gap_signal * query_signal) ** 0.5
+
+
 def search_sections(
     query: str,
     wiki_dir: Path,
@@ -288,6 +311,10 @@ def search_sections(
     Search the section-level store.
     Returns top_k hits: [{"chunk_id": ..., "path": ..., "section": ..., "score": ...}]
     Falls back to page-level search if section store is empty.
+
+    Scores are boosted by a small demand signal: pages that are frequently
+    retrieved but still have open gaps get up to _DEMAND_ALPHA (10%) added to
+    their cosine similarity, lifting them above retrieval thresholds.
     """
     records = _load_sections(wiki_dir)
     if not records:
@@ -304,13 +331,20 @@ def search_sections(
         log.warning("Section search embed failed: %s", e)
         return []
 
+    # Load metrics once for all pages — cheap JSON read
+    try:
+        from .page_metrics import _load as _load_metrics
+        metrics = _load_metrics(wiki_dir)
+    except Exception:
+        metrics = {}
+
     scored = sorted(
         [
             {
                 "chunk_id": r["chunk_id"],
                 "path": r["path"],
                 "section": r["section"],
-                "score": _cosine(q_emb, r["embedding"]),
+                "score": _cosine(q_emb, r["embedding"]) * (1 + _demand_boost(r["path"], metrics)),
             }
             for r in records
             if include_patients or not r["path"].startswith("patients/")

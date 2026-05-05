@@ -13,6 +13,7 @@ import OrderGenerator from './pages/OrderGenerator'
 import Activity from './pages/Activity'
 import GapIntelligence from './pages/GapIntelligence'
 import VivaSession from './pages/VivaSession'
+import Graph from './pages/Graph'
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
             <Route path="activity" element={<Activity />} />
             <Route path="gap-intelligence" element={<GapIntelligence />} />
             <Route path="viva" element={<VivaSession />} />
+            <Route path="graph" element={<Graph />} />
           </Route>
         </Routes>
       </BrowserRouter>

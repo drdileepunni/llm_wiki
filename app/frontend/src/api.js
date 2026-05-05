@@ -222,6 +222,16 @@ export async function resolveBatchStatus(batchId) {
   return fetch(`${BASE}/resolve/batch/${batchId}`).then(r => r.json())
 }
 
+export async function verifyGaps(gapStem, kbName) {
+  const res = await fetch(`${BASE}/resolve/verify-gaps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ gap_stem: gapStem || '' }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function trackQueryAsGap(question, answer, kbName) {
   const res = await fetch(`${BASE}/resolve/gap-from-query`, {
     method: 'POST',
@@ -501,6 +511,24 @@ export async function listLearnRuns(kbName) {
 
 // ── Order generation ───────────────────────────────────────────────────────────
 
+// ── MedGemma VM control ────────────────────────────────────────────────────────
+
+export async function getVMStatus() {
+  return fetch(`${BASE}/vm/status`).then(r => r.json())
+}
+
+export async function startVM() {
+  const res = await fetch(`${BASE}/vm/start`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function stopVM() {
+  const res = await fetch(`${BASE}/vm/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── Log capture ────────────────────────────────────────────────────────────────
 
 export async function startLogCapture() {
@@ -524,6 +552,30 @@ export async function listLogFiles() {
 }
 
 // ── Viva (teacher-student loop) ────────────────────────────────────────────────
+
+export async function getVivaPatient() {
+  return fetch(`${BASE}/viva/patient`).then(r => r.json())
+}
+
+export async function createVivaPatient(details) {
+  const res = await fetch(`${BASE}/viva/patient`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(details),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function placeVivaOrder(order) {
+  const res = await fetch(`${BASE}/viva/patient/place-order`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(order),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
 
 export async function startViva(topic, maxTurns = 8, model = null, kbName) {
   const res = await fetch(`${BASE}/viva/start`, {
@@ -571,6 +623,16 @@ export async function deleteVivaSession(sessionId, kbName) {
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+export async function getVivaProvenance(orderRunId) {
+  const res = await fetch(`${BASE}/viva/provenance?order_run_id=${encodeURIComponent(orderRunId)}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getGraphData(kbName) {
+  return fetch(`${BASE}/graph/data`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }
 
 export async function generateOrders({ recommendations, cpmrn, patientType, model }, kbName) {

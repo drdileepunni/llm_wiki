@@ -46,6 +46,7 @@ class LLMToolUseBlock:
     name: str = ""
     input: dict = field(default_factory=dict)
     id: str = ""
+    thought_signature: bytes | None = None  # Gemini thinking models: must be echoed back
 
 
 @dataclass
@@ -291,11 +292,15 @@ class GeminiLLMClient:
                     elif btype == "text":
                         parts.append(types.Part(text=block["text"]))
                     elif btype == "tool_use":
-                        # assistant calling a function
-                        parts.append(types.Part(function_call=types.FunctionCall(
+                        # assistant calling a function — echo thought_signature if present
+                        ts = block.get("thought_signature")
+                        part = types.Part(function_call=types.FunctionCall(
                             name=block["name"],
                             args=block.get("input", {}),
-                        )))
+                        ))
+                        if ts:
+                            part.thought_signature = ts
+                        parts.append(part)
                     elif btype == "tool_result":
                         # user returning a function result
                         raw_content = block.get("content", "")
@@ -420,7 +425,9 @@ class GeminiLLMClient:
             fc = getattr(part, "function_call", None)
             if fc and getattr(fc, "name", None):
                 args = _to_python(dict(fc.args) if hasattr(fc.args, "items") else fc.args)
-                content.append(LLMToolUseBlock(name=fc.name, input=args, id=f"gemini_{fc.name}"))
+                # thought_signature lives on the Part, not on FunctionCall
+                ts = getattr(part, "thought_signature", None) or getattr(fc, "thought_signature", None)
+                content.append(LLMToolUseBlock(name=fc.name, input=args, id=f"gemini_{fc.name}", thought_signature=ts or None))
                 stop_reason = "tool_use"
             elif getattr(part, "text", None):
                 content.append(LLMTextBlock(text=part.text))
@@ -456,14 +463,178 @@ class GeminiLLMClient:
         )
 
 
+# ── Ollama backend (MedGemma and other self-hosted models) ────────────────────
+
+
+class OllamaLLMClient:
+    """
+    LLM client backed by a self-hosted Ollama instance (e.g. MedGemma).
+    Uses /api/chat for multi-turn messages with optional tool calling.
+    Falls back to JSON extraction from plain text when tool_calls are absent.
+    """
+
+    def __init__(self, base_url: str, api_key: str, model: str):
+        self._base_url = base_url.rstrip("/")
+        self._api_key  = api_key
+        self.model     = model
+
+    def transcribe_page(
+        self, image_bytes: bytes, page_num: int, total_pages: int
+    ) -> tuple[str, LLMUsage]:
+        import base64
+        import httpx
+
+        b64    = base64.b64encode(image_bytes).decode()
+        prompt = _TRANSCRIBE_PROMPT.format(page_num=page_num, total_pages=total_pages)
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [b64],
+                }
+            ],
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        resp = httpx.post(f"{self._base_url}/api/chat", json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        data   = resp.json()
+        text   = data.get("message", {}).get("content", "")
+        in_tok = data.get("prompt_eval_count", 0) or 0
+        out_tok = data.get("eval_count", 0) or 0
+        return text, LLMUsage(in_tok, out_tok)
+
+    @staticmethod
+    def _tool_schema_prompt(tools: list[dict]) -> str:
+        """
+        Render tools as a prompt instruction block so models that don't support
+        native function-calling can still return structured JSON.
+        """
+        import json as _json
+        lines = [
+            "You MUST respond with a single JSON object and nothing else — no prose, no markdown fences.",
+            "The JSON must conform to one of the following schemas:",
+        ]
+        for t in tools:
+            schema_str = _json.dumps(t.get("input_schema", {}), indent=2)
+            lines.append(f'\nFunction "{t["name"]}": {t.get("description", "")}\nSchema:\n{schema_str}')
+        lines.append("\nRespond with ONLY the JSON object. Do not include the function name wrapper.")
+        return "\n".join(lines)
+
+    def create_message(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system: str = "",
+        max_tokens: int = 4000,
+        force_tool: bool = True,
+        thinking_budget: int | None = None,   # not supported — ignored
+        temperature: float | None = None,
+        _retries: int = 2,
+    ) -> LLMResponse:
+        import json as _json
+        import re as _re
+        import httpx
+
+        # MedGemma / Ollama does not support native tool-calling — inject the
+        # schema as a prompt instruction and parse JSON from the text response.
+        effective_system = system
+        if tools:
+            schema_block = self._tool_schema_prompt(tools)
+            effective_system = (system + "\n\n" + schema_block).strip() if system else schema_block
+
+        # Build message list (no tools in payload)
+        ollama_messages: list[dict] = []
+        if effective_system:
+            ollama_messages.append({"role": "system", "content": effective_system})
+        for msg in messages:
+            content = msg["content"]
+            if isinstance(content, list):
+                text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+                content = "\n".join(text_parts)
+            ollama_messages.append({"role": msg["role"], "content": content})
+
+        payload: dict = {
+            "model": self.model,
+            "messages": ollama_messages,
+            "stream": False,
+        }
+        options: dict = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens:
+            options["num_predict"] = max_tokens
+        if options:
+            payload["options"] = options
+
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+
+        raw_data: dict = {}
+        for attempt in range(1, _retries + 1):
+            try:
+                resp = httpx.post(
+                    f"{self._base_url}/api/chat",
+                    json=payload,
+                    headers=headers,
+                    timeout=180,
+                )
+                resp.raise_for_status()
+                raw_data = resp.json()
+                break
+            except Exception as exc:
+                log.warning("Ollama attempt %d/%d failed: %s", attempt, _retries, exc)
+                if attempt == _retries:
+                    raise
+
+        message   = raw_data.get("message", {})
+        in_tok    = raw_data.get("prompt_eval_count", 0) or 0
+        out_tok   = raw_data.get("eval_count", 0) or 0
+        content_blocks: list[Any] = []
+        stop_reason = "end_turn"
+
+        text = message.get("content", "")
+        if text and tools and force_tool:
+            # Strip markdown fences if present, then find the outermost JSON object
+            clean = _re.sub(r"```(?:json)?|```", "", text).strip()
+            m = _re.search(r"(\{.*\})", clean, _re.DOTALL)
+            if m:
+                try:
+                    parsed = _json.loads(m.group(1))
+                    tool_name = tools[0]["name"] if tools else "extracted"
+                    content_blocks.append(LLMToolUseBlock(name=tool_name, input=parsed))
+                    stop_reason = "tool_use"
+                    log.info("Ollama: extracted JSON for tool '%s' from text response", tool_name)
+                except _json.JSONDecodeError as exc:
+                    log.warning("Ollama: JSON parse failed (%s) — returning raw text", exc)
+                    content_blocks.append(LLMTextBlock(text=text))
+            else:
+                log.warning("Ollama: no JSON object found in response — returning raw text")
+                content_blocks.append(LLMTextBlock(text=text))
+        elif text:
+            content_blocks.append(LLMTextBlock(text=text))
+
+        return LLMResponse(
+            stop_reason=stop_reason,
+            content=content_blocks,
+            usage=LLMUsage(in_tok, out_tok),
+        )
+
+
 # ── Factory ──────────────────────────────────────────────────────────────────
 
 
-def get_llm_client(model: str | None = None) -> AnthropicLLMClient | GeminiLLMClient:
+def get_llm_client(model: str | None = None) -> "AnthropicLLMClient | GeminiLLMClient | OllamaLLMClient":
     """Return the right client. Uses MODEL env var unless overridden by `model`."""
-    from ..config import MODEL, ANTHROPIC_API_KEY, GOOGLE_API_KEY
+    from ..config import MODEL, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OLLAMA_API_KEY, MEDGEMMA_URL
 
     resolved = model or MODEL
+
+    if resolved.startswith("medgemma") or "/" not in resolved and resolved.startswith("ollama"):
+        log.debug("Using Ollama/MedGemma client  model=%s", resolved)
+        return OllamaLLMClient(base_url=MEDGEMMA_URL, api_key=OLLAMA_API_KEY, model=resolved)
+
     if resolved.startswith("gemini"):
         if not GOOGLE_API_KEY:
             raise RuntimeError("MODEL is a Gemini model but GOOGLE_API_KEY is not set in .env")

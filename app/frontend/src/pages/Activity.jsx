@@ -6,7 +6,7 @@ import {
   getWikiActivity, getWikiFile,
   getWikiGaps, resolveAll, resolveBatchStatus, deleteGap, updateGap, createGap, resolveJobStatus,
   getWikiContamination, runDefrag, runMigrateScope, runScanContamination,
-  markFalsePositive, runReconcileGaps,
+  markFalsePositive, runReconcileGaps, verifyGaps,
 } from '../api'
 import { useAppState } from '../AppStateContext'
 import ResolveModal from '../components/ResolveModal'
@@ -1042,6 +1042,160 @@ function ContaminationPanel({ activeKB, onActivityChanged }) {
   )
 }
 
+function VerifyPanel({ activeKB }) {
+  const [results, setResults]     = useState([])
+  const [loading, setLoading]     = useState(false)
+  const [verifying, setVerifying] = useState(null)   // gap_stem being verified, or 'all'
+  const [error, setError]         = useState(null)
+
+  const runVerify = async (gapStem) => {
+    setVerifying(gapStem || 'all')
+    setError(null)
+    try {
+      const data = await verifyGaps(gapStem || '', activeKB)
+      if (gapStem) {
+        // Merge single result back into the list
+        setResults(prev => {
+          const updated = prev.filter(r => r.gap_stem !== gapStem)
+          return [...(data.results || []), ...updated].sort((a, b) =>
+            a.gap_title.localeCompare(b.gap_title))
+        })
+      } else {
+        setResults(data.results || [])
+      }
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setVerifying(null)
+    }
+  }
+
+  // Reset results when KB changes
+  useEffect(() => { setResults([]) }, [activeKB])
+
+  const totalQueries   = results.reduce((s, r) => s + (r.queries?.length ?? 0), 0)
+  const verifiedCount  = results.reduce((s, r) => s + (r.queries?.filter(q => q.verified).length ?? 0), 0)
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      {/* Header */}
+      <div className="shrink-0 px-6 py-4 border-b border-border">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-white">Gap Closure Verification</p>
+            <p className="text-xs text-muted mt-0.5">
+              Check whether resolved gaps are now answerable by the vector store
+            </p>
+          </div>
+          <button
+            onClick={() => runVerify(null)}
+            disabled={verifying !== null}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-accent/20 text-accent hover:bg-accent/30 disabled:opacity-50 transition-colors"
+          >
+            {verifying === 'all' ? 'Verifying…' : 'Verify All'}
+          </button>
+        </div>
+        {totalQueries > 0 && (
+          <p className="text-xs font-mono text-muted mt-2">
+            {verifiedCount}/{totalQueries} queries verified across {results.length} gap{results.length !== 1 ? 's' : ''}
+          </p>
+        )}
+        {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+        {loading && <p className="text-sm text-muted">Loading…</p>}
+
+        {!loading && results.length === 0 && (
+          <div className="py-16 text-center">
+            <p className="text-muted text-sm">No results yet.</p>
+            <p className="text-muted text-xs mt-1">Click "Verify All" to check all gaps, or verify individual gaps below after loading them.</p>
+          </div>
+        )}
+
+        {results.map(gap => {
+          const gapVerified   = gap.queries?.filter(q => q.verified).length ?? 0
+          const gapTotal      = gap.queries?.length ?? 0
+          const allOk         = gapTotal > 0 && gapVerified === gapTotal
+          const noneOk        = gapTotal > 0 && gapVerified === 0
+          const isRunning     = verifying === gap.gap_stem
+
+          return (
+            <div
+              key={gap.gap_stem}
+              className={`rounded-xl border p-4 space-y-2 transition-colors ${
+                allOk  ? 'border-emerald-800/60 bg-emerald-950/20' :
+                noneOk ? 'border-red-800/60 bg-red-950/20' :
+                         'border-border bg-surface'
+              }`}
+            >
+              {/* Gap header row */}
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-white truncate">{gap.gap_title}</p>
+                  <p className="text-xs text-muted font-mono truncate">{gap.referenced_page || gap.gap_file}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {gapTotal > 0 && (
+                    <span className={`text-xs font-mono px-2 py-0.5 rounded-full ${
+                      allOk  ? 'bg-emerald-900/50 text-emerald-400' :
+                      noneOk ? 'bg-red-900/50 text-red-400' :
+                               'bg-yellow-900/50 text-yellow-400'
+                    }`}>
+                      {gapVerified}/{gapTotal}
+                    </span>
+                  )}
+                  {!gap.page_exists && (
+                    <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">no page</span>
+                  )}
+                  {gap.has_pending && (
+                    <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-yellow-900/40 text-yellow-500">pending</span>
+                  )}
+                  <button
+                    onClick={() => runVerify(gap.gap_stem)}
+                    disabled={isRunning}
+                    className="text-xs text-accent hover:text-white disabled:opacity-50 transition-colors px-2 py-0.5 rounded border border-accent/30 hover:border-accent"
+                  >
+                    {isRunning ? '…' : 'Verify'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Query results */}
+              {gap.queries?.length > 0 && (
+                <div className="space-y-1 pl-1">
+                  {gap.queries.map((q, i) => (
+                    <div key={i} className="flex items-start gap-2 text-xs">
+                      <span className={`shrink-0 mt-0.5 ${q.verified ? (q.content_ok !== false ? 'text-emerald-400' : 'text-yellow-400') : 'text-red-400'}`}>
+                        {q.verified ? (q.content_ok !== false ? '✓' : '~') : '⚠'}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-muted leading-snug truncate" title={q.query}>{q.query}</p>
+                        {q.verified ? (
+                          <p className="text-zinc-500 font-mono">
+                            {q.section} · score {q.score}
+                          </p>
+                        ) : (
+                          <p className="text-zinc-600 font-mono">
+                            best: {q.best_match ? q.best_match.split('/').pop() : '—'} · {q.score}
+                            {q.error && <span className="text-red-500 ml-1">{q.error}</span>}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+
 export default function Activity() {
   const { activeKB } = useAppState()
   const [events, setEvents] = useState([])
@@ -1050,7 +1204,7 @@ export default function Activity() {
   const [search, setSearch] = useState('')
   const [dateFilter, setDateFilter] = useState(() => new Date().toISOString().slice(0, 10))
   const [selectedEvent, setSelectedEvent] = useState(null)
-  const [rightTab, setRightTab] = useState('gaps')  // 'gaps' | 'contamination'
+  const [rightTab, setRightTab] = useState('gaps')  // 'gaps' | 'contamination' | 'verify'
 
   const load = useCallback(() => {
     setLoading(true)
@@ -1181,7 +1335,7 @@ export default function Activity() {
           <>
             {/* Tab bar */}
             <div className="shrink-0 flex border-b border-border">
-              {[['gaps', 'Knowledge Gaps'], ['contamination', 'Scope Contamination']].map(([id, label]) => (
+              {[['gaps', 'Knowledge Gaps'], ['contamination', 'Scope Contamination'], ['verify', 'Gap Verify']].map(([id, label]) => (
                 <button
                   key={id}
                   onClick={() => setRightTab(id)}
@@ -1192,6 +1346,7 @@ export default function Activity() {
                   }`}
                 >
                   {id === 'contamination' && <span className="mr-1 text-orange-400">⚠</span>}
+                  {id === 'verify' && <span className="mr-1 text-emerald-400">✓</span>}
                   {label}
                 </button>
               ))}
@@ -1199,7 +1354,9 @@ export default function Activity() {
             <div className="flex-1 min-h-0 overflow-hidden">
               {rightTab === 'gaps'
                 ? <GapsPanel activeKB={activeKB} onResolved={load} />
-                : <ContaminationPanel activeKB={activeKB} onActivityChanged={load} />
+                : rightTab === 'contamination'
+                ? <ContaminationPanel activeKB={activeKB} onActivityChanged={load} />
+                : <VerifyPanel activeKB={activeKB} />
               }
             </div>
           </>

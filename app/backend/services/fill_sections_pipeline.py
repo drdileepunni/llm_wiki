@@ -13,6 +13,7 @@ No gap detection pass. No new gap files. No spreading to other pages.
 """
 
 import logging
+import re
 from datetime import date
 from pathlib import Path
 
@@ -162,6 +163,80 @@ FILL_TOOL = {
         "required": ["content", "sections_filled"],
     },
 }
+
+VERIFY_SCORE_THRESHOLD = 0.70  # minimum cosine similarity to count as "found"
+
+
+def _verify_gap_closure(
+    target_page_path: str,
+    new_content: str,
+    gap_sections: list[str],
+    missing_values: list[str] | None,
+    wiki_dir: "Path",
+) -> list[dict]:
+    """
+    Post-fill verification: run a vector search for each gap query and check
+    whether the freshly-written target page surfaces in the results.
+
+    Uses missing_values as queries when present (more specific), else gap_sections.
+    Each result: {"query", "verified", "score", "section"} — no extra LLM call.
+    """
+    queries = missing_values if missing_values else gap_sections
+    if not queries:
+        return []
+
+    page_rel = "/".join(Path(target_page_path).parts[-2:])
+    results: list[dict] = []
+
+    for query in queries:
+        try:
+            hits = vs_mod.search_sections(query, wiki_dir, top_k=5)
+        except Exception as exc:
+            log.warning("Verification search failed for %r: %s", query, exc)
+            results.append({"query": query, "verified": False, "error": str(exc)})
+            continue
+
+        matched = next((h for h in hits if h["path"] == page_rel), None)
+        if matched and matched["score"] >= VERIFY_SCORE_THRESHOLD:
+            section_body = vs_mod.extract_section(new_content, matched["section"])
+            query_tokens = {t.lower() for t in re.findall(r'\b\w{3,}\b', query)}
+            body_tokens  = {t.lower() for t in re.findall(r'\b\w{3,}\b', section_body)}
+            overlap      = query_tokens & body_tokens
+            content_ok   = len(overlap) >= max(1, len(query_tokens) // 3)
+            results.append({
+                "query":    query,
+                "verified": True,
+                "score":    round(matched["score"], 3),
+                "section":  matched["section"],
+                "content_ok": content_ok,
+            })
+            status = "✓ VERIFIED" if content_ok else "✓ FOUND (content tokens uncertain)"
+            log.info(
+                "  %s: %r → %s#%s (score=%.2f)",
+                status, query[:60], page_rel, matched["section"], matched["score"],
+            )
+        else:
+            best       = hits[0] if hits else None
+            best_score = best["score"] if best else 0.0
+            best_path  = best["path"] if best else "none"
+            results.append({
+                "query":      query,
+                "verified":   False,
+                "score":      round(best_score, 3),
+                "best_match": best_path,
+            })
+            log.warning(
+                "  ⚠ UNVERIFIED: %r — target not in top-5 (best=%s score=%.2f)",
+                query[:60], best_path, best_score,
+            )
+
+    verified_count = sum(1 for r in results if r.get("verified"))
+    log.info(
+        "Gap closure verification: %d/%d queries verified (threshold=%.2f)",
+        verified_count, len(results), VERIFY_SCORE_THRESHOLD,
+    )
+    return results
+
 
 _SYSTEM = f"""You are the maintainer of a medical/scientific knowledge base wiki.
 You write accurate, de-identified, well-structured markdown wiki pages.
@@ -374,22 +449,25 @@ Instructions:
     new_content = _dedup_sections(new_content)
     log.info("Sections filled: %s  content_length=%d", sections_filled, len(new_content))
 
-    # ── Quality gate: reject near-empty fills ─────────────────────────────────
-    # Strip frontmatter to measure actual prose content added.
-    # A real section needs at least ~200 chars of prose — anything less means the
-    # source article didn't actually cover this topic and the model had nothing to write.
-    MIN_PROSE_CHARS = 200
-    prose = new_content
-    if prose.startswith("---"):
-        end = prose.find("---", 3)
-        prose = prose[end + 3:] if end != -1 else prose
-    net_added = len(prose.strip()) - len(existing_content.strip())
+    # ── Quality gate: reject fills that shrink the page ───────────────────────
+    # Strip frontmatter from both sides so the comparison is fair.
+    MIN_PROSE_CHARS = 0
+
+    def _strip_frontmatter(text: str) -> str:
+        if text.startswith("---"):
+            end = text.find("---", 3)
+            return text[end + 3:] if end != -1 else text
+        return text
+
+    prose = _strip_frontmatter(new_content)
+    existing_prose = _strip_frontmatter(existing_content)
+    net_added = len(prose.strip()) - len(existing_prose.strip())
 
     if net_added < MIN_PROSE_CHARS and not skip_quality_gate:
         log.warning(
             "Fill rejected — net prose added (%d chars) below threshold (%d). "
-            "existing_content=%d chars  new_content=%d chars  sections_filled=%s",
-            net_added, MIN_PROSE_CHARS, len(existing_content), len(new_content), sections_filled,
+            "existing_prose=%d chars  new_prose=%d chars  sections_filled=%s",
+            net_added, MIN_PROSE_CHARS, len(existing_prose), len(prose), sections_filled,
         )
         # Even though the fill was rejected, check if any gap sections are
         # already present in the EXISTING page and close those now.
@@ -483,6 +561,11 @@ Instructions:
         log.warning("Vector upsert skipped for %s: %s", target_page_path, exc)
     log.info("✓ Written: %s  (+%d/-%d)", target_page_path, diff["added"], diff["removed"])
 
+    # ── Post-fill verification ────────────────────────────────────────────────
+    verification = _verify_gap_closure(
+        target_page_path, new_content, gap_sections, missing_values, kb.wiki_dir,
+    )
+
     # Create stub pages for any [[links]] that don't exist yet
     from ..services.ingest_pipeline import _create_missing_stubs
     _create_missing_stubs(new_content, kb)
@@ -531,4 +614,5 @@ Instructions:
         "cost_usd":          cost,
         "model":             MODEL,
         "section_quality":   scores,
+        "verification":      verification,
     }

@@ -24,28 +24,51 @@ def _list_pending_gaps(kb: KBConfig) -> list[dict]:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         referenced_page = ""
+        times_opened = 0
         for line in text.splitlines():
             if line.startswith("referenced_page:"):
                 referenced_page = line.split(":", 1)[1].strip()
+            elif line.startswith("times_opened:"):
+                try:
+                    times_opened = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
         missing: list[str] = []
         in_missing = False
+        resolution_question = ""
+        in_rq = False
+        missing_values: list[str] = []
+        in_mv = False
         for line in text.splitlines():
             if line.strip() == "## Missing Sections":
-                in_missing = True
+                in_missing = True; in_rq = False; in_mv = False
                 continue
-            if in_missing:
-                if line.startswith("##"):
-                    break
-                if line.startswith("- "):
-                    item = line[2:].strip()
-                    if not item.startswith("RESOLVED:"):
-                        missing.append(item)
+            if line.strip() == "## Resolution Question":
+                in_rq = True; in_missing = False; in_mv = False
+                continue
+            if line.strip() == "## Specific Missing Values":
+                in_mv = True; in_missing = False; in_rq = False
+                continue
+            if line.startswith("##"):
+                in_missing = in_rq = in_mv = False
+                continue
+            if in_missing and line.startswith("- "):
+                item = line[2:].strip()
+                if not item.startswith("RESOLVED:"):
+                    missing.append(item)
+            elif in_rq and line.strip() and not resolution_question:
+                resolution_question = line.strip()
+            elif in_mv and line.startswith("- "):
+                missing_values.append(line[2:].strip())
         if missing:
             results.append({
                 "file": f"wiki/gaps/{f.name}",
                 "title": f.stem.replace("-", " ").title(),
                 "referenced_page": referenced_page,
                 "missing_sections": missing,
+                "times_opened": times_opened,
+                "resolution_question": resolution_question,
+                "missing_values": missing_values,
             })
     return results
 
@@ -74,7 +97,12 @@ def resolve_all_gaps(kb: KBConfig, max_results: int = 3, progress_callback=None)
         gap_cost = 0.0
 
         try:
-            articles, search_cost = search_for_gap(gap["title"], gap["missing_sections"], max_results)
+            articles, search_cost = search_for_gap(
+                gap["title"], gap["missing_sections"], max_results,
+                times_opened=gap["times_opened"],
+                resolution_question=gap.get("resolution_question", ""),
+                missing_values=gap.get("missing_values") or None,
+            )
             gap_cost += search_cost
             total_cost += search_cost
         except Exception as exc:

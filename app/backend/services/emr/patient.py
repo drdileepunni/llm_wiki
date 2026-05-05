@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
 from typing import Any
 
 from .db import get_db
+
+VIVA_DUMMY_CPMRN = "VIVA_DUMMY_001"
 
 
 def _find_patient(cpmrn: str) -> dict | None:
@@ -217,3 +221,179 @@ def get_active_orders(cpmrn: str) -> dict[str, Any]:
             "bloods": active.get("bloods", []),
         },
     }
+
+
+# ── Viva dummy patient ─────────────────────────────────────────────────────────
+
+def _empty_active_orders() -> dict:
+    return {"medications": [], "labs": [], "procedures": [], "diets": [], "vents": [], "bloods": []}
+
+
+def upsert_dummy_patient(details: dict) -> dict:
+    """Create or replace the viva dummy patient in MongoDB."""
+    db = get_db()
+    docs = []
+    if details.get("creatinine") or details.get("egfr"):
+        attrs: dict = {}
+        if details.get("creatinine"):
+            attrs["Creatinine"] = {
+                "name": "Creatinine",
+                "value": details["creatinine"],
+                "errorRange": {"min": 60, "max": 120},
+            }
+        if details.get("egfr"):
+            attrs["eGFR"] = {
+                "name": "eGFR",
+                "value": details["egfr"],
+                "errorRange": {"min": 60, "max": 120},
+            }
+        docs = [{"category": "labs", "name": "Renal Function", "reportedAt": datetime.utcnow().isoformat(), "attributes": attrs}]
+
+    patient_doc = {
+        "CPMRN": VIVA_DUMMY_CPMRN,
+        "name": details.get("name", "Viva Patient"),
+        "age": {"year": details.get("age_years", 50), "month": 0},
+        "gender": details.get("gender", "male"),
+        "patientType": "adult",
+        "weightKg": details.get("weight_kg"),
+        "heightCm": details.get("height_cm"),
+        "allergies": details.get("allergies", []),
+        "chronic": details.get("diagnoses", []),
+        "hospitalName": "Viva Training",
+        "unitName": "ICU",
+        "isCurrentlyAdmitted": True,
+        "orders": {"active": _empty_active_orders()},
+        "documents": docs,
+        "isIntubated": {"value": False},
+        "isNIV": {"value": False},
+        "isHFNC": {"value": False},
+    }
+    db.patients.replace_one({"CPMRN": VIVA_DUMMY_CPMRN}, patient_doc, upsert=True)
+    return get_dummy_patient()
+
+
+def get_dummy_patient() -> dict | None:
+    """Return the dummy patient in a frontend-friendly shape, or None."""
+    db = get_db()
+    p = db.patients.find_one({"CPMRN": VIVA_DUMMY_CPMRN})
+    if not p:
+        return None
+    age_obj = p.get("age") or {}
+    labs: dict = {}
+    for doc in p.get("documents", []):
+        if doc.get("category") == "labs":
+            for attr_key, attr_val in (doc.get("attributes") or {}).items():
+                if isinstance(attr_val, dict):
+                    labs[attr_val.get("name", attr_key)] = attr_val.get("value")
+    return {
+        "cpmrn": VIVA_DUMMY_CPMRN,
+        "name": p.get("name"),
+        "age_years": age_obj.get("year"),
+        "gender": p.get("gender"),
+        "weight_kg": p.get("weightKg"),
+        "height_cm": p.get("heightCm"),
+        "allergies": p.get("allergies", []),
+        "diagnoses": p.get("chronic", []),
+        "creatinine": labs.get("Creatinine"),
+        "egfr": labs.get("eGFR"),
+    }
+
+
+def place_viva_order(order: dict) -> dict:
+    """
+    Place, edit, or stop a single order on the dummy patient.
+
+    order fields:
+      action          — "new" | "edit" | "stop"
+      order_type      — "med" | "lab" | "procedure" | "comm" | "vents" | "diet" | "blood"
+      orderable_name  — matched name from catalog
+      order_details   — {quantity, unit, route, form, frequency, instructions}
+      existing_order_no — required for action="edit"|"stop"
+      recommendation  — original text (used as fallback name)
+    """
+    db = get_db()
+    p = db.patients.find_one({"CPMRN": VIVA_DUMMY_CPMRN})
+    if not p:
+        return {"error": "Dummy patient not found — create it first"}
+
+    active = dict((p.get("orders") or {}).get("active") or _empty_active_orders())
+    for k in ("medications", "labs", "procedures", "diets", "vents", "bloods"):
+        active.setdefault(k, [])
+
+    action = order.get("action", "new")
+    order_type = (order.get("order_type") or "med").lower()
+    details = order.get("order_details") or {}
+    existing_no = order.get("existing_order_no")
+    order_no = f"ORD{uuid.uuid4().hex[:6].upper()}"
+
+    if order_type in ("med", "medication"):
+        med_doc = {
+            "name": order.get("orderable_name", order.get("recommendation", "")),
+            "quantity": details.get("quantity", ""),
+            "unit": details.get("unit", ""),
+            "route": details.get("route", ""),
+            "form": details.get("form", ""),
+            "frequency": details.get("frequency", ""),
+            "instructions": details.get("instructions", ""),
+            "orderNo": order_no,
+            "startTime": datetime.utcnow().isoformat(),
+        }
+        if action == "new":
+            active["medications"].append(med_doc)
+        elif action == "edit" and existing_no:
+            active["medications"] = [
+                med_doc if m.get("orderNo") == existing_no else m
+                for m in active["medications"]
+            ]
+            order_no = existing_no  # keep same number for edits
+        elif action == "stop" and existing_no:
+            active["medications"] = [m for m in active["medications"] if m.get("orderNo") != existing_no]
+
+    elif order_type == "lab":
+        lab_doc = {
+            "investigation": order.get("orderable_name", ""),
+            "discipline": details.get("discipline", ""),
+            "frequency": details.get("frequency", "once"),
+            "orderNo": order_no,
+        }
+        if action == "new":
+            active["labs"].append(lab_doc)
+        elif action == "stop" and existing_no:
+            active["labs"] = [l for l in active["labs"] if l.get("orderNo") != existing_no]
+
+    elif order_type in ("procedure", "comm", "monitoring"):
+        proc_doc = {
+            "pType": order_type,
+            "name": order.get("orderable_name") or order.get("recommendation", ""),
+            "site": details.get("site", ""),
+            "instructions": details.get("instructions", ""),
+            "orderNo": order_no,
+        }
+        if action == "new":
+            active["procedures"].append(proc_doc)
+        elif action == "stop" and existing_no:
+            active["procedures"] = [pr for pr in active["procedures"] if pr.get("orderNo") != existing_no]
+
+    elif order_type == "vents":
+        vent_doc = {
+            "name": order.get("orderable_name", "Ventilator"),
+            "instructions": details.get("instructions", ""),
+            "orderNo": order_no,
+            "startTime": datetime.utcnow().isoformat(),
+        }
+        if action == "new":
+            active["vents"].append(vent_doc)
+        elif action == "stop" and existing_no:
+            active["vents"] = [v for v in active["vents"] if v.get("orderNo") != existing_no]
+
+    db.patients.update_one({"CPMRN": VIVA_DUMMY_CPMRN}, {"$set": {"orders.active": active}})
+    return {"order_no": order_no, "action": action, "placed": True}
+
+
+def reset_dummy_patient_orders() -> None:
+    """Clear all active orders from the dummy patient (called at session start)."""
+    db = get_db()
+    db.patients.update_one(
+        {"CPMRN": VIVA_DUMMY_CPMRN},
+        {"$set": {"orders.active": _empty_active_orders()}},
+    )

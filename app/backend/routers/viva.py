@@ -1,11 +1,14 @@
 """
 Viva (teacher-student loop) endpoints.
 
-POST /api/viva/start              — start new session (trajectory + first scenario)
-POST /api/viva/{session_id}/turn  — run one full turn (student → gaps → teacher)
-GET  /api/viva/                   — list sessions
-GET  /api/viva/{session_id}       — get session state
-DELETE /api/viva/{session_id}     — delete session
+POST /api/viva/patient              — create / upsert dummy patient
+GET  /api/viva/patient              — get dummy patient
+POST /api/viva/patient/place-order  — place / edit / stop one order on dummy patient
+POST /api/viva/start                — start new session (trajectory + first scenario)
+POST /api/viva/{session_id}/turn    — run one full turn (student → order-gen → gaps → teacher)
+GET  /api/viva/                     — list sessions
+GET  /api/viva/{session_id}         — get session state
+DELETE /api/viva/{session_id}       — delete session
 """
 
 import asyncio
@@ -31,6 +34,15 @@ from ..services.viva_session import (
     load_session,
     save_session,
 )
+from ..services.emr import (
+    get_active_orders,
+    get_dummy_patient,
+    place_viva_order,
+    reset_dummy_patient_orders,
+    upsert_dummy_patient,
+    VIVA_DUMMY_CPMRN,
+)
+from ..services.order_gen_pipeline import run_order_generation
 
 log = logging.getLogger("wiki.viva")
 
@@ -38,6 +50,8 @@ router = APIRouter(prefix="/api/viva", tags=["viva"])
 
 _VIVA_GAP_MAX_RESULTS = 1  # keep turns fast; LLM escalation kicks in from turn 3+
 
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
 
 class StartRequest(BaseModel):
     topic: str
@@ -49,6 +63,61 @@ class TurnRequest(BaseModel):
     model: str | None = None
 
 
+class DummyPatientRequest(BaseModel):
+    name: str = "Viva Patient"
+    age_years: int = 50
+    gender: str = "male"
+    weight_kg: float | None = None
+    height_cm: float | None = None
+    creatinine: float | None = None
+    egfr: float | None = None
+    allergies: list[str] = []
+    diagnoses: list[str] = []
+
+
+class PlaceOrderRequest(BaseModel):
+    action: str = "new"          # new | edit | stop
+    order_type: str = "med"      # med | lab | procedure | comm | vents | diet | blood
+    orderable_name: str | None = None
+    order_details: dict | None = None
+    existing_order_no: str | None = None
+    from_dose: str | None = None
+    to_dose: str | None = None
+    recommendation: str | None = None
+    dose_calculation: str | None = None
+    confidence: str | None = None
+    notes: str | None = None
+
+
+# ── Dummy patient endpoints ────────────────────────────────────────────────────
+# NOTE: these must be registered BEFORE /{session_id} routes so FastAPI
+# matches /patient as a literal segment, not as a session_id parameter.
+
+@router.get("/patient")
+def get_viva_patient():
+    """Return the current dummy patient, or null if not created yet."""
+    patient = get_dummy_patient()
+    return {"patient": patient}
+
+
+@router.post("/patient")
+def create_viva_patient(req: DummyPatientRequest):
+    """Create or replace the dummy patient. Clears all active orders."""
+    patient = upsert_dummy_patient(req.model_dump())
+    return {"patient": patient}
+
+
+@router.post("/patient/place-order")
+def place_order(req: PlaceOrderRequest):
+    """Place, edit, or stop a single order on the dummy patient chart."""
+    result = place_viva_order(req.model_dump())
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+# ── Session endpoints ──────────────────────────────────────────────────────────
+
 @router.post("/start")
 async def start_viva(req: StartRequest, kb: KBConfig = Depends(resolve_kb)):
     """Generate trajectory + first scenario and persist a new session."""
@@ -59,6 +128,12 @@ async def start_viva(req: StartRequest, kb: KBConfig = Depends(resolve_kb)):
     first_scenario = await asyncio.to_thread(
         generate_first_scenario, req.topic, trajectory, model
     )
+
+    # Reset dummy patient orders at the start of every new session
+    try:
+        reset_dummy_patient_orders()
+    except Exception as exc:
+        log.warning("Could not reset dummy patient orders: %s", exc)
 
     session = create_session(
         session_id=session_id,
@@ -92,7 +167,6 @@ async def fork_viva(session_id: str, kb: KBConfig = Depends(resolve_kb)):
     scenarios = [t["scenario"] for t in turns]
     new_id = f"viva_{uuid.uuid4().hex[:8]}"
 
-    # First scenario goes into next_scenario; the rest queue up in replay_queue
     session = {
         "session_id": new_id,
         "created_at": __import__("datetime").datetime.utcnow().isoformat(),
@@ -111,11 +185,7 @@ async def fork_viva(session_id: str, kb: KBConfig = Depends(resolve_kb)):
         "total_cost_usd": 0.0,
     }
 
-    from ..services.viva_session import save_session
     save_session(session, kb)
-
-    # Register in listing
-    from ..services.viva_session import list_sessions  # noqa: ensure dir exists
     return {"session": session}
 
 
@@ -127,9 +197,10 @@ async def run_turn(
 ):
     """
     Run one complete viva turn:
-      1. Student assessment (wiki-grounded)
-      2. Gap resolution (blocking)
-      3. Teacher generates next scenario or signals completion
+      1. Student assessment (wiki-grounded CDS)
+      2. Order generation from immediate_next_steps (with active orders context)
+      3. Gap resolution (blocking)
+      4. Teacher generates next scenario or signals completion
     """
     try:
         session = load_session(session_id, kb)
@@ -164,8 +235,81 @@ async def run_turn(
     student_snap = snap_result["snapshots"][0]
     student_answer_text = student_snap.get("agent_answer", "")
     turn_cost = student_snap.get("cost_usd", 0.0)
+    chat_run_id = student_snap.get("chat_run_id")
 
-    # ── 2. Gap resolution ─────────────────────────────────────────────────────
+    # ── 2. Order generation ───────────────────────────────────────────────────
+    log.info("Viva %s turn %d: generating orders", session_id, turn_num)
+    immediate_steps: list[str] = student_snap.get("immediate_next_steps", [])
+    monitoring_steps: list[str] = student_snap.get("monitoring_followup", [])
+    all_steps = immediate_steps + monitoring_steps
+    generated_orders: list[dict] = []
+    order_run_id: str | None = None
+    order_cost = 0.0
+
+    if all_steps:
+        try:
+            active_orders_resp = get_active_orders(VIVA_DUMMY_CPMRN)
+            active_orders = active_orders_resp.get("active_orders") if not active_orders_resp.get("error") else None
+        except Exception as exc:
+            log.warning("Could not load active orders for viva turn: %s", exc)
+            active_orders = None
+
+        try:
+            order_result = await asyncio.to_thread(
+                run_order_generation,
+                all_steps,
+                VIVA_DUMMY_CPMRN,
+                "adult",
+                model,
+                kb,
+                active_orders,
+                chat_run_id,
+            )
+            raw_orders = order_result.get("orders", [])
+            order_run_id = order_result.get("run_id")
+            order_cost = order_result.get("cost_usd", 0.0)
+
+            # Enforce: no catalog match → must be low confidence (goes to instructions card)
+            for order in raw_orders:
+                name = (order.get("orderable_name") or "").strip()
+                if not name or name == "—":
+                    order["orderable_name"] = None
+                    order["confidence"] = "low"
+
+            # Dedup by (order_type, orderable_name) — keep first, merge notes/instructions
+            seen: dict[tuple, int] = {}
+            deduped: list[dict] = []
+            for order in raw_orders:
+                key = (
+                    (order.get("order_type") or "").lower(),
+                    (order.get("orderable_name") or "").lower().strip(),
+                )
+                if key[1] and key in seen:
+                    existing = deduped[seen[key]]
+                    extra_notes = order.get("notes") or ""
+                    extra_instr = (order.get("order_details") or {}).get("instructions") or ""
+                    existing_notes = existing.get("notes") or ""
+                    existing_instr = (existing.get("order_details") or {}).get("instructions") or ""
+                    if extra_notes and extra_notes not in existing_notes:
+                        existing["notes"] = f"{existing_notes}; {extra_notes}".lstrip("; ")
+                    if extra_instr and extra_instr not in existing_instr:
+                        if existing.get("order_details"):
+                            existing["order_details"]["instructions"] = f"{existing_instr}; {extra_instr}".lstrip("; ")
+                else:
+                    seen[key] = len(deduped)
+                    deduped.append(order)
+            generated_orders = deduped
+
+            log.info(
+                "Viva %s turn %d: %d orders generated (%d after dedup)  cost=$%.4f",
+                session_id, turn_num, len(raw_orders), len(generated_orders), order_cost,
+            )
+        except Exception as exc:
+            log.warning("Order generation failed for viva turn %d: %s", turn_num, exc)
+
+    turn_cost += order_cost
+
+    # ── 3. Gap resolution ─────────────────────────────────────────────────────
     log.info("Viva %s turn %d: resolving gaps", session_id, turn_num)
     gaps_before = _count_pending_gaps(kb)
     gap_stats = await asyncio.to_thread(resolve_all_gaps, kb, _VIVA_GAP_MAX_RESULTS)
@@ -176,11 +320,9 @@ async def run_turn(
         session_id, turn_num, gaps_resolved, gap_stats.get("cost_usd", 0),
     )
 
-    # ── 3. Advance case: replay queue OR teacher ──────────────────────────────
+    # ── 4. Advance case: replay queue OR teacher ──────────────────────────────
     replay_queue: list = session.get("replay_queue", [])
     if "replay_queue" in session:
-        # Forked/replay session — serve stored scenarios without calling teacher.
-        # Empty queue means there is no scenario left to serve after this turn → complete.
         if replay_queue:
             log.info("Viva %s turn %d: replay mode, %d scenarios remaining", session_id, turn_num, len(replay_queue))
             next_queued = replay_queue.pop(0)
@@ -205,16 +347,19 @@ async def run_turn(
     turn_record = {
         "turn_num": turn_num,
         "scenario": next_scenario,
+        "chat_run_id": chat_run_id,
+        "order_run_id": order_run_id,
         "student_answer_text": student_answer_text,
         "student_snap": {
-            "immediate_next_steps": student_snap.get("immediate_next_steps", []),
             "clinical_direction":   student_snap.get("clinical_direction", []),
+            "clinical_reasoning":   student_snap.get("clinical_reasoning", []),
             "specific_parameters":  student_snap.get("specific_parameters", []),
             "monitoring_followup":  student_snap.get("monitoring_followup", []),
             "alternative_considerations": student_snap.get("alternative_considerations", []),
             "pages_consulted":      student_snap.get("pages_consulted", []),
             "gap_sections":         student_snap.get("gap_sections", []),
         },
+        "orders": generated_orders,
         "gaps_resolved": gaps_resolved,
         "cost_usd": turn_cost,
     }
@@ -236,6 +381,7 @@ async def run_turn(
     return {
         "turn_num": turn_num,
         "student_answer": student_answer_text,
+        "orders": generated_orders,
         "gaps_resolved": gaps_resolved,
         "complete": complete,
         "outcome": session.get("outcome"),
@@ -243,6 +389,47 @@ async def run_turn(
         "cost_usd": turn_cost,
         "session": session,
     }
+
+
+@router.get("/provenance")
+def get_provenance(order_run_id: str):
+    """
+    Return the order-gen + upstream chat provenance traces for a given order_run_id.
+    Scans the last 14 days of JSONL trace files.
+    """
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td
+    from ..config import TRACES_DIR
+
+    def _find(prefix: str, run_id: str) -> dict | None:
+        for delta in range(14):
+            date_str = (_dt.utcnow() - _td(days=delta)).strftime("%Y-%m-%d")
+            path = TRACES_DIR / f"{prefix}_{date_str}.jsonl"
+            if not path.exists():
+                continue
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                        if rec.get("run_id") == run_id:
+                            return rec
+                    except Exception:
+                        continue
+        return None
+
+    order_trace = _find("order_gen", order_run_id)
+    if not order_trace:
+        raise HTTPException(status_code=404, detail=f"No trace found for run_id {order_run_id!r}")
+
+    chat_trace = None
+    parent_run_id = order_trace.get("parent_run_id")
+    if parent_run_id:
+        chat_trace = _find("chat", parent_run_id)
+
+    return {"order_trace": order_trace, "chat_trace": chat_trace}
 
 
 @router.get("/")

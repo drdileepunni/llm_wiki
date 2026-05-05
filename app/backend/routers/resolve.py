@@ -58,6 +58,10 @@ class ResolveAllRequest(BaseModel):
     max_results: int = 3
 
 
+class VerifyGapsRequest(BaseModel):
+    gap_stem: str = ""   # empty = verify all non-patient gaps
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.delete("/gaps/{gap_stem}")
@@ -356,6 +360,83 @@ _GAP_EXTRACT_TOOL = {
         },
     },
 }
+
+
+@router.post("/verify-gaps")
+async def verify_gaps(req: VerifyGapsRequest, kb: KBConfig = Depends(resolve_kb)):
+    """
+    Verify whether gap queries are now answerable by the vector store.
+    Pass gap_stem to check one gap, or omit to check all non-patient gaps.
+    Returns list of {gap_title, gap_file, referenced_page, queries} per gap.
+    """
+    from ..services.fill_sections_pipeline import _verify_gap_closure
+    gaps_dir = kb.wiki_dir / "gaps"
+    if not gaps_dir.exists():
+        return {"results": []}
+
+    if req.gap_stem:
+        gap_files = [gaps_dir / f"{req.gap_stem}.md"]
+    else:
+        gap_files = sorted(f for f in gaps_dir.glob("*.md") if not f.stem.startswith("patient-"))
+
+    def _run_verify():
+        results = []
+        for gf in gap_files:
+            if not gf.exists():
+                continue
+            text = gf.read_text(encoding="utf-8", errors="replace")
+
+            referenced_page = ""
+            for line in text.splitlines():
+                if line.startswith("referenced_page:"):
+                    referenced_page = line.split(":", 1)[1].strip()
+                    break
+
+            missing: list[str] = []
+            missing_values: list[str] = []
+            resolved: list[str] = []
+            in_missing = in_mv = False
+            for line in text.splitlines():
+                s = line.strip()
+                if s == "## Missing Sections":
+                    in_missing = True; in_mv = False
+                elif s == "## Specific Missing Values":
+                    in_mv = True; in_missing = False
+                elif s.startswith("## "):
+                    in_missing = in_mv = False
+                elif in_missing and line.startswith("- "):
+                    item = line[2:].strip()
+                    if item.startswith("RESOLVED:"):
+                        resolved.append(item[len("RESOLVED:"):].strip())
+                    else:
+                        missing.append(item)
+                elif in_mv and line.startswith("- "):
+                    missing_values.append(line[2:].strip())
+
+            sections = missing or resolved
+            if not sections:
+                continue
+
+            target_path = referenced_page if referenced_page.startswith("wiki/") else f"wiki/{referenced_page}" if referenced_page else f"wiki/entities/{gf.stem}.md"
+            full_path = kb.wiki_root / target_path
+            page_content = full_path.read_text(encoding="utf-8") if full_path.exists() else ""
+
+            queries = _verify_gap_closure(
+                target_path, page_content, sections, missing_values or None, kb.wiki_dir,
+            )
+            results.append({
+                "gap_title": gf.stem.replace("-", " ").title(),
+                "gap_file":  f"wiki/gaps/{gf.name}",
+                "gap_stem":  gf.stem,
+                "referenced_page": referenced_page,
+                "page_exists": full_path.exists(),
+                "has_pending": bool(missing),
+                "queries": queries,
+            })
+        return results
+
+    results = await asyncio.to_thread(_run_verify)
+    return {"results": results}
 
 
 @router.post("/gap-from-query")

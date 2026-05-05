@@ -1,13 +1,15 @@
 import logging
 import json
 import re
+import uuid
 from pathlib import Path
-from datetime import date
-from ..config import MODEL, KBConfig, _default_kb
+from datetime import date, datetime, timezone
+from ..config import MODEL, REASONING_MODEL as _DEFAULT_REASONING_MODEL, TRACES_DIR, KBConfig, _default_kb
 from .token_tracker import log_call
 from .llm_client import get_llm_client
 from .ingest_pipeline import write_gap_files
 from . import vector_store as vs_mod
+from .provenance_logger import write_trace
 
 # ── Retrieval helpers ─────────────────────────────────────────────────────────
 
@@ -225,12 +227,14 @@ def _rewrite_grounded_steps(
                 "missing entity — drug, device, or parameter. Return a JSON array of strings, "
                 "e.g. [\"rapid sequence intubation induction agent dose\", \"mechanical ventilation tidal volume PEEP FiO2\"] "
                 "or [\"furosemide IV bolus dose heart failure\"] for a single marker. "
-                "IMPORTANT: always spell out abbreviations fully — write 'rapid sequence intubation' not 'RSI', "
-                "'non-invasive ventilation' not 'NIV', 'mean arterial pressure' not 'MAP'. "
+                "IMPORTANT: always spell out abbreviations fully AND include the abbreviation alongside — "
+                "write 'positive end-expiratory pressure PEEP setting' not just 'PEEP', "
+                "'rapid sequence intubation RSI' not just 'RSI', "
+                "'fraction of inspired oxygen FiO2' not just 'FiO2'. "
                 "No explanation, JSON only."
             )}],
             tools=[],
-            system="You extract clinical wiki search queries. Spell out all abbreviations fully. Return a JSON array of short phrases, one per distinct missing entity.",
+            system="You extract clinical wiki search queries. Always include both the full term and abbreviation. Return a JSON array of short phrases, one per distinct missing entity.",
             max_tokens=120,
             force_tool=False,
             thinking_budget=0,
@@ -257,11 +261,13 @@ def _rewrite_grounded_steps(
         seen_keys: set[tuple] = set()
         context_blocks: list[str] = []
         any_hit = False
+        missed_queries: list[str] = []
 
         for query in queries:
             hits = vs_mod.search_sections(query, kb.wiki_dir, top_k=3)
             if not hits or hits[0]["score"] < _GAP_COVER_THRESHOLD:
                 log.info("  Step 4: no wiki hit for %r (top=%.2f)", query, hits[0]["score"] if hits else 0)
+                missed_queries.append(query)
                 continue
             hit = hits[0]
             key = (hit["path"], hit.get("section", ""))
@@ -272,12 +278,72 @@ def _rewrite_grounded_steps(
             if not full_path.exists():
                 continue
             content = full_path.read_text(encoding="utf-8")
-            section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else content[:1200]
+            section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else content[:4000]
             if not section_text:
-                section_text = content[:1200]
+                section_text = content[:4000]
             log.info("  Step 4: [%r] → %s#%s (score=%.2f)", query, hit["path"], hit["section"], hit["score"])
-            context_blocks.append(f"### {hit['path']}#{hit.get('section','')}\n{section_text[:1200]}")
+            context_blocks.append(f"### {hit['path']}#{hit.get('section','')}\n{section_text[:4000]}")
             any_hit = True
+
+        # Pass 2: for missed queries, retry with a broader entity-only search using
+        # the top hit from the specific query as the entity anchor. This handles cases
+        # where the specific value query doesn't score well but the parent section does.
+        if missed_queries:
+            broader_resp = llm.create_message(
+                messages=[{"role": "user", "content": (
+                    f"These wiki search phrases failed to find a match in a medical wiki:\n"
+                    + "\n".join(f"- {q}" for q in missed_queries)
+                    + "\n\nFor each failed phrase, produce ONE broader replacement phrase.\n"
+                    "RULES:\n"
+                    "1. The broader phrase must be ENTITY NAME + SECTION NAME only.\n"
+                    "2. Drop the specific parameter or value entirely.\n"
+                    "3. Use the parent drug/device/procedure as the entity.\n"
+                    "Examples:\n"
+                    "  'positive end-expiratory pressure PEEP initial setting' → 'mechanical ventilation ventilator settings'\n"
+                    "  'fosphenytoin IV loading dose' → 'antiepileptics dosing'\n"
+                    "  'rocuronium rapid sequence intubation RSI dose' → 'neuromuscular blocking agents dosing'\n"
+                    "  'norepinephrine starting dose septic shock' → 'vasopressors dosing'\n"
+                    "Return a JSON array with one entry per failed phrase. No explanation, JSON only."
+                )}],
+                tools=[],
+                system="You broaden failed wiki search queries to entity+section level. Return a JSON array of strings.",
+                max_tokens=120,
+                force_tool=False,
+                thinking_budget=0,
+            )
+            total_in  += broader_resp.usage.input_tokens
+            total_out += broader_resp.usage.output_tokens
+            broad_raw = next((b.text for b in broader_resp.content if hasattr(b, "text") and b.text), "").strip()
+            try:
+                broad_queries = _json.loads(broad_raw)
+                if not isinstance(broad_queries, list):
+                    broad_queries = [str(broad_queries)]
+            except Exception:
+                broad_queries = [broad_raw] if broad_raw else []
+
+            for bq in broad_queries:
+                bq = bq.strip()
+                if not bq:
+                    continue
+                hits = vs_mod.search_sections(bq, kb.wiki_dir, top_k=3)
+                if not hits or hits[0]["score"] < _GAP_COVER_THRESHOLD:
+                    log.info("  Step 4: broader query %r also missed (top=%.2f)", bq, hits[0]["score"] if hits else 0)
+                    continue
+                hit = hits[0]
+                key = (hit["path"], hit.get("section", ""))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                full_path = kb.wiki_dir / hit["path"]
+                if not full_path.exists():
+                    continue
+                content = full_path.read_text(encoding="utf-8")
+                section_text = vs_mod.extract_section(content, hit["section"]) if hit["section"] else content[:4000]
+                if not section_text:
+                    section_text = content[:4000]
+                log.info("  Step 4: broader query [%r] → %s#%s (score=%.2f)", bq, hit["path"], hit["section"], hit["score"])
+                context_blocks.append(f"### {hit['path']}#{hit.get('section','')}\n{section_text[:4000]}")
+                any_hit = True
 
         if not any_hit:
             log.info("  Step 4: no wiki hits across %d queries for step %d — marking as gap", len(queries), i)
@@ -291,9 +357,12 @@ def _rewrite_grounded_steps(
                 f"Wiki sections:\n{combined_context}\n\n"
                 f"Clinical step to rewrite:\n{step}\n\n"
                 "Replace EVERY '(value not in wiki — consult local protocol)' placeholder with "
-                "the exact numeric value from the wiki sections above. "
-                "STRICT RULE: only substitute values explicitly stated as numbers in the sections. "
-                "If a value is not explicitly present, leave that placeholder unchanged. "
+                "a specific numeric value from the wiki sections above. "
+                "RULES:\n"
+                "1. If the wiki states an exact number, use it.\n"
+                "2. If the wiki states a range (e.g. '5–8 cmH₂O', '6–8 mL/kg IBW', '0.01–3 mcg/kg/min'), "
+                "use the lower bound as the initial starting value — resolve it to one number, never leave a range in the step.\n"
+                "3. If no value or range for that placeholder is present in the sections, leave that placeholder exactly as-is.\n"
                 "Do not add citations or file path references. "
                 "Return only the rewritten step text, nothing else."
             )}],
@@ -779,11 +848,12 @@ def run_chat(
     if kb is None:
         kb = _default_kb()
     resolved_model          = model or MODEL
-    resolved_reasoning_model = reasoning_model or resolved_model
-    log.info("=== CHAT START  question=%r  mode=%s  model=%s  reasoning_model=%s  kb=%s ===",
-             question[:120], mode, resolved_model, resolved_reasoning_model, kb.name)
+    resolved_reasoning_model = reasoning_model or _DEFAULT_REASONING_MODEL or resolved_model
+    chat_run_id = str(uuid.uuid4())
+    log.info("=== CHAT START  run_id=%s  question=%r  mode=%s  model=%s  reasoning_model=%s  kb=%s ===",
+             chat_run_id, question[:120], mode, resolved_model, resolved_reasoning_model, kb.name)
     llm           = get_llm_client(model=model)
-    reasoning_llm = get_llm_client(model=reasoning_model) if reasoning_model and reasoning_model != resolved_model else llm
+    reasoning_llm = get_llm_client(model=resolved_reasoning_model) if resolved_reasoning_model != resolved_model else llm
     system_prompt = kb.claude_md.read_text()
 
     total_input = 0
@@ -791,6 +861,22 @@ def run_chat(
 
     # ── CDS mode: reason → targeted retrieval → ground ───────────────────────
     if mode == "cds":
+        # ── Provenance trace accumulator ──────────────────────────────────────
+        chat_trace: dict = {
+            "run_id": chat_run_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "cds",
+            "model": resolved_model,
+            "reasoning_model": resolved_reasoning_model,
+            "kb": kb.name,
+            "question": question,
+            "step1": {},
+            "step2": {"retrievals": []},
+            "step3": {},
+            "step4": {},
+            "final": {},
+            "tokens": {},
+        }
         # Call 1: reason from clinical training, no wiki — identify direction + what to look up
         log.info("CDS Step 1: reasoning (no wiki)  model=%s", resolved_reasoning_model)
         reason_prompt = f"""You are a senior ICU clinician. Reason through this clinical question using your medical training.
@@ -835,6 +921,15 @@ QUERY RULES — read carefully:
         alternative_considerations = inp1.get("alternative_considerations", [])
         specific_queries           = inp1.get("specific_queries", [])
         log.info("CDS Step 1: direction=%d  reasoning=%d  queries=%d", len(clinical_direction), len(clinical_reasoning), len(specific_queries))
+        chat_trace["step1"] = {
+            "clinical_direction": clinical_direction,
+            "clinical_reasoning": clinical_reasoning,
+            "monitoring_followup": monitoring_followup,
+            "alternative_considerations": alternative_considerations,
+            "specific_queries": specific_queries,
+            "input_tokens": step1.usage.input_tokens,
+            "output_tokens": step1.usage.output_tokens,
+        }
 
         # Call 2: targeted vector search per parameter, then ground
         pages_consulted: set = set()
@@ -904,8 +999,10 @@ QUERY RULES — read carefully:
 
                 param_contexts.append({
                     "parameter": sq["parameter"],
+                    "search_query": sq["search_query"],
                     "context": "\n\n---\n\n".join(param_page_texts) if param_page_texts else "(no relevant wiki pages found)",
                     "top_score": top_score,
+                    "pages_hit": [h["path"] for h in hits if h["score"] >= _MIN_RETRIEVAL_SCORE],
                 })
 
             # Index retrieval score by parameter name so we can gate the pre-write check
@@ -961,6 +1058,27 @@ QUERY RULES — read carefully:
             if ground_block:
                 specific_parameters = ground_block.input.get("groundings", [])
 
+            # Build per-parameter retrieval+grounding trace
+            grounding_by_param = {g["parameter"]: g for g in specific_parameters}
+            step2_retrievals = []
+            for pc in param_contexts:
+                g = grounding_by_param.get(pc["parameter"], {})
+                step2_retrievals.append({
+                    "parameter": pc["parameter"],
+                    "search_query": pc.get("search_query", ""),
+                    "top_score": pc.get("top_score", 0.0),
+                    "pages_hit": pc.get("pages_hit", []),
+                    "grounded": g.get("grounded", False),
+                    "value": g.get("value", ""),
+                    "source": g.get("source", ""),
+                    "resolution_question": g.get("resolution_question", "") if not g.get("grounded") else "",
+                })
+            chat_trace["step2"] = {
+                "retrievals": step2_retrievals,
+                "input_tokens": step2.usage.input_tokens,
+                "output_tokens": step2.usage.output_tokens,
+            }
+
         pages = list(pages_consulted)
 
         # ── Metric 1: record a CDS query hit for every page consulted ────────
@@ -992,7 +1110,10 @@ QUERY RULES — read carefully:
                 "Note monitoring parameters (e.g. 'recheck glucose in 30 min').\n"
                 "- For TARGETS: give the exact numeric range (e.g. 'MAP 65–70 mmHg', 'SpO2 94–98%').\n"
                 "- Use ONLY wiki-grounded values for specific numeric parameters. "
-                "If a value is not wiki-grounded, write the clinical action but replace the specific "
+                "If the wiki provides a range (e.g. '5–8 cmH₂O', '6–8 mL/kg IBW', '0.01–3 mcg/kg/min'), "
+                "use the lower bound as the initial starting value unless the source explicitly marks "
+                "a different point as the starting value. Always resolve ranges to a single number in the step text. "
+                "If a value is not wiki-grounded at all, write the clinical action but replace the specific "
                 "value with '(value not in wiki — consult local protocol)'. "
                 "Do NOT invent or estimate values from clinical training.\n"
                 "- Order by clinical urgency (life threats first).\n"
@@ -1014,11 +1135,17 @@ QUERY RULES — read carefully:
             synth_block = next((b for b in step3.content if b.type == "tool_use"), None)
             if synth_block:
                 immediate_next_steps = synth_block.input.get("immediate_next_steps", [])
+            chat_trace["step3"] = {
+                "raw_steps": list(immediate_next_steps),
+                "input_tokens": step3.usage.input_tokens,
+                "output_tokens": step3.usage.output_tokens,
+            }
 
         # Step 4: rewrite any remaining markers where the wiki actually has the value
         _step4_failed_texts: set[str] = set()
         if immediate_next_steps:
             steps_before_rewrite = list(immediate_next_steps)
+            markers_before = sum(1 for s in steps_before_rewrite if _NOT_IN_WIKI_PATTERN.search(s))
             immediate_next_steps, rewrite_tokens, failed_idx = _rewrite_grounded_steps(
                 immediate_next_steps, kb, llm
             )
@@ -1026,6 +1153,15 @@ QUERY RULES — read carefully:
             total_output += rewrite_tokens[1]
             # Collect the original text of steps Step 4 couldn't resolve
             _step4_failed_texts = {steps_before_rewrite[i] for i in failed_idx if i < len(steps_before_rewrite)}
+            markers_after = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
+            chat_trace["step4"] = {
+                "markers_before": markers_before,
+                "markers_resolved": markers_before - markers_after,
+                "markers_remaining": markers_after,
+                "failed_step_indices": sorted(failed_idx),
+                "input_tokens": rewrite_tokens[0],
+                "output_tokens": rewrite_tokens[1],
+            }
 
         # Register gap files for ungrounded parameters.
         # Pre-write vector check is only run when Step 2 retrieval score was LOW (<0.60)
@@ -1106,15 +1242,32 @@ QUERY RULES — read carefully:
             kb_name=kb.name,
         )
         log.info(
-            "=== CHAT END (cds)  direction=%d  params=%d(ungrounded=%d)  gap=%s  "
+            "=== CHAT END (cds)  run_id=%s  direction=%d  params=%d(ungrounded=%d)  gap=%s  "
             "markers_remaining=%d  in=%d  out=%d  cost=$%.4f ===",
+            chat_run_id,
             len(clinical_direction), len(specific_parameters), len(ungrounded),
             gap_written,
             sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s)),
             total_input, total_output, cost,
         )
+
+        # ── Write provenance trace ────────────────────────────────────────────
+        chat_trace["final"] = {
+            "immediate_next_steps": immediate_next_steps,
+            "pages_consulted": pages,
+            "ungrounded_params": [p["parameter"] for p in ungrounded],
+            "gaps_registered": [gap_written] if gap_written else [],
+        }
+        chat_trace["tokens"] = {
+            "input": total_input,
+            "output": total_output,
+            "cost_usd": cost,
+        }
+        write_trace(chat_trace, TRACES_DIR, prefix="chat")
+
         return {
             "mode": "cds",
+            "chat_run_id": chat_run_id,
             "answer": "",
             "immediate_next_steps": immediate_next_steps,
             "clinical_direction": clinical_direction,

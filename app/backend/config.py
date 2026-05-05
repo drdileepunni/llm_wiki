@@ -9,15 +9,19 @@ ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
 GOOGLE_API_KEY         = os.getenv("GOOGLE_API_KEY", "")
 BROWSERBASE_API_KEY    = os.getenv("BROWSERBASE_API_KEY", "")
 BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
+OLLAMA_API_KEY         = os.getenv("OLLAMA_API_KEY", "")
+MEDGEMMA_URL           = os.getenv("MEDGEMMA_URL", "http://localhost:11434")
 WIKI_ROOT = Path(os.environ["WIKI_ROOT"])
 MODEL = os.getenv("MODEL", "claude-haiku-4-5")
 KG_FALLBACK_MODEL = os.getenv("KG_FALLBACK_MODEL", "gemini-2.5-flash")
+REASONING_MODEL   = os.getenv("REASONING_MODEL", "")
 
 RAW_DIR   = WIKI_ROOT / "raw"
 WIKI_DIR  = WIKI_ROOT / "wiki"
 CLAUDE_MD = WIKI_ROOT / "CLAUDE.md"
-DB_PATH   = WIKI_ROOT / "app" / "wiki.db"
-CACHE_DIR = WIKI_ROOT / "app" / ".cache"
+DB_PATH    = WIKI_ROOT / "app" / "wiki.db"
+CACHE_DIR  = WIKI_ROOT / "app" / ".cache"
+TRACES_DIR = WIKI_ROOT / "app" / "traces"
 
 KB_DIR = WIKI_ROOT / "kbs"  # Every KB (including "default") lives here
 

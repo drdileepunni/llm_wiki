@@ -7,6 +7,10 @@ from .db import get_db
 
 VALID_TYPES = {"med", "lab", "procedure", "diet", "blood", "vents", "comm"}
 
+# The LLM sometimes uses "monitoring" as an order_type; map it to "procedure"
+# so searches still work rather than returning an error.
+_TYPE_ALIASES = {"monitoring": "procedure"}
+
 
 def _serialize(doc: dict) -> dict:
     """Convert ObjectId fields to strings for JSON serialisation."""
@@ -23,6 +27,40 @@ def _serialize(doc: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+def create_orderable(
+    name: str,
+    order_type: str,
+    form: str = "",
+    frequency: str = "once",
+    instructions: str = "",
+    patient_type: str = "adult",
+) -> dict[str, Any]:
+    """
+    Insert a new orderable into the catalog (upsert on name+type+patientType).
+    Returns the created/updated document.
+    """
+    order_type = _TYPE_ALIASES.get(order_type, order_type)
+    if order_type not in VALID_TYPES:
+        return {"error": f"Invalid order_type '{order_type}'. Must be one of: {sorted(VALID_TYPES)}"}
+
+    db = get_db()
+    doc = {
+        "name": name,
+        "type": order_type,
+        "patientType": patient_type,
+        "presets": {
+            "form": form or "procedure",
+            "frequency": frequency or "once",
+            "instructions": instructions,
+        },
+        "auto_created": True,
+    }
+    key = {"name": name, "type": order_type, "patientType": patient_type}
+    db.orderables.update_one(key, {"$set": doc}, upsert=True)
+    created = db.orderables.find_one(key)
+    return {"created": True, "orderable": _serialize(created) if created else doc}
 
 
 def search_orderables(
@@ -44,6 +82,8 @@ def search_orderables(
         List of matching orderables with their presets (which carry default
         dosing: quantity, unit, route, form, frequency, concentration).
     """
+    if order_type:
+        order_type = _TYPE_ALIASES.get(order_type, order_type)
     if order_type and order_type not in VALID_TYPES:
         return {
             "error": f"Invalid order_type '{order_type}'. Must be one of: {sorted(VALID_TYPES)}"

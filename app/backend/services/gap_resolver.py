@@ -222,6 +222,17 @@ def _google_search_in_session(browser, query: str) -> list[dict]:
     return hits
 
 
+def _is_ollama_reachable() -> bool:
+    """Quick TCP check — returns False immediately if MedGemma/Ollama is not up."""
+    from ..config import MEDGEMMA_URL
+    import urllib.request
+    try:
+        urllib.request.urlopen(MEDGEMMA_URL.rstrip("/") + "/api/tags", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
 def _llm_fallback(
     gap_title: str,
     gap_sections: list[str],
@@ -229,14 +240,14 @@ def _llm_fallback(
     missing_values: list[str] | None = None,
 ) -> tuple[list[dict], float]:
     """Generate gap content via LLM when PubMed yields 0 articles. Returns (articles, cost_usd)."""
-    from google import genai
+    from .llm_client import get_llm_client
     log.info(
         "[gap=%s] LLM fallback using model=%s  sections=%s  question=%s  missing_values=%s",
         gap_title, KG_FALLBACK_MODEL, gap_sections,
         resolution_question[:80] if resolution_question else "none",
         missing_values or [],
     )
-    client = genai.Client(api_key=GOOGLE_API_KEY)
+    llm = get_llm_client(model=KG_FALLBACK_MODEL)
     if resolution_question:
         mv_block = (
             "\n\nYou MUST include specific values for these data points:\n"
@@ -269,10 +280,17 @@ def _llm_fallback(
             + "\nFor each section write 2-5 paragraphs with specific clinical details, doses, and references where known. "
             "Use plain prose, no bullet spam. Be precise and clinically useful."
         )
-    resp = client.models.generate_content(model=KG_FALLBACK_MODEL, contents=prompt)
-    text = (resp.text or "").strip()
-    tokens_in  = getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
-    tokens_out = getattr(resp.usage_metadata, "candidates_token_count", 0) or 0
+    resp = llm.create_message(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[],
+        system="You are a medical reference author. Write evidence-based clinical content.",
+        max_tokens=4000,
+        force_tool=False,
+        thinking_budget=0,
+    )
+    text = next((b.text for b in resp.content if hasattr(b, "text") and b.text), "").strip()
+    tokens_in  = resp.usage.input_tokens
+    tokens_out = resp.usage.output_tokens
     cost = log_call(
         operation="gap_llm_fallback",
         source_name=gap_title[:80],
@@ -523,16 +541,31 @@ def search_for_gap(
     bb_pool: Optional["BBPool"] = None,
     resolution_question: str = "",
     missing_values: list[str] | None = None,
+    times_opened: int = 0,
 ) -> tuple[list[dict], float]:
     """
     Search Google/PubMed for free full-text articles covering the gap.
-    Falls back to LLM-generated content (KG_FALLBACK_MODEL) when PubMed yields 0 results.
+    Falls back to LLM-generated content (KG_FALLBACK_MODEL) when PubMed yields 0 results
+    or when times_opened >= 1 (gap already attempted once without closing).
     Pass a BBPool for batch usage — sessions are shared across all gaps in the batch.
     Pass resolution_question for targeted search and fallback generation.
     Returns (articles, cost_usd).
     """
-    log.info("=== search_for_gap START  gap='%s'  sections=%s  question=%s ===",
-             gap_title, gap_sections, resolution_question[:80] if resolution_question else "none")
+    log.info("=== search_for_gap START  gap='%s'  sections=%s  question=%s  times_opened=%d ===",
+             gap_title, gap_sections, resolution_question[:80] if resolution_question else "none", times_opened)
+
+    if times_opened >= 1:
+        if KG_FALLBACK_MODEL.startswith("medgemma") and not _is_ollama_reachable():
+            log.warning(
+                "[gap=%s] MedGemma is down — gap left open, will be resolved when MedGemma is back",
+                gap_title,
+            )
+            return [], 0.0
+        log.info("[gap=%s] times_opened=%d >= 1 — skipping PubMed, going straight to LLM fallback",
+                 gap_title, times_opened)
+        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
+        log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(llm_articles))
+        return llm_articles, llm_cost
 
     query, search_cost = generate_search_query(gap_title, gap_sections, resolution_question)
     total_search_cost  = search_cost
@@ -606,9 +639,15 @@ def search_for_gap(
 
     # ── LLM fallback when PubMed yields nothing ───────────────────────────────
     if not articles:
-        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
-        articles.extend(llm_articles)
-        total_search_cost += llm_cost
+        if KG_FALLBACK_MODEL.startswith("medgemma") and not _is_ollama_reachable():
+            log.warning(
+                "[gap=%s] MedGemma is down — gap left open, will be resolved when MedGemma is back",
+                gap_title,
+            )
+        else:
+            llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
+            articles.extend(llm_articles)
+            total_search_cost += llm_cost
 
     log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(articles))
     return articles, total_search_cost
