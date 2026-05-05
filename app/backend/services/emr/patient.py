@@ -391,9 +391,213 @@ def place_viva_order(order: dict) -> dict:
 
 
 def reset_dummy_patient_orders() -> None:
-    """Clear all active orders from the dummy patient (called at session start)."""
+    """Clear all active orders from the dummy patient."""
     db = get_db()
     db.patients.update_one(
         {"CPMRN": VIVA_DUMMY_CPMRN},
         {"$set": {"orders.active": _empty_active_orders()}},
     )
+
+
+def reset_dummy_patient_chart() -> None:
+    """
+    Wipe all clinical chart data (vitals, IO, documents, orders, vent flags)
+    from the dummy patient. Called at the start of every new viva session so the
+    teacher's first scenario seeds a clean state.
+    """
+    db = get_db()
+    db.patients.update_one(
+        {"CPMRN": VIVA_DUMMY_CPMRN},
+        {"$set": {
+            "vitals": [],
+            "io": [],
+            "documents": [],
+            "orders.active": _empty_active_orders(),
+            "isNIV.value": False,
+            "isHFNC.value": False,
+            "isIntubated.value": False,
+        }},
+    )
+
+
+# ── Viva student agent read functions ─────────────────────────────────────────
+
+def get_io_summary(cpmrn: str, hours: int = 6) -> dict:
+    """Return total urine output, intake, and fluid balance over the last N hours."""
+    from datetime import timedelta
+    p = _find_patient(cpmrn)
+    if not p:
+        return {"error": f"Patient {cpmrn} not found"}
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    entries = [e for e in p.get("io", []) if e.get("timestamp", "") >= cutoff]
+    total_urine  = sum(e.get("urine_ml", 0)  for e in entries)
+    total_intake = sum(e.get("intake_ml", 0) for e in entries)
+    return {
+        "period_hours":    hours,
+        "entries_counted": len(entries),
+        "total_urine_ml":  total_urine,
+        "total_intake_ml": total_intake,
+        "net_balance_ml":  total_intake - total_urine,
+        "urine_rate_ml_per_hr": round(total_urine / hours, 1) if hours > 0 else 0,
+    }
+
+
+def get_vital_trend(cpmrn: str, parameter: str, hours: int = 4) -> list[dict]:
+    """Return time-series values for one vital sign over the last N hours."""
+    from datetime import timedelta
+    _KEY_MAP = {
+        "BP":          "daysBP",
+        "HR":          "daysHR",
+        "SpO2":        "daysSpO2",
+        "RR":          "daysRR",
+        "Temperature": "daysTemperature",
+        "FiO2":        "daysFiO2",
+        "MAP":         "daysMAP",
+    }
+    mongo_key = _KEY_MAP.get(parameter, f"days{parameter}")
+    p = _find_patient(cpmrn)
+    if not p:
+        return []
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    entries = [
+        {"timestamp": v.get("timestamp"), "value": v.get(mongo_key)}
+        for v in p.get("vitals", [])
+        if v.get("timestamp", "") >= cutoff and v.get(mongo_key) is not None
+    ]
+    return sorted(entries, key=lambda e: e.get("timestamp", ""))
+
+
+def get_recent_notes_for_patient(cpmrn: str, category: str | None = None, limit: int = 3) -> list[dict]:
+    """Return recent clinical event notes, optionally filtered by category."""
+    p = _find_patient(cpmrn)
+    if not p:
+        return []
+    docs = p.get("documents", [])
+    if category:
+        docs = [d for d in docs if d.get("category") == category]
+    docs = sorted(docs, key=lambda d: d.get("reportedAt", ""), reverse=True)
+    return [
+        {
+            "category":   d.get("category"),
+            "name":       d.get("name"),
+            "text":       d.get("text", ""),
+            "reportedAt": d.get("reportedAt"),
+        }
+        for d in docs[:limit]
+    ]
+
+
+# ── Viva simulation write functions ───────────────────────────────────────────
+
+def push_vitals(cpmrn: str, vitals: dict) -> None:
+    """
+    Push a new vitals snapshot onto the patient's vitals array.
+    `vitals` keys use the friendly names from get_latest_vitals (BP, HR, SpO2, …).
+    """
+    _KEY_MAP = {
+        "SpO2":         "daysSpO2",
+        "HR":           "daysHR",
+        "RR":           "daysRR",
+        "BP":           "daysBP",
+        "MAP":          "daysMAP",
+        "Temperature":  "daysTemperature",
+        "FiO2":         "daysFiO2",
+        "OxygenFlow":   "daysOxygenFlow",
+        "TherapyDevice":"daysTherapyDevice",
+        "AVPU":         "daysAVPU",
+        "CVP":          "daysCVP",
+        "VentMode":     "daysVentMode",
+        "VentPEEP":     "daysVentPEEP",
+        "VentPIP":      "daysVentPip",
+        "VentRRSet":    "daysVentRRset",
+    }
+    snapshot: dict = {"timestamp": datetime.utcnow().isoformat(), "isVerified": True, "dataBy": "viva-sim"}
+    for friendly, mongo_key in _KEY_MAP.items():
+        if friendly in vitals:
+            snapshot[mongo_key] = vitals[friendly]
+    get_db().patients.update_one(
+        {"CPMRN": cpmrn},
+        {"$push": {"vitals": snapshot}},
+    )
+
+
+def push_lab_result(cpmrn: str, name: str, attributes: dict) -> None:
+    """
+    Push a lab result document.
+    `attributes` format: {"pH": {"name": "pH", "value": "7.34", "errorRange": {"min": 7.35, "max": 7.45}}, ...}
+    """
+    doc = {
+        "category": "labs",
+        "name": name,
+        "reportedAt": datetime.utcnow().isoformat(),
+        "attributes": attributes,
+    }
+    get_db().patients.update_one(
+        {"CPMRN": cpmrn},
+        {"$push": {"documents": doc}},
+    )
+
+
+def push_event_note(cpmrn: str, category: str, text: str) -> None:
+    """Push a clinical event note (ECG findings, nursing note, etc.)."""
+    doc = {
+        "category": category,
+        "name": "Event Note",
+        "reportedAt": datetime.utcnow().isoformat(),
+        "text": text,
+        "addedBy": "viva-sim",
+    }
+    get_db().patients.update_one(
+        {"CPMRN": cpmrn},
+        {"$push": {"documents": doc}},
+    )
+
+
+def push_io_entry(cpmrn: str, urine_ml: float, intake_ml: float, period_mins: int = 60) -> None:
+    """Push an intake/output entry."""
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "urine_ml": urine_ml,
+        "intake_ml": intake_ml,
+        "period_mins": period_mins,
+        "addedBy": "viva-sim",
+    }
+    get_db().patients.update_one(
+        {"CPMRN": cpmrn},
+        {"$push": {"io": entry}},
+    )
+
+
+def complete_lab_orders(cpmrn: str, lab_names: list[str]) -> None:
+    """
+    Remove named labs from active orders (because results have been filed).
+    Matches case-insensitively against the `investigation` field.
+    """
+    if not lab_names:
+        return
+    lower_names = {n.lower() for n in lab_names}
+    p = get_db().patients.find_one({"CPMRN": cpmrn})
+    if not p:
+        return
+    active = (p.get("orders") or {}).get("active") or {}
+    remaining = [
+        lab for lab in active.get("labs", [])
+        if (lab.get("investigation") or "").lower() not in lower_names
+    ]
+    get_db().patients.update_one(
+        {"CPMRN": cpmrn},
+        {"$set": {"orders.active.labs": remaining}},
+    )
+
+
+def update_vent_flags(cpmrn: str, is_niv: bool | None, is_hfnc: bool | None, is_intubated: bool | None) -> None:
+    """Update the respiratory support flags on the patient document."""
+    updates: dict = {}
+    if is_niv is not None:
+        updates["isNIV.value"] = is_niv
+    if is_hfnc is not None:
+        updates["isHFNC.value"] = is_hfnc
+    if is_intubated is not None:
+        updates["isIntubated.value"] = is_intubated
+    if updates:
+        get_db().patients.update_one({"CPMRN": cpmrn}, {"$set": updates})

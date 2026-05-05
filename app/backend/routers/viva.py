@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from ..config import KBConfig
 from ..dependencies import resolve_kb
-from ..services.clinical_assess_pipeline import run_custom_snapshot
+from ..services.viva_student_agent import run_viva_student_turn
 from ..services.resolve_service import resolve_all_gaps
 from ..services.viva_teacher import (
     generate_first_scenario,
@@ -38,11 +38,12 @@ from ..services.emr import (
     get_active_orders,
     get_dummy_patient,
     place_viva_order,
-    reset_dummy_patient_orders,
+    reset_dummy_patient_chart,
     upsert_dummy_patient,
     VIVA_DUMMY_CPMRN,
 )
 from ..services.order_gen_pipeline import run_order_generation
+from ..services.viva_simulator import simulate_and_write, write_patient_state
 
 log = logging.getLogger("wiki.viva")
 
@@ -129,11 +130,22 @@ async def start_viva(req: StartRequest, kb: KBConfig = Depends(resolve_kb)):
         generate_first_scenario, req.topic, trajectory, model
     )
 
-    # Reset dummy patient orders at the start of every new session
+    # Wipe all clinical chart data so the teacher's patient_state seeds a clean slate
     try:
-        reset_dummy_patient_orders()
+        reset_dummy_patient_chart()
     except Exception as exc:
-        log.warning("Could not reset dummy patient orders: %s", exc)
+        log.warning("Could not reset dummy patient chart: %s", exc)
+
+    # Seed initial patient state from teacher's first scenario into MongoDB
+    patient_state = first_scenario.pop("patient_state", {})
+    if patient_state:
+        try:
+            seed_summary = await asyncio.to_thread(
+                write_patient_state, patient_state, VIVA_DUMMY_CPMRN
+            )
+            log.info("Seeded initial patient state: %s", seed_summary[:200])
+        except Exception as exc:
+            log.warning("Could not seed initial patient state: %s", exc)
 
     session = create_session(
         session_id=session_id,
@@ -217,23 +229,20 @@ async def run_turn(
     model = req.model or session.get("model") or None
     turn_num = session["current_turn"] + 1
 
-    # ── 1. Student assessment ─────────────────────────────────────────────────
+    # ── 1. Student assessment (agentic — queries MongoDB with tools) ──────────
     log.info("Viva %s turn %d: student assessment", session_id, turn_num)
     snap_result = await asyncio.to_thread(
-        run_custom_snapshot,
-        {
-            "clinical_context": next_scenario.get("clinical_context", ""),
-            "csv_content": next_scenario.get("csv_content", ""),
-            "question": next_scenario.get("question", ""),
-            "phase": next_scenario.get("phase", "MANAGEMENT"),
-            "difficulty": next_scenario.get("difficulty", "MEDIUM"),
-        },
+        run_viva_student_turn,
+        next_scenario.get("clinical_context", ""),
+        next_scenario.get("question", ""),
+        next_scenario.get("phase", "MANAGEMENT"),
+        next_scenario.get("difficulty", "MEDIUM"),
+        VIVA_DUMMY_CPMRN,
         kb,
         model,
-        None,  # reasoning_model
     )
     student_snap = snap_result["snapshots"][0]
-    student_answer_text = student_snap.get("agent_answer", "")
+    student_answer_text = _build_student_answer_text(student_snap)
     turn_cost = student_snap.get("cost_usd", 0.0)
     chat_run_id = student_snap.get("chat_run_id")
 
@@ -309,6 +318,26 @@ async def run_turn(
 
     turn_cost += order_cost
 
+    # ── 2.5. Simulation — write patient responses to MongoDB ──────────────────
+    simulation_summary = ""
+    if generated_orders:
+        log.info("Viva %s turn %d: running simulator", session_id, turn_num)
+        try:
+            sim_result = await asyncio.to_thread(
+                simulate_and_write,
+                session["trajectory"],
+                generated_orders,
+                VIVA_DUMMY_CPMRN,
+                next_scenario.get("clinical_context", ""),
+                turn_num,
+                session["max_turns"],
+                model,
+            )
+            simulation_summary = sim_result.get("summary", "")
+            log.info("Viva %s turn %d: simulation complete — %s", session_id, turn_num, simulation_summary[:120])
+        except Exception as exc:
+            log.warning("Viva %s turn %d: simulation failed: %s", session_id, turn_num, exc)
+
     # ── 3. Gap resolution ─────────────────────────────────────────────────────
     log.info("Viva %s turn %d: resolving gaps", session_id, turn_num)
     gaps_before = _count_pending_gaps(kb)
@@ -340,8 +369,23 @@ async def run_turn(
             student_answer_text,
             turn_num,
             session["max_turns"],
+            simulation_summary,
             model,
         )
+        # Write any supplementary notes the teacher added (consultant reviews, etc.)
+        if not teacher_result.get("complete"):
+            additional_notes = teacher_result["scenario"].pop("additional_notes", [])
+            if additional_notes:
+                try:
+                    await asyncio.to_thread(
+                        write_patient_state, {"notes": additional_notes}, VIVA_DUMMY_CPMRN
+                    )
+                    log.info(
+                        "Viva %s turn %d: wrote %d additional notes from teacher",
+                        session_id, turn_num, len(additional_notes),
+                    )
+                except Exception as exc:
+                    log.warning("Could not write teacher additional notes: %s", exc)
 
     # ── Persist ───────────────────────────────────────────────────────────────
     turn_record = {
@@ -360,6 +404,7 @@ async def run_turn(
             "gap_sections":         student_snap.get("gap_sections", []),
         },
         "orders": generated_orders,
+        "simulation_summary": simulation_summary,
         "gaps_resolved": gaps_resolved,
         "cost_usd": turn_cost,
     }
@@ -384,6 +429,166 @@ async def run_turn(
         "orders": generated_orders,
         "gaps_resolved": gaps_resolved,
         "complete": complete,
+        "outcome": session.get("outcome"),
+        "next_scenario": session.get("next_scenario"),
+        "cost_usd": turn_cost,
+        "session": session,
+    }
+
+
+@router.post("/{session_id}/rerun-turn/{turn_num}")
+async def rerun_turn(
+    session_id: str,
+    turn_num: int,
+    req: TurnRequest,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    """
+    Rerun turn `turn_num` using its stored scenario. Replaces the turn record
+    and truncates all subsequent turns, then regenerates next_scenario.
+    Reactivates a completed session if the last turn is rerun.
+    """
+    try:
+        session = load_session(session_id, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+    turns = session.get("turns", [])
+    if turn_num < 1 or turn_num > len(turns):
+        raise HTTPException(status_code=400, detail=f"Turn {turn_num} not found (session has {len(turns)} turns)")
+
+    # Retrieve the original scenario for this turn
+    original_turn = turns[turn_num - 1]
+    scenario = original_turn.get("scenario")
+    if not scenario:
+        raise HTTPException(status_code=400, detail=f"Turn {turn_num} has no stored scenario")
+
+    model = req.model or session.get("model") or None
+    log.info("Viva %s RERUN turn %d", session_id, turn_num)
+
+    # ── 1. Student assessment (agentic — queries MongoDB with tools) ──────────
+    snap_result = await asyncio.to_thread(
+        run_viva_student_turn,
+        scenario.get("clinical_context", ""),
+        scenario.get("question", ""),
+        scenario.get("phase", "MANAGEMENT"),
+        scenario.get("difficulty", "MEDIUM"),
+        VIVA_DUMMY_CPMRN,
+        kb,
+        model,
+    )
+    student_snap = snap_result["snapshots"][0]
+    student_answer_text = _build_student_answer_text(student_snap)
+    turn_cost = student_snap.get("cost_usd", 0.0)
+    chat_run_id = student_snap.get("chat_run_id")
+
+    # ── 2. Order generation ───────────────────────────────────────────────────
+    immediate_steps: list[str] = student_snap.get("immediate_next_steps", [])
+    monitoring_steps: list[str] = student_snap.get("monitoring_followup", [])
+    all_steps = immediate_steps + monitoring_steps
+    generated_orders: list[dict] = []
+    order_run_id: str | None = None
+    order_cost = 0.0
+
+    if all_steps:
+        try:
+            active_orders_resp = get_active_orders(VIVA_DUMMY_CPMRN)
+            active_orders = active_orders_resp.get("active_orders") if not active_orders_resp.get("error") else None
+        except Exception as exc:
+            log.warning("Could not load active orders for rerun turn: %s", exc)
+            active_orders = None
+
+        try:
+            order_result = await asyncio.to_thread(
+                run_order_generation,
+                all_steps,
+                VIVA_DUMMY_CPMRN,
+                "adult",
+                model,
+                kb,
+                active_orders,
+                chat_run_id,
+            )
+            raw_orders = order_result.get("orders", [])
+            order_run_id = order_result.get("run_id")
+            order_cost = order_result.get("cost_usd", 0.0)
+
+            for order in raw_orders:
+                name = (order.get("orderable_name") or "").strip()
+                if not name or name == "—":
+                    order["orderable_name"] = None
+                    order["confidence"] = "low"
+
+            seen: dict[tuple, int] = {}
+            deduped: list[dict] = []
+            for order in raw_orders:
+                key = (
+                    (order.get("order_type") or "").lower(),
+                    (order.get("orderable_name") or "").lower().strip(),
+                )
+                if key[1] and key in seen:
+                    existing = deduped[seen[key]]
+                    extra_notes = order.get("notes") or ""
+                    extra_instr = (order.get("order_details") or {}).get("instructions") or ""
+                    existing_notes = existing.get("notes") or ""
+                    existing_instr = (existing.get("order_details") or {}).get("instructions") or ""
+                    if extra_notes and extra_notes not in existing_notes:
+                        existing["notes"] = f"{existing_notes}; {extra_notes}".lstrip("; ")
+                    if extra_instr and extra_instr not in existing_instr:
+                        if existing.get("order_details"):
+                            existing["order_details"]["instructions"] = f"{existing_instr}; {extra_instr}".lstrip("; ")
+                else:
+                    seen[key] = len(deduped)
+                    deduped.append(order)
+            generated_orders = deduped
+        except Exception as exc:
+            log.warning("Order generation failed for rerun turn %d: %s", turn_num, exc)
+
+    turn_cost += order_cost
+
+    # ── 3. Gap resolution ─────────────────────────────────────────────────────
+    gaps_before = _count_pending_gaps(kb)
+    gap_stats = await asyncio.to_thread(resolve_all_gaps, kb, _VIVA_GAP_MAX_RESULTS)
+    gaps_resolved = max(0, gaps_before - _count_pending_gaps(kb))
+    turn_cost += gap_stats.get("cost_usd", 0.0)
+
+    # ── Persist — replace turn in-place, keep everything else ────────────────
+    # We deliberately do NOT truncate subsequent turns or re-run the teacher.
+    # Subsequent turns stay visible; session status/next_scenario unchanged.
+    new_turn_record = {
+        "turn_num": turn_num,
+        "scenario": scenario,
+        "chat_run_id": chat_run_id,
+        "order_run_id": order_run_id,
+        "student_answer_text": student_answer_text,
+        "student_snap": {
+            "clinical_direction":   student_snap.get("clinical_direction", []),
+            "clinical_reasoning":   student_snap.get("clinical_reasoning", []),
+            "specific_parameters":  student_snap.get("specific_parameters", []),
+            "monitoring_followup":  student_snap.get("monitoring_followup", []),
+            "alternative_considerations": student_snap.get("alternative_considerations", []),
+            "pages_consulted":      student_snap.get("pages_consulted", []),
+            "gap_sections":         student_snap.get("gap_sections", []),
+        },
+        "orders": generated_orders,
+        "gaps_resolved": gaps_resolved,
+        "cost_usd": turn_cost,
+        "rerun": True,
+    }
+
+    session["turns"][turn_num - 1] = new_turn_record
+    session["total_cost_usd"] = round(
+        sum(t.get("cost_usd", 0.0) for t in session["turns"]), 6
+    )
+
+    save_session(session, kb)
+
+    return {
+        "turn_num": turn_num,
+        "student_answer": student_answer_text,
+        "orders": generated_orders,
+        "gaps_resolved": gaps_resolved,
+        "complete": session["status"] == "complete",
         "outcome": session.get("outcome"),
         "next_scenario": session.get("next_scenario"),
         "cost_usd": turn_cost,
@@ -452,6 +657,24 @@ def delete_viva_session(session_id: str, kb: KBConfig = Depends(resolve_kb)):
         return {"deleted": session_id}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+
+def _build_student_answer_text(snap: dict) -> str:
+    """
+    Build a readable summary of the student's CDS answer from the structured
+    snapshot fields. The 'agent_answer' field is not populated by the clinical
+    assessment pipeline, so we reconstruct from what is actually stored.
+    """
+    parts = []
+    if snap.get("clinical_direction"):
+        parts.append("Clinical direction:\n" + "\n".join(f"- {x}" for x in snap["clinical_direction"]))
+    if snap.get("clinical_reasoning"):
+        parts.append("Reasoning:\n" + "\n".join(f"- {x}" for x in snap["clinical_reasoning"]))
+    if snap.get("specific_parameters"):
+        parts.append("Specific parameters:\n" + "\n".join(f"- {x}" for x in snap["specific_parameters"]))
+    if snap.get("monitoring_followup"):
+        parts.append("Monitoring/follow-up:\n" + "\n".join(f"- {x}" for x in snap["monitoring_followup"]))
+    return "\n\n".join(parts) or snap.get("agent_answer", "")
 
 
 def _count_pending_gaps(kb: KBConfig) -> int:

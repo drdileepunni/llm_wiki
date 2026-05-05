@@ -529,6 +529,36 @@ export async function stopVM() {
   return res.json()
 }
 
+export async function getCPUVMStatus() {
+  return fetch(`${BASE}/vm/cpu/status`).then(r => r.json())
+}
+
+export async function startCPUVM() {
+  const res = await fetch(`${BASE}/vm/cpu/start`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function stopCPUVM() {
+  const res = await fetch(`${BASE}/vm/cpu/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getActiveInstance() {
+  return fetch(`${BASE}/vm/active`).then(r => r.json())
+}
+
+export async function setActiveInstance(instance) {
+  const res = await fetch(`${BASE}/vm/active`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instance }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── Log capture ────────────────────────────────────────────────────────────────
 
 export async function startLogCapture() {
@@ -620,6 +650,16 @@ export async function deleteVivaSession(sessionId, kbName) {
   const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
     headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function rerunVivaTurn(sessionId, turnNum, model = null, kbName) {
+  const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}/rerun-turn/${turnNum}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ model }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()

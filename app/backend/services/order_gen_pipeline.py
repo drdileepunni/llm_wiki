@@ -618,6 +618,10 @@ def run_order_generation(
     messages: list[dict] = [{"role": "user", "content": user_msg}]
 
     # ── Phase 1: gather data (max 8 iterations) ───────────────────────────────
+    # Track catalog outcomes so Phase 2 reminder can reference exact orderable names
+    _catalog_searches: list[tuple[str, list[str]]] = []   # (query, [matched_names])
+    _catalog_created: list[str] = []                       # names of newly created orderables
+
     for iteration in range(8):
         response = llm.create_message(
             messages=messages,
@@ -664,6 +668,7 @@ def run_order_generation(
                     log.info("  → %d matches: %s", result_preview.get("count", 0), names)
                     tc_trace["result_count"] = result_preview.get("count", 0)
                     tc_trace["result_summary"] = names
+                    _catalog_searches.append((block.input.get("query", ""), names))
                 elif block.name == "get_patient_demographics":
                     log.info("  → weight=%s kg  height=%s cm  gender=%s",
                              result_preview.get("weightKg", "—"),
@@ -680,6 +685,8 @@ def run_order_generation(
                         "created": result_preview.get("created"),
                         "id": result_preview.get("id"),
                     }
+                    if result_preview.get("created"):
+                        _catalog_created.append(block.input.get("name", ""))
                 else:
                     tc_trace["result_summary"] = result_preview
             except Exception:
@@ -747,10 +754,32 @@ def run_order_generation(
             break
 
     # ── Phase 2: force submit_orders ──────────────────────────────────────────
-    messages.append({"role": "user", "content":
+    # Build explicit catalog reminder so the model doesn't forget orderable names
+    _catalog_lines: list[str] = []
+    for query, names in _catalog_searches:
+        if names:
+            best = repr(names[0])
+            rest = (", also: " + ", ".join(repr(n) for n in names[1:])) if len(names) > 1 else ""
+            _catalog_lines.append(
+                f'  - search "{query}" → FOUND — use orderable_name: {best}{rest}'
+            )
+        else:
+            _catalog_lines.append(f'  - search "{query}" → 0 matches (no orderable available)')
+    for name in _catalog_created:
+        _catalog_lines.append(f'  - CREATED orderable: "{name}" — use this exact name as orderable_name')
+
+    phase2_msg = (
         "You now have all the data needed. Call submit_orders with the structured orders for every recommendation. "
         "Remember to include the extracted parameters (mode, TV, RR, PEEP, FiO2, dose, etc.) in each order's instructions field."
-    })
+    )
+    if _catalog_lines:
+        phase2_msg += (
+            "\n\nIMPORTANT — catalog lookup results from this session. "
+            "You MUST use these exact orderable_name values in your submit_orders call:\n"
+            + "\n".join(_catalog_lines)
+            + "\n\nDo NOT use '—' or null for orderable_name if the name appears above."
+        )
+    messages.append({"role": "user", "content": phase2_msg})
 
     response = llm.create_message(
         messages=messages,

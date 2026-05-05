@@ -223,11 +223,17 @@ def _google_search_in_session(browser, query: str) -> list[dict]:
 
 
 def _is_ollama_reachable() -> bool:
-    """Quick TCP check — returns False immediately if MedGemma/Ollama is not up."""
-    from ..config import MEDGEMMA_URL
+    """Quick check against whichever MedGemma instance is currently active."""
+    from ..config import MEDGEMMA_URL, MEDGEMMA_CPU_URL, OLLAMA_API_KEY
+    from .. import state
     import urllib.request
+    url = MEDGEMMA_CPU_URL if state.active_medgemma == "cpu" and MEDGEMMA_CPU_URL else MEDGEMMA_URL
+    req = urllib.request.Request(
+        url.rstrip("/") + "/api/tags",
+        headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {},
+    )
     try:
-        urllib.request.urlopen(MEDGEMMA_URL.rstrip("/") + "/api/tags", timeout=2)
+        urllib.request.urlopen(req, timeout=5)
         return True
     except Exception:
         return False

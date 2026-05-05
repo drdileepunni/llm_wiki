@@ -46,19 +46,57 @@ Generate the OPENING scenario for turn 1 of this viva — the initial presentati
 
 Output ONLY valid JSON with these exact keys:
 {{
-  "clinical_context": "2-3 sentence patient presentation",
-  "question": "Specific focused question about the most appropriate next action",
+  "clinical_context": "2-3 sentence patient presentation summary (for display only)",
+  "question": "Specific focused clinical question about the most appropriate next action",
   "phase": "EVOLVING",
   "difficulty": "MEDIUM",
-  "csv_content": "<CSV — see rules below>"
+  "patient_state": {{ ... see schema below ... }}
 }}
 
-csv_content rules:
-- Header: timestamp_ist,event_category,event_type,actor_name,actor_role,summary
-- 8-10 data rows, timestamps starting at 2024-01-15 08:00:00 in IST format
-- event_category: LAB | VITAL | TASK | CHAT
-- Build a coherent clinical narrative leading to the question
-- Quote any summary field containing a comma
+patient_state schema — populate what is relevant to the scenario:
+{{
+  "vitals": {{
+    "BP": "<systolic/diastolic string, e.g. 88/54>",
+    "HR": <number>,
+    "SpO2": <number, percent>,
+    "RR": <number>,
+    "Temperature": <number, Celsius>,
+    "TherapyDevice": "<room air | oxygen mask | Venturi mask | HFNC | NIV | ventilator>",
+    "FiO2": <0.21–1.0>,
+    "OxygenFlow": <L/min, optional>,
+    "AVPU": "<A | V | P | U>"
+  }},
+  "labs": [
+    {{
+      "name": "<test name, e.g. VBG>",
+      "attributes": {{
+        "<key>": {{"name": "<display name>", "value": "<value as string>", "errorRange": {{"min": <n>, "max": <n>}}}}
+      }}
+    }}
+  ],
+  "notes": [
+    {{"category": "event", "text": "<concise note, e.g. ECG: sinus tachycardia at 112 bpm, no ST changes>"}},
+    {{"category": "nursing", "text": "<nursing observation>"}}
+  ],
+  "io": {{
+    "urine_ml": <number>,
+    "intake_ml": <number>,
+    "period_mins": <number>
+  }},
+  "vent_flags": {{
+    "isNIV": <true|false>,
+    "isHFNC": <true|false>,
+    "isIntubated": <true|false>
+  }}
+}}
+
+Rules:
+- Include vitals always — they are the core of the presentation
+- Include labs only if results are available at presentation (e.g. VBG, troponin already drawn)
+- Include notes for any significant event findings (ECG, imaging, nursing observations)
+- Include io only if relevant (e.g. oliguria is part of the presentation)
+- Include vent_flags only if patient is on respiratory support at presentation
+- Be physiologically consistent — values must match the clinical narrative
 """
 
 _NEXT_TURN_PROMPT = """\
@@ -71,21 +109,34 @@ TURNS SO FAR:
 STUDENT'S LAST ANSWER (Turn {turn_num}):
 {last_answer}
 
+SIMULATION RESULTS (vitals, labs, IO already written to the patient chart):
+{simulation_summary}
+
 This is turn {turn_num} of maximum {max_turns}.
 
 Rules:
-- If the student acted appropriately → advance the case naturally (improvement, new labs, next phase)
-- If they missed something critical → surface a realistic consequence
+- The simulation has already updated the patient's vitals, labs, and IO in the chart
+- Base clinical_context on the SIMULATION RESULTS — reference actual values ("BP is now 120/78", "VBG pH 7.34")
+- If the student acted appropriately → advance the case naturally toward trajectory resolution
+- If they missed something critical → surface realistic consequences from the simulation
 - If turn >= {near_end} OR the case has reached a natural conclusion → signal completion
-- Keep clinical_context to 2-3 sentences describing what happened since the last question
-- The csv_content MUST add new timeline rows reflecting events AFTER the student's last intervention
-- New timestamps should continue from where the previous scenario ended
-- Add 4-6 new rows only (do not repeat prior rows)
+- Keep clinical_context to 2-3 sentences
+- Use additional_notes ONLY for supplementary narrative events not captured by the simulator
+  (e.g. consultant review, family discussion, imaging result, ward observation)
+  Leave additional_notes as an empty list [] if nothing to add
 
 Output ONE of:
 
 A) Next scenario JSON:
-{{"clinical_context": "...", "question": "...", "phase": "EVOLVING|ESCALATION|DETERIORATION|MANAGEMENT|LATE", "difficulty": "EASY|MEDIUM|HARD", "csv_content": "timestamp_ist,...\\nrow1\\nrow2..."}}
+{{
+  "clinical_context": "2-3 sentence summary referencing actual simulation values",
+  "question": "Specific focused clinical question",
+  "phase": "EVOLVING|ESCALATION|DETERIORATION|MANAGEMENT|LATE",
+  "difficulty": "EASY|MEDIUM|HARD",
+  "additional_notes": [
+    {{"category": "event", "text": "..."}}
+  ]
+}}
 
 B) Case complete JSON:
 {{"complete": true, "outcome": "One sentence describing the case outcome."}}
@@ -139,6 +190,7 @@ def generate_next_turn(
     last_answer_text: str,
     turn_num: int,
     max_turns: int,
+    simulation_summary: str = "",
     model: str | None = None,
 ) -> dict:
     """
@@ -156,6 +208,7 @@ def generate_next_turn(
         trajectory=trajectory,
         history=history,
         last_answer=last_answer_text[:1500],
+        simulation_summary=simulation_summary or "(not available)",
         turn_num=turn_num,
         max_turns=max_turns,
         near_end=near_end,
@@ -194,8 +247,11 @@ def _format_history(turns: list[dict]) -> str:
         ctx = t.get("scenario", {}).get("clinical_context", "")
         q = t.get("scenario", {}).get("question", "")
         ans = t.get("student_answer_text", "")
+        sim = t.get("simulation_summary", "")
         lines.append(f"--- Turn {num} ---")
         lines.append(f"Context: {ctx}")
         lines.append(f"Question: {q}")
         lines.append(f"Student: {ans[:600]}")
+        if sim:
+            lines.append(f"Simulation results: {sim}")
     return "\n".join(lines)

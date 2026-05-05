@@ -18,7 +18,7 @@ import {
   StopCircleIcon,
   ServerIcon,
 } from '@heroicons/react/24/outline'
-import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM } from '../api'
+import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM, getCPUVMStatus, startCPUVM, stopCPUVM, getActiveInstance, setActiveInstance } from '../api'
 import { useAppState } from '../AppStateContext'
 
 const primaryNav = [
@@ -47,12 +47,16 @@ export default function Layout() {
   const [vmStatus, setVmStatus] = useState('unknown')
   const [vmBusy, setVmBusy] = useState(false)
   const [vmError, setVmError] = useState(null)
+  const [cpuStatus, setCpuStatus] = useState('unknown')
+  const [cpuBusy, setCpuBusy] = useState(false)
+  const [cpuError, setCpuError] = useState(null)
+  const [activeInstance, setActiveInstanceState] = useState('gpu')
 
   useEffect(() => {
     getStats().then(s => setTodaySpend(s.total_cost_usd)).catch(() => {})
   }, [])
 
-  // Poll VM status every 8s while transitioning, every 30s when stable
+  // Poll GPU VM status every 6s while transitioning, every 30s when stable
   useEffect(() => {
     getVMStatus().then(d => setVmStatus(d.status)).catch(() => {})
     const transitioning = vmStatus === 'STAGING' || vmStatus === 'STOPPING'
@@ -61,6 +65,21 @@ export default function Layout() {
     }, transitioning ? 6000 : 30000)
     return () => clearInterval(id)
   }, [vmStatus])
+
+  // Poll CPU VM status
+  useEffect(() => {
+    getCPUVMStatus().then(d => setCpuStatus(d.status)).catch(() => {})
+    const transitioning = cpuStatus === 'STAGING' || cpuStatus === 'STOPPING'
+    const id = setInterval(() => {
+      getCPUVMStatus().then(d => setCpuStatus(d.status)).catch(() => {})
+    }, transitioning ? 6000 : 30000)
+    return () => clearInterval(id)
+  }, [cpuStatus])
+
+  // Sync active instance from backend on mount
+  useEffect(() => {
+    getActiveInstance().then(d => setActiveInstanceState(d.instance)).catch(() => {})
+  }, [])
 
   // Poll capture status while active so line count updates live
   useEffect(() => {
@@ -109,6 +128,33 @@ export default function Layout() {
       setVmError(e.message)
     } finally {
       setVmBusy(false)
+    }
+  }
+
+  async function toggleCPUVM() {
+    setCpuError(null)
+    setCpuBusy(true)
+    try {
+      if (cpuStatus === 'RUNNING') {
+        const r = await stopCPUVM()
+        setCpuStatus(r.status)
+      } else {
+        const r = await startCPUVM()
+        setCpuStatus(r.status)
+      }
+    } catch (e) {
+      setCpuError(e.message)
+    } finally {
+      setCpuBusy(false)
+    }
+  }
+
+  async function switchActive(which) {
+    try {
+      const r = await setActiveInstance(which)
+      setActiveInstanceState(r.instance)
+    } catch (e) {
+      // ignore — status will be stale but not critical
     }
   }
 
@@ -211,30 +257,31 @@ export default function Layout() {
         </div>
 
         {/* MedGemma VM control */}
-        <div className="px-4 py-3 border-t border-border">
-          <div className="flex items-center justify-between gap-2">
+        <div className="px-4 py-3 border-t border-border space-y-1.5">
+
+          {/* GPU row */}
+          <div className="flex items-center justify-between gap-1">
             <div className="flex items-center gap-1.5 min-w-0">
               <ServerIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />
-              <span className="text-[10px] text-muted truncate">MedGemma</span>
+              <span className="text-[10px] text-muted truncate">GPU</span>
+              {activeInstance === 'gpu' && (
+                <span className="text-[9px] text-accent font-mono">active</span>
+              )}
             </div>
-            <div className="flex items-center gap-2">
-              {/* Status dot */}
+            <div className="flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  vmStatus === 'RUNNING'
-                    ? 'bg-green-400'
-                    : vmStatus === 'STAGING' || vmStatus === 'STOPPING'
-                    ? 'bg-yellow-400 animate-pulse'
-                    : 'bg-zinc-600'
+                  vmStatus === 'RUNNING' ? 'bg-green-400'
+                  : vmStatus === 'STAGING' || vmStatus === 'STOPPING' ? 'bg-yellow-400 animate-pulse'
+                  : 'bg-zinc-600'
                 }`}
                 title={vmStatus}
               />
-              {/* Start / Stop button */}
               <button
                 onClick={toggleVM}
                 disabled={vmBusy || vmStatus === 'STAGING' || vmStatus === 'STOPPING'}
-                title={vmStatus === 'RUNNING' ? 'Stop MedGemma VM' : 'Start MedGemma VM'}
-                className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors disabled:opacity-40 ${
+                title={vmStatus === 'RUNNING' ? 'Stop GPU VM' : 'Start GPU VM'}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors disabled:opacity-40 ${
                   vmStatus === 'RUNNING'
                     ? 'text-red-400 bg-red-400/10 hover:bg-red-400/20'
                     : 'text-green-400 bg-green-400/10 hover:bg-green-400/20'
@@ -243,14 +290,77 @@ export default function Layout() {
                 {vmStatus === 'STAGING' ? 'starting…'
                   : vmStatus === 'STOPPING' ? 'stopping…'
                   : vmBusy ? '…'
-                  : vmStatus === 'RUNNING' ? 'stop'
-                  : 'start'}
+                  : vmStatus === 'RUNNING' ? 'stop' : 'start'}
+              </button>
+              <button
+                onClick={() => switchActive('gpu')}
+                disabled={activeInstance === 'gpu'}
+                title="Use GPU instance for inference"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors disabled:opacity-30 ${
+                  activeInstance === 'gpu'
+                    ? 'text-accent bg-accent/10 cursor-default'
+                    : 'text-muted hover:text-white hover:bg-ink-700'
+                }`}
+              >
+                use
               </button>
             </div>
           </div>
           {vmError && (
-            <p className="text-[10px] text-red-400 mt-1 truncate" title={vmError}>{vmError}</p>
+            <p className="text-[10px] text-red-400 truncate" title={vmError}>{vmError}</p>
           )}
+
+          {/* CPU row */}
+          <div className="flex items-center justify-between gap-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <ServerIcon className="w-3.5 h-3.5 text-muted flex-shrink-0" />
+              <span className="text-[10px] text-muted truncate">CPU</span>
+              {activeInstance === 'cpu' && (
+                <span className="text-[9px] text-accent font-mono">active</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  cpuStatus === 'RUNNING' ? 'bg-green-400'
+                  : cpuStatus === 'STAGING' || cpuStatus === 'STOPPING' ? 'bg-yellow-400 animate-pulse'
+                  : 'bg-zinc-600'
+                }`}
+                title={cpuStatus}
+              />
+              <button
+                onClick={toggleCPUVM}
+                disabled={cpuBusy || cpuStatus === 'STAGING' || cpuStatus === 'STOPPING'}
+                title={cpuStatus === 'RUNNING' ? 'Stop CPU VM' : 'Start CPU VM'}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors disabled:opacity-40 ${
+                  cpuStatus === 'RUNNING'
+                    ? 'text-red-400 bg-red-400/10 hover:bg-red-400/20'
+                    : 'text-green-400 bg-green-400/10 hover:bg-green-400/20'
+                }`}
+              >
+                {cpuStatus === 'STAGING' ? 'starting…'
+                  : cpuStatus === 'STOPPING' ? 'stopping…'
+                  : cpuBusy ? '…'
+                  : cpuStatus === 'RUNNING' ? 'stop' : 'start'}
+              </button>
+              <button
+                onClick={() => switchActive('cpu')}
+                disabled={activeInstance === 'cpu'}
+                title="Use CPU instance for inference"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors disabled:opacity-30 ${
+                  activeInstance === 'cpu'
+                    ? 'text-accent bg-accent/10 cursor-default'
+                    : 'text-muted hover:text-white hover:bg-ink-700'
+                }`}
+              >
+                use
+              </button>
+            </div>
+          </div>
+          {cpuError && (
+            <p className="text-[10px] text-red-400 truncate" title={cpuError}>{cpuError}</p>
+          )}
+
         </div>
 
         {/* Bottom: spend + log capture */}

@@ -308,6 +308,8 @@ class GeminiLLMClient:
                             response_data = _json.loads(raw_content) if isinstance(raw_content, str) else raw_content
                         except Exception:
                             response_data = {"output": raw_content}
+                        if not isinstance(response_data, dict):
+                            response_data = {"result": response_data}
                         parts.append(types.Part(function_response=types.FunctionResponse(
                             name=block.get("name", "tool"),
                             response=response_data,
@@ -627,13 +629,15 @@ class OllamaLLMClient:
 
 def get_llm_client(model: str | None = None) -> "AnthropicLLMClient | GeminiLLMClient | OllamaLLMClient":
     """Return the right client. Uses MODEL env var unless overridden by `model`."""
-    from ..config import MODEL, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OLLAMA_API_KEY, MEDGEMMA_URL
+    from ..config import MODEL, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OLLAMA_API_KEY, MEDGEMMA_URL, MEDGEMMA_CPU_URL
+    from .. import state
 
     resolved = model or MODEL
 
     if resolved.startswith("medgemma") or "/" not in resolved and resolved.startswith("ollama"):
-        log.debug("Using Ollama/MedGemma client  model=%s", resolved)
-        return OllamaLLMClient(base_url=MEDGEMMA_URL, api_key=OLLAMA_API_KEY, model=resolved)
+        url = MEDGEMMA_CPU_URL if state.active_medgemma == "cpu" and MEDGEMMA_CPU_URL else MEDGEMMA_URL
+        log.debug("Using Ollama/MedGemma client  model=%s  instance=%s  url=%s", resolved, state.active_medgemma, url)
+        return OllamaLLMClient(base_url=url, api_key=OLLAMA_API_KEY, model=resolved)
 
     if resolved.startswith("gemini"):
         if not GOOGLE_API_KEY:

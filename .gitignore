@@ -16,3 +16,5 @@ kbs/agent_school/assessments/*
 timelines/*
 kbs/agent_school/learn_runs/*
 app/logs/*
+app/traces/*
+app/traces/*

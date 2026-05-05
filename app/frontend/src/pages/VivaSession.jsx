@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   startViva,
   runVivaTurn,
+  rerunVivaTurn,
   listVivaSessions,
   getVivaSession,
   deleteVivaSession,
@@ -503,7 +504,7 @@ function InstructionsCard({ orders, onAcknowledge }) {
 
 // ── Turn card ──────────────────────────────────────────────────────────────────
 
-function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy }) {
+function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy, onRerun, rerunning = false }) {
   const [open, setOpen] = useState(defaultOpen)
   const [acknowledged, setAcknowledged] = useState({})
   const scenario = turn.scenario || {}
@@ -541,10 +542,13 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy }) {
 
   return (
     <div className="border border-border rounded-lg overflow-hidden">
-      {/* Header */}
-      <button
+      {/* Header — div instead of button to allow nested action buttons */}
+      <div
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-ink-800 hover:bg-ink-700 transition-colors text-left"
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 bg-ink-800 hover:bg-ink-700 transition-colors cursor-pointer select-none"
       >
         <div className="flex items-center gap-3">
           <span className="text-xs font-mono text-muted">Turn {turn.turn_num}</span>
@@ -564,12 +568,27 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {turn.rerun && (
+            <span className="text-[9px] font-mono text-purple-400/70 uppercase tracking-wider">rerun</span>
+          )}
           {turn.cost_usd != null && (
             <span className="text-[10px] text-muted font-mono">${turn.cost_usd.toFixed(4)}</span>
           )}
+          {onRerun && (
+            <button
+              onClick={e => { e.stopPropagation(); onRerun(turn.turn_num) }}
+              disabled={rerunning}
+              title={`Rerun Turn ${turn.turn_num}`}
+              className="p-1 rounded text-muted hover:text-amber-400 disabled:opacity-40 transition-colors"
+            >
+              {rerunning
+                ? <ClockIcon className="w-3.5 h-3.5 animate-spin" />
+                : <ArrowPathIcon className="w-3.5 h-3.5" />}
+            </button>
+          )}
           {open ? <ChevronDownIcon className="w-4 h-4 text-muted" /> : <ChevronRightIcon className="w-4 h-4 text-muted" />}
         </div>
-      </button>
+      </div>
 
       {open && (
         <div className="divide-y divide-border">
@@ -641,19 +660,37 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy }) {
 
 // ── Dummy patient panel ────────────────────────────────────────────────────────
 
+const DEFAULT_PATIENT_FORM = {
+  name: 'Viva Patient',
+  age_years: 50,
+  gender: 'male',
+  weight_kg: 70,
+  height_cm: 170,
+  creatinine: 90,
+  egfr: 75,
+  allergies: '',
+  diagnoses: '',
+}
+
+function patientToForm(p) {
+  if (!p) return DEFAULT_PATIENT_FORM
+  return {
+    name: p.name || 'Viva Patient',
+    age_years: p.age_years ?? 50,
+    gender: p.gender || 'male',
+    weight_kg: p.weight_kg ?? 70,
+    height_cm: p.height_cm ?? 170,
+    creatinine: p.creatinine ?? 90,
+    egfr: p.egfr ?? 75,
+    allergies: (p.allergies || []).join(', '),
+    diagnoses: (p.diagnoses || []).join(', '),
+  }
+}
+
 function PatientPanel({ patient, onSaved }) {
   const [open, setOpen] = useState(!patient)
-  const [form, setForm] = useState({
-    name: patient?.name || '',
-    age_years: patient?.age_years || 50,
-    gender: patient?.gender || 'male',
-    weight_kg: patient?.weight_kg || '',
-    height_cm: patient?.height_cm || '',
-    creatinine: patient?.creatinine || '',
-    egfr: patient?.egfr || '',
-    allergies: (patient?.allergies || []).join(', '),
-    diagnoses: (patient?.diagnoses || []).join(', '),
-  })
+  const [isNew, setIsNew] = useState(false)
+  const [form, setForm] = useState(patientToForm(patient))
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState(null)
 
@@ -680,15 +717,16 @@ function PatientPanel({ patient, onSaved }) {
         name: form.name || 'Viva Patient',
         age_years: Number(form.age_years) || 50,
         gender: form.gender,
-        weight_kg: form.weight_kg ? Number(form.weight_kg) : null,
-        height_cm: form.height_cm ? Number(form.height_cm) : null,
-        creatinine: form.creatinine ? Number(form.creatinine) : null,
-        egfr: form.egfr ? Number(form.egfr) : null,
+        weight_kg: form.weight_kg !== '' ? Number(form.weight_kg) : null,
+        height_cm: form.height_cm !== '' ? Number(form.height_cm) : null,
+        creatinine: form.creatinine !== '' ? Number(form.creatinine) : null,
+        egfr: form.egfr !== '' ? Number(form.egfr) : null,
         allergies: form.allergies ? form.allergies.split(',').map(s => s.trim()).filter(Boolean) : [],
         diagnoses: form.diagnoses ? form.diagnoses.split(',').map(s => s.trim()).filter(Boolean) : [],
       }
       const data = await createVivaPatient(payload)
       onSaved(data.patient)
+      setIsNew(false)
       setOpen(false)
     } catch (e) {
       setErr(e.message)
@@ -697,29 +735,45 @@ function PatientPanel({ patient, onSaved }) {
     }
   }
 
+  function handleNewPatient() {
+    setForm(DEFAULT_PATIENT_FORM)
+    setIsNew(true)
+    setErr(null)
+    setOpen(true)
+  }
+
   return (
     <div className="border-b border-border">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-ink-700 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <UserCircleIcon className="w-4 h-4 text-accent" />
-          <span className="text-xs font-medium text-white">
-            {patient ? patient.name : 'Viva Patient'}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {patient && (
-            <span className="text-[10px] text-muted font-mono">
-              {patient.weight_kg ? `${patient.weight_kg}kg` : ''}
-              {patient.weight_kg && patient.age_years ? ' · ' : ''}
-              {patient.age_years ? `${patient.age_years}yr` : ''}
+      <div className="flex items-center">
+        <button
+          onClick={() => { setIsNew(false); setForm(patientToForm(patient)); setOpen(o => !o) }}
+          className="flex-1 flex items-center justify-between px-4 py-2.5 hover:bg-ink-700 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <UserCircleIcon className="w-4 h-4 text-accent" />
+            <span className="text-xs font-medium text-white">
+              {isNew ? 'New Patient' : patient ? patient.name : 'Viva Patient'}
             </span>
-          )}
-          {open ? <ChevronDownIcon className="w-3.5 h-3.5 text-muted" /> : <ChevronRightIcon className="w-3.5 h-3.5 text-muted" />}
-        </div>
-      </button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {patient && !isNew && (
+              <span className="text-[10px] text-muted font-mono">
+                {patient.weight_kg ? `${patient.weight_kg}kg` : ''}
+                {patient.weight_kg && patient.age_years ? ' · ' : ''}
+                {patient.age_years ? `${patient.age_years}yr` : ''}
+              </span>
+            )}
+            {open ? <ChevronDownIcon className="w-3.5 h-3.5 text-muted" /> : <ChevronRightIcon className="w-3.5 h-3.5 text-muted" />}
+          </div>
+        </button>
+        <button
+          onClick={handleNewPatient}
+          title="Create new patient"
+          className="px-2.5 py-2.5 text-muted hover:text-accent hover:bg-ink-700 transition-colors border-l border-border text-xs font-medium flex-shrink-0"
+        >
+          + New
+        </button>
+      </div>
 
       {open && (
         <div className="px-4 pb-4 space-y-2">
@@ -739,8 +793,8 @@ function PatientPanel({ patient, onSaved }) {
             </div>
             {field('Weight (kg)', 'weight_kg', 'number', 'e.g. 70')}
             {field('Height (cm)', 'height_cm', 'number', 'e.g. 170')}
-            {field('Creatinine (µmol/L)', 'creatinine', 'number', 'e.g. 120')}
-            {field('eGFR', 'egfr', 'number', 'e.g. 45')}
+            {field('Creatinine (µmol/L)', 'creatinine', 'number', 'e.g. 90')}
+            {field('eGFR', 'egfr', 'number', 'e.g. 75')}
             <div className="col-span-2">{field('Allergies (comma-sep)', 'allergies', 'text', 'penicillin, NSAID')}</div>
             <div className="col-span-2">{field('Diagnoses (comma-sep)', 'diagnoses', 'text', 'T2DM, CKD')}</div>
           </div>
@@ -751,7 +805,7 @@ function PatientPanel({ patient, onSaved }) {
             className="w-full flex items-center justify-center gap-1.5 bg-accent/90 text-black text-xs font-medium px-3 py-1.5 rounded hover:bg-accent disabled:opacity-40 transition-colors"
           >
             {loading ? <ClockIcon className="w-3 h-3 animate-spin" /> : <CheckIcon className="w-3 h-3" />}
-            {patient ? 'Update Patient' : 'Create Patient'}
+            {isNew ? 'Create Patient' : 'Update Patient'}
           </button>
         </div>
       )}
@@ -871,6 +925,7 @@ export default function VivaSession() {
   const [activeId, setActiveId] = useState(null)
   const [session, setSession] = useState(null)
   const [running, setRunning] = useState(false)
+  const [rerunningTurn, setRerunningTurn] = useState(null) // turn_num being rerun
   const [error, setError] = useState(null)
   const [patient, setPatient] = useState(null)
   const [pendingTurnOrders, setPendingTurnOrders] = useState(false)
@@ -948,6 +1003,29 @@ export default function VivaSession() {
       setError(e.message)
     } finally {
       setRunning(false)
+    }
+  }
+
+  async function handleRerunTurn(turnNum) {
+    if (!session || running || rerunningTurn != null) return
+    if (!window.confirm(`Rerun Turn ${turnNum}? This will replace Turn ${turnNum} and all subsequent turns.`)) return
+    setRerunningTurn(turnNum)
+    setError(null)
+    setPendingTurnOrders(false)
+    try {
+      const data = await rerunVivaTurn(session.session_id, turnNum, null, activeKB)
+      setSession(data.session)
+      setSessions(prev =>
+        prev.map(s =>
+          s.session_id === data.session.session_id
+            ? { ...s, status: data.session.status, current_turn: data.session.current_turn, total_cost_usd: data.session.total_cost_usd, outcome: data.session.outcome }
+            : s
+        )
+      )
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setRerunningTurn(null)
     }
   }
 
@@ -1092,6 +1170,8 @@ export default function VivaSession() {
                   defaultOpen={i === turns.length - 1}
                   onAllAcknowledged={i === turns.length - 1 ? () => setPendingTurnOrders(false) : undefined}
                   onWhy={(order, orderRunId) => setProvenance({ order, orderRunId })}
+                  onRerun={handleRerunTurn}
+                  rerunning={rerunningTurn === turn.turn_num}
                 />
               ))}
 
