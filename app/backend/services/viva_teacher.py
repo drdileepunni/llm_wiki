@@ -87,7 +87,10 @@ patient_state schema — populate what is relevant to the scenario:
     "isNIV": <true|false>,
     "isHFNC": <true|false>,
     "isIntubated": <true|false>
-  }}
+  }},
+  "home_medications": ["<drug dose route frequency>", "..."],
+  "diagnoses": ["<condition>", "..."],
+  "allergies": ["<allergen>", "..."]
 }}
 
 Rules:
@@ -96,6 +99,7 @@ Rules:
 - Include notes for any significant event findings (ECG, imaging, nursing observations)
 - Include io only if relevant (e.g. oliguria is part of the presentation)
 - Include vent_flags only if patient is on respiratory support at presentation
+- Include home_medications, diagnoses, and allergies whenever the patient has a relevant medical history
 - Be physiologically consistent — values must match the clinical narrative
 """
 

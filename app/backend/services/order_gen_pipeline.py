@@ -22,7 +22,7 @@ from pathlib import Path
 from ..config import MODEL, TRACES_DIR, _default_kb
 from .llm_client import get_llm_client
 from .token_tracker import log_call, calculate_cost
-from .emr import get_patient_demographics, search_orderables, create_orderable
+from .emr import get_patient_demographics, get_latest_labs, search_orderables, create_orderable
 from . import vector_store as vs_mod
 from .ingest_pipeline import write_gap_files
 from .provenance_logger import write_trace
@@ -120,8 +120,13 @@ For each recommendation:
 2. Search the orderables catalog to find the best matching item
 3. If the recommendation contains weight-based dosing (mg/kg, mcg/kg, units/kg), \
    fetch patient demographics to get the weight and calculate the actual dose
-4. Map the recommendation to an order with specific quantity, unit, route, frequency
-5. For ventilator orders: put mode/TV/RR/PEEP/FiO2 into the instructions field
+4. If placing a medication where organ function, diagnoses, or home medications \
+   could affect the dose or safety, use get_patient_demographics and/or get_latest_lab \
+   to retrieve the relevant data before finalising the order. Use your clinical knowledge \
+   to decide when this applies — do not skip it to save tool calls. Record any \
+   calculation or safety rationale in dose_calculation or notes.
+5. Map the recommendation to an order with specific quantity, unit, route, frequency
+6. For ventilator orders: put mode/TV/RR/PEEP/FiO2 into the instructions field
 
 ACTIVE ORDERS COMPARISON:
 - If active_orders are provided, compare every recommendation against them before generating
@@ -202,13 +207,38 @@ _TOOL_CREATE_ORDERABLE = {
 
 _TOOL_GET_DEMOGRAPHICS = {
     "name": "get_patient_demographics",
-    "description": "Get patient demographics including weight (kg), age, gender, and allergies. Use when a recommendation has weight-based dosing (mg/kg, mcg/kg).",
+    "description": (
+        "Get patient demographics: weight (kg), height, age, gender, allergies, "
+        "chronic diagnoses (PMHX), and home_medications. "
+        "Use for weight-based dosing AND whenever organ function, diagnoses, or home "
+        "medications are needed to verify a dose or check a contraindication."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
             "cpmrn": {"type": "string", "description": "Patient CPMRN identifier"},
         },
         "required": ["cpmrn"],
+    },
+}
+
+_TOOL_GET_LAB = {
+    "name": "get_latest_lab",
+    "description": (
+        "Fetch the most recent result for a specific lab test from the patient's chart. "
+        "Use when organ function data is needed to verify or adjust a dose "
+        "(e.g. creatinine for renal clearance, LFTs for hepatic function, "
+        "electrolytes before replacing, drug levels for therapeutic monitoring)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "test_name": {
+                "type": "string",
+                "description": "Lab test name, e.g. 'Creatinine', 'ALT', 'Potassium', 'Vancomycin level'",
+            },
+        },
+        "required": ["test_name"],
     },
 }
 
@@ -298,7 +328,7 @@ _TOOL_SUBMIT_ORDERS = {
     },
 }
 
-_GATHER_TOOLS = [_TOOL_SEARCH_ORDERABLES, _TOOL_CREATE_ORDERABLE, _TOOL_GET_DEMOGRAPHICS]
+_GATHER_TOOLS = [_TOOL_SEARCH_ORDERABLES, _TOOL_CREATE_ORDERABLE, _TOOL_GET_DEMOGRAPHICS, _TOOL_GET_LAB]
 
 
 def _execute_tool(name: str, args: dict, cpmrn: str | None) -> str:
@@ -327,6 +357,14 @@ def _execute_tool(name: str, args: dict, cpmrn: str | None) -> str:
             if not effective_cpmrn:
                 return json.dumps({"error": "No CPMRN provided"})
             result = get_patient_demographics(effective_cpmrn)
+        elif name == "get_latest_lab":
+            effective_cpmrn = cpmrn
+            if not effective_cpmrn:
+                return json.dumps({"error": "No CPMRN provided"})
+            test_name = args.get("test_name", "")
+            raw = get_latest_labs(effective_cpmrn, tests=[test_name])
+            labs = raw.get("labs", {})
+            result = labs if labs else {"message": f"No result found for {test_name}"}
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
         return json.dumps(result, default=str)
@@ -591,7 +629,8 @@ def run_order_generation(
     if cpmrn:
         user_msg += (
             f"\n\nPatient CPMRN: {cpmrn} (patient_type: {patient_type}). "
-            "Use get_patient_demographics if any recommendation needs weight-based dosing."
+            "Use get_patient_demographics for weight-based dosing, diagnoses, or home medications. "
+            "Use get_latest_lab to fetch organ function values (e.g. creatinine, LFTs) when needed."
         )
     else:
         user_msg += "\n\nNo CPMRN provided — skip weight-based calculations, set confidence to low for any weight-based dosing."
@@ -670,6 +709,8 @@ def run_order_generation(
                          block.input.get("name"), block.input.get("order_type"))
             elif block.name == "get_patient_demographics":
                 log.info("  get_patient_demographics  cpmrn=%r", block.input.get("cpmrn"))
+            elif block.name == "get_latest_lab":
+                log.info("  get_latest_lab  test=%r", block.input.get("test_name"))
             result_text = _execute_tool(block.name, block.input, cpmrn)
             tc_trace: dict = {"name": block.name, "args": block.input}
             try:

@@ -633,6 +633,16 @@ export async function runVivaTurn(sessionId, model = null, kbName) {
   return res.json()
 }
 
+export async function advanceVivaSession(sessionId, model = null, kbName) {
+  const res = await fetch(`${BASE}/viva/${encodeURIComponent(sessionId)}/advance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ model: model || undefined }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function listVivaSessions(kbName) {
   return fetch(`${BASE}/viva/`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }

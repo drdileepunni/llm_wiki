@@ -17,6 +17,7 @@ from .patient import (
     push_io_entry,
     complete_lab_orders,
     update_vent_flags,
+    update_patient_history,
     VIVA_DUMMY_CPMRN,
 )
 from .orderables import search_orderables, create_orderable
@@ -40,6 +41,7 @@ __all__ = [
     "push_io_entry",
     "complete_lab_orders",
     "update_vent_flags",
+    "update_patient_history",
     "VIVA_DUMMY_CPMRN",
     "search_orderables",
     "create_orderable",

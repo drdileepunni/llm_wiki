@@ -604,3 +604,21 @@ def update_vent_flags(cpmrn: str, is_niv: bool | None, is_hfnc: bool | None, is_
         updates["isIntubated.value"] = is_intubated
     if updates:
         get_db().patients.update_one({"CPMRN": cpmrn}, {"$set": updates})
+
+
+def update_patient_history(
+    cpmrn: str,
+    home_medications: list[str] | None = None,
+    diagnoses: list[str] | None = None,
+    allergies: list[str] | None = None,
+) -> None:
+    """Set home_medications, diagnoses (chronic), and/or allergies on the patient document."""
+    updates: dict = {}
+    if home_medications is not None:
+        updates["home_medications"] = home_medications
+    if diagnoses is not None:
+        updates["chronic"] = diagnoses
+    if allergies is not None:
+        updates["allergies"] = allergies
+    if updates:
+        get_db().patients.update_one({"CPMRN": cpmrn}, {"$set": updates})

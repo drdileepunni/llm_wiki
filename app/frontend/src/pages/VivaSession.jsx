@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   startViva,
-  runVivaTurn,
+  advanceVivaSession,
   rerunVivaTurn,
   listVivaSessions,
   getVivaSession,
@@ -610,45 +610,38 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy, onRerun
             )}
           </div>
 
-          {/* Orders section */}
+          {/* Orders placed this turn — read-only historical record */}
           <div className="px-4 py-3">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-[10px] uppercase tracking-widest text-muted">Orders</p>
-              {totalOrderCount > 0 && !allAcknowledged && (
-                <span className="flex items-center gap-1 text-[10px] text-amber-400">
-                  <ExclamationTriangleIcon className="w-3 h-3" />
-                  {pendingCount} unacknowledged
-                </span>
+            <p className="text-[10px] uppercase tracking-widest text-muted mb-2">
+              Orders Placed
+              {totalOrderCount > 0 && (
+                <span className="ml-2 text-muted/60">{totalOrderCount}</span>
               )}
-              {totalOrderCount > 0 && allAcknowledged && (
-                <span className="flex items-center gap-1 text-[10px] text-green-400">
-                  <CheckCircleIcon className="w-3 h-3" />
-                  all acknowledged
-                </span>
-              )}
-            </div>
-
+            </p>
             {totalOrderCount === 0 ? (
-              <p className="text-sm text-muted italic">No orders generated for this turn.</p>
+              <p className="text-xs text-muted italic">No orders placed this turn.</p>
             ) : (
-              <div className="space-y-2">
-                {/* High / medium confidence → individual order cards */}
-                {actionable.map((order) => (
-                  <OrderCard
-                    key={order._idx}
-                    order={order}
-                    onPlace={async (o) => { await handlePlace(o); markAck(order._idx) }}
-                    onIgnore={() => markAck(order._idx)}
-                    onWhy={onWhy ? (o) => onWhy(o, turn.order_run_id) : null}
-                  />
-                ))}
-                {/* Low confidence → single instructions card */}
-                {hasInstructions && (
-                  <InstructionsCard
-                    orders={instructions}
-                    onAcknowledge={() => markAck('instructions')}
-                  />
-                )}
+              <div className="space-y-1">
+                {orders.map((o, i) => {
+                  const typeKey = (o.order_type || 'med').toLowerCase()
+                  const typeColor = ORDER_TYPE_COLOR[typeKey] || 'text-muted bg-ink-700 border-border'
+                  const instr = (o.order_details?.instructions) || o.notes || ''
+                  return (
+                    <div key={i} className="flex items-start gap-2 py-1">
+                      <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded uppercase tracking-wider border flex-shrink-0 mt-0.5 ${typeColor}`}>
+                        {typeKey}
+                      </span>
+                      <div className="min-w-0">
+                        <span className="text-xs text-white/80">
+                          {o.orderable_name || o.recommendation || '—'}
+                        </span>
+                        {instr && (
+                          <p className="text-[11px] text-muted italic truncate">{instr}</p>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -905,11 +898,11 @@ function HistoryTab({ history }) {
   )
 }
 
-// ── Patient chart drawer ───────────────────────────────────────────────────────
+// ── Patient chart panel (permanent right column) ───────────────────────────────
 
 const CHART_TABS = ['vitals', 'labs', 'io', 'orders', 'notes', 'hx']
 
-function PatientChartDrawer({ onClose, refreshTrigger }) {
+function PatientChartPanel({ currentScenario, refreshTrigger }) {
   const [tab, setTab] = useState('vitals')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -934,7 +927,7 @@ function PatientChartDrawer({ onClose, refreshTrigger }) {
   useEffect(() => { if (refreshTrigger > 0) refresh() }, [refreshTrigger])
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-ink-900 border-l border-border z-40 flex flex-col shadow-2xl">
+    <div className="w-96 flex-shrink-0 border-l border-border bg-ink-900 flex flex-col">
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-ink-800 flex-shrink-0">
@@ -945,20 +938,29 @@ function PatientChartDrawer({ onClose, refreshTrigger }) {
             <span className="text-[9px] text-muted font-mono">{lastRefresh.toLocaleTimeString()}</span>
           )}
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={refresh}
-            disabled={loading}
-            title="Refresh from MongoDB"
-            className="p-1.5 rounded text-muted hover:text-white disabled:opacity-40 transition-colors"
-          >
-            <ArrowPathIcon className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-          <button onClick={onClose} className="p-1.5 rounded text-muted hover:text-white transition-colors">
-            <XMarkIcon className="w-4 h-4" />
-          </button>
-        </div>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          title="Refresh from MongoDB"
+          className="p-1.5 rounded text-muted hover:text-white disabled:opacity-40 transition-colors"
+        >
+          <ArrowPathIcon className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
+
+      {/* Current question — between header and tabs */}
+      {currentScenario && (
+        <div className="px-4 py-3 border-b border-border bg-ink-800/40 flex-shrink-0">
+          <div className="flex items-center gap-1.5 mb-2">
+            {currentScenario.phase && badge(currentScenario.phase, PHASE_COLOR[currentScenario.phase] || 'text-muted bg-ink-700')}
+            {currentScenario.difficulty && badge(currentScenario.difficulty, DIFF_COLOR[currentScenario.difficulty] || 'text-muted bg-ink-700')}
+          </div>
+          <p className="text-xs text-white/80 leading-relaxed">{currentScenario.clinical_context}</p>
+          {currentScenario.question && (
+            <p className="mt-2 text-xs text-accent font-medium italic leading-relaxed">{currentScenario.question}</p>
+          )}
+        </div>
+      )}
 
       {/* Tab bar */}
       <div className="flex border-b border-border flex-shrink-0 bg-ink-800/50">
@@ -1286,13 +1288,12 @@ export default function VivaSession() {
   const [sessions, setSessions] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [session, setSession] = useState(null)
-  const [running, setRunning] = useState(false)
-  const [rerunningTurn, setRerunningTurn] = useState(null) // turn_num being rerun
+  const [advancing, setAdvancing] = useState(false)
+  const [rerunningTurn, setRerunningTurn] = useState(null)
   const [error, setError] = useState(null)
   const [patient, setPatient] = useState(null)
-  const [pendingTurnOrders, setPendingTurnOrders] = useState(false)
-  const [provenance, setProvenance] = useState(null) // { order, orderRunId }
-  const [chartOpen, setChartOpen] = useState(false)
+  const [pendingOrders, setPendingOrders] = useState([])
+  const [provenance, setProvenance] = useState(null)
   const [chartRefreshTrigger, setChartRefreshTrigger] = useState(0)
   const bottomRef = useRef(null)
 
@@ -1311,25 +1312,19 @@ export default function VivaSession() {
     }
   }, [session?.turns?.length])
 
-  // Reset pending flag when new turn completes
+  // Sync pendingOrders from session whenever the session or turn changes
   useEffect(() => {
-    const turns = session?.turns || []
-    if (turns.length > 0) {
-      const lastTurn = turns[turns.length - 1]
-      if ((lastTurn.orders || []).length > 0) {
-        setPendingTurnOrders(true)
-      } else {
-        setPendingTurnOrders(false)
-      }
+    if (session) {
+      setPendingOrders(session.pending_orders || [])
     }
-  }, [session?.turns?.length])
+  }, [session?.session_id, session?.current_turn])
 
   async function handleStart(topic, maxTurns, model) {
     const data = await startViva(topic, maxTurns, model, activeKB)
     const s = data.session
     setSession(s)
     setActiveId(s.session_id)
-    setPendingTurnOrders(false)
+    setPendingOrders(s.pending_orders || [])
     setSessions(prev => [
       { session_id: s.session_id, topic: s.topic, status: s.status, current_turn: s.current_turn, max_turns: s.max_turns, created_at: s.created_at, total_cost_usd: s.total_cost_usd, outcome: s.outcome },
       ...prev,
@@ -1339,23 +1334,23 @@ export default function VivaSession() {
   async function handleSelectSession(id) {
     setActiveId(id)
     setError(null)
-    setPendingTurnOrders(false)
     try {
       const data = await getVivaSession(id, activeKB)
       setSession(data.session)
+      setPendingOrders(data.session.pending_orders || [])
     } catch (e) {
       setError(e.message)
     }
   }
 
-  async function handleRunTurn() {
-    if (!session || running) return
-    setRunning(true)
+  async function handleAdvance() {
+    if (!session || advancing) return
+    setAdvancing(true)
     setError(null)
-    setPendingTurnOrders(false)
     try {
-      const data = await runVivaTurn(session.session_id, null, activeKB)
+      const data = await advanceVivaSession(session.session_id, null, activeKB)
       setSession(data.session)
+      setPendingOrders(data.session.pending_orders || [])
       setSessions(prev =>
         prev.map(s =>
           s.session_id === data.session.session_id
@@ -1367,16 +1362,15 @@ export default function VivaSession() {
     } catch (e) {
       setError(e.message)
     } finally {
-      setRunning(false)
+      setAdvancing(false)
     }
   }
 
   async function handleRerunTurn(turnNum) {
-    if (!session || running || rerunningTurn != null) return
+    if (!session || advancing || rerunningTurn != null) return
     if (!window.confirm(`Rerun Turn ${turnNum}? This will replace Turn ${turnNum} and all subsequent turns.`)) return
     setRerunningTurn(turnNum)
     setError(null)
-    setPendingTurnOrders(false)
     try {
       const data = await rerunVivaTurn(session.session_id, turnNum, null, activeKB)
       setSession(data.session)
@@ -1400,7 +1394,7 @@ export default function VivaSession() {
       const s = data.session
       setSession(s)
       setActiveId(s.session_id)
-      setPendingTurnOrders(false)
+      setPendingOrders(s.pending_orders || [])
       setSessions(prev => [
         { session_id: s.session_id, topic: s.topic, status: s.status, current_turn: s.current_turn, max_turns: s.max_turns, created_at: s.created_at, total_cost_usd: s.total_cost_usd, outcome: s.outcome },
         ...prev,
@@ -1415,23 +1409,25 @@ export default function VivaSession() {
     try {
       await deleteVivaSession(id, activeKB)
       setSessions(prev => prev.filter(s => s.session_id !== id))
-      if (activeId === id) { setActiveId(null); setSession(null) }
+      if (activeId === id) { setActiveId(null); setSession(null); setPendingOrders([]) }
     } catch (e) {
       setError(e.message)
     }
   }
 
   const isComplete = session?.status === 'complete'
-  const pendingScenario = session?.next_scenario
   const turns = session?.turns || []
+  const currentScenario = session?.next_scenario
 
-  // Count total unacknowledged orders on the last turn
-  const lastTurn = turns[turns.length - 1]
-  const lastTurnOrderCount = (lastTurn?.orders || []).length
+  // Split pending orders: actionable (high/medium) vs low-confidence (instructions)
+  const actionablePending = pendingOrders
+    .map((o, i) => ({ ...o, _idx: i }))
+    .filter(o => (o.confidence || 'medium') !== 'low')
+  const instructionsPending = pendingOrders.filter(o => (o.confidence || 'medium') === 'low')
 
   return (
-    <div className="flex h-full">
-      {/* Sidebar */}
+    <div className="flex h-full overflow-hidden">
+      {/* Left sidebar */}
       <aside className="w-56 flex-shrink-0 flex flex-col border-r border-border bg-ink-900">
         <div className="px-4 py-4 border-b border-border">
           <h2 className="text-sm font-semibold text-white flex items-center gap-2">
@@ -1440,12 +1436,11 @@ export default function VivaSession() {
           </h2>
         </div>
 
-        {/* Dummy patient panel */}
         <PatientPanel patient={patient} onSaved={setPatient} />
 
         <div className="flex-1 overflow-y-auto py-2">
           <button
-            onClick={() => { setActiveId(null); setSession(null); setError(null); setPendingTurnOrders(false) }}
+            onClick={() => { setActiveId(null); setSession(null); setError(null); setPendingOrders([]) }}
             className={`w-full text-left px-4 py-3 text-sm transition-colors ${
               activeId === null
                 ? 'bg-accent/10 text-accent border-l-2 border-accent pl-[14px]'
@@ -1484,20 +1479,20 @@ export default function VivaSession() {
         </div>
       </aside>
 
-      {/* Main */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Centre: main content */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {activeId === null && !session ? (
           <NewVivaForm onStart={handleStart} patient={patient} />
         ) : session ? (
           <>
             {/* Session header */}
-            <div className="px-6 py-4 border-b border-border flex items-center justify-between flex-shrink-0">
-              <div>
-                <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+            <div className="px-6 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-white flex items-center gap-2 truncate">
                   {session.topic}
                   {session.forked_from && badge('replay', 'text-purple-400 bg-purple-400/10')}
                 </h2>
-                <p className="text-xs text-muted mt-0.5 font-mono">
+                <p className="text-xs text-muted mt-0.5 font-mono truncate">
                   {session.session_id} · turn {session.current_turn}/{session.max_turns} · ${(session.total_cost_usd || 0).toFixed(4)}
                   {patient && (
                     <span className="ml-2 text-accent/70">
@@ -1506,19 +1501,7 @@ export default function VivaSession() {
                   )}
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setChartOpen(o => !o)}
-                  title={chartOpen ? 'Close patient chart' : 'View live MongoDB patient chart'}
-                  className={`flex items-center gap-1.5 text-xs border px-2.5 py-1.5 rounded transition-colors ${
-                    chartOpen
-                      ? 'text-accent border-accent/60 bg-accent/10'
-                      : 'text-muted hover:text-white border-border hover:border-accent/50'
-                  }`}
-                >
-                  <CircleStackIcon className="w-3.5 h-3.5" />
-                  Chart
-                </button>
+              <div className="flex items-center gap-3 flex-shrink-0 ml-4">
                 {isComplete && !session.forked_from && (
                   <button
                     onClick={() => handleFork(session.session_id)}
@@ -1538,19 +1521,50 @@ export default function VivaSession() {
               </div>
             </div>
 
-            {/* Turn list */}
+            {/* Turn history + pending orders */}
             <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-              {turns.map((turn, i) => (
+
+              {/* Past turns (all collapsed by default) */}
+              {turns.map((turn) => (
                 <TurnCard
                   key={turn.turn_num}
                   turn={turn}
-                  defaultOpen={i === turns.length - 1}
-                  onAllAcknowledged={i === turns.length - 1 ? () => setPendingTurnOrders(false) : undefined}
+                  defaultOpen={false}
                   onWhy={(order, orderRunId) => setProvenance({ order, orderRunId })}
                   onRerun={handleRerunTurn}
                   rerunning={rerunningTurn === turn.turn_num}
                 />
               ))}
+
+              {/* AI-suggested orders for current scenario */}
+              {!isComplete && pendingOrders.length > 0 && (
+                <div className="border border-border rounded-lg overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 bg-ink-800">
+                    <div className="flex items-center gap-2">
+                      <SparklesIcon className="w-3.5 h-3.5 text-accent" />
+                      <p className="text-xs font-semibold text-white">AI Suggested Orders</p>
+                    </div>
+                    <span className="text-[10px] text-muted font-mono">Turn {session.current_turn + 1}</span>
+                  </div>
+                  <div className="px-4 py-3 space-y-2">
+                    {actionablePending.map((order) => (
+                      <OrderCard
+                        key={`t${session.current_turn}-${order._idx}`}
+                        order={order}
+                        onPlace={async (o) => { await placeVivaOrder(o) }}
+                        onIgnore={() => {}}
+                        onWhy={order.order_run_id ? (o) => setProvenance({ order: o, orderRunId: order.order_run_id }) : null}
+                      />
+                    ))}
+                    {instructionsPending.length > 0 && (
+                      <InstructionsCard
+                        orders={instructionsPending}
+                        onAcknowledge={() => {}}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
 
               {isComplete && session.outcome && (
                 <div className="border border-green-500/30 rounded-lg px-4 py-3 bg-green-500/5">
@@ -1559,45 +1573,26 @@ export default function VivaSession() {
                 </div>
               )}
 
-              {!isComplete && pendingScenario && turns.length > 0 && (
-                <div className="border border-accent/20 rounded-lg px-4 py-3 bg-accent/5">
-                  <div className="flex items-center gap-2 mb-2">
-                    <SparklesIcon className="w-3.5 h-3.5 text-accent" />
-                    <p className="text-[10px] uppercase tracking-widest text-accent">Next Question Ready</p>
-                  </div>
-                  <p className="text-sm text-white/80 italic">{pendingScenario.clinical_context}</p>
-                  <p className="text-sm text-accent mt-1 font-medium">{pendingScenario.question}</p>
-                </div>
-              )}
-
               {error && <p className="text-red-400 text-sm px-1">{error}</p>}
               <div ref={bottomRef} />
             </div>
 
-            {/* Run turn footer */}
+            {/* Advance footer */}
             {!isComplete && (
               <div className="px-6 py-4 border-t border-border flex-shrink-0">
-                {pendingTurnOrders && lastTurnOrderCount > 0 && (
-                  <div className="flex items-center gap-2 mb-3 p-2.5 rounded border border-amber-400/30 bg-amber-400/5">
-                    <ExclamationTriangleIcon className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                    <p className="text-xs text-amber-400">
-                      Acknowledge all orders on Turn {lastTurn.turn_num} before running the next turn.
-                    </p>
-                  </div>
-                )}
                 <button
-                  onClick={handleRunTurn}
-                  disabled={running || pendingTurnOrders}
+                  onClick={handleAdvance}
+                  disabled={advancing}
                   className="flex items-center gap-2 bg-accent text-black font-medium text-sm px-5 py-2.5 rounded hover:bg-accent/90 disabled:opacity-40 transition-colors"
                 >
-                  {running ? (
-                    <><ClockIcon className="w-4 h-4 animate-spin" />Running turn {session.current_turn + 1}… (student → orders → gaps → teacher)</>
+                  {advancing ? (
+                    <><ClockIcon className="w-4 h-4 animate-spin" />Advancing… (simulator → gaps → teacher → next orders)</>
                   ) : (
-                    <><PlayIcon className="w-4 h-4" />Run Turn {session.current_turn + 1}</>
+                    <><PlayIcon className="w-4 h-4" />Advance to Turn {session.current_turn + 1}</>
                   )}
                 </button>
                 <p className="text-[10px] text-muted mt-1.5">
-                  Each turn: student answers → orders generated → knowledge gaps resolved → teacher advances the case
+                  Place or ignore the suggested orders above, then advance. The simulator reads your active chart orders.
                 </p>
               </div>
             )}
@@ -1605,18 +1600,19 @@ export default function VivaSession() {
         ) : null}
       </div>
 
+      {/* Right panel — permanent patient chart during session */}
+      {session && (
+        <PatientChartPanel
+          currentScenario={currentScenario}
+          refreshTrigger={chartRefreshTrigger}
+        />
+      )}
+
       {provenance && (
         <WhyPanel
           order={provenance.order}
           orderRunId={provenance.orderRunId}
           onClose={() => setProvenance(null)}
-        />
-      )}
-
-      {chartOpen && (
-        <PatientChartDrawer
-          onClose={() => setChartOpen(false)}
-          refreshTrigger={chartRefreshTrigger}
         />
       )}
     </div>

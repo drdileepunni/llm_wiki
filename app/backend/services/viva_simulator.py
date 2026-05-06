@@ -29,6 +29,7 @@ from .emr import (
     push_io_entry,
     complete_lab_orders,
     update_vent_flags,
+    update_patient_history,
 )
 
 log = logging.getLogger("wiki.viva_sim")
@@ -166,6 +167,19 @@ def write_patient_state(state: dict, cpmrn: str) -> str:
             is_hfnc=vf.get("isHFNC"),
             is_intubated=vf.get("isIntubated"),
         )
+
+    home_medications = state.get("home_medications")
+    diagnoses = state.get("diagnoses")
+    allergies = state.get("allergies")
+    if home_medications is not None or diagnoses is not None or allergies is not None:
+        update_patient_history(
+            cpmrn,
+            home_medications=home_medications,
+            diagnoses=diagnoses,
+            allergies=allergies,
+        )
+        if home_medications:
+            summary_parts.append(f"Home meds: {', '.join(home_medications)}")
 
     return "\n".join(summary_parts) if summary_parts else "(no state data)"
 

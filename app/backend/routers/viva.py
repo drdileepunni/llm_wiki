@@ -4,8 +4,9 @@ Viva (teacher-student loop) endpoints.
 POST /api/viva/patient              — create / upsert dummy patient
 GET  /api/viva/patient              — get dummy patient
 POST /api/viva/patient/place-order  — place / edit / stop one order on dummy patient
-POST /api/viva/start                — start new session (trajectory + first scenario)
-POST /api/viva/{session_id}/turn    — run one full turn (student → order-gen → gaps → teacher)
+POST /api/viva/start                — start new session (trajectory + first scenario + pending orders)
+POST /api/viva/{session_id}/advance — advance after user places orders (simulator → teacher → new pending orders)
+POST /api/viva/{session_id}/turn    — legacy automated turn (student → order-gen → gaps → teacher)
 GET  /api/viva/                     — list sessions
 GET  /api/viva/{session_id}         — get session state
 DELETE /api/viva/{session_id}       — delete session
@@ -44,6 +45,7 @@ from ..services.emr import (
 )
 from ..services.emr.db import get_db
 from ..services.order_gen_pipeline import run_order_generation
+from ..services.order_safety_annotator import annotate_recommendations
 from ..services.viva_simulator import simulate_and_write, write_patient_state
 
 log = logging.getLogger("wiki.viva")
@@ -51,6 +53,124 @@ log = logging.getLogger("wiki.viva")
 router = APIRouter(prefix="/api/viva", tags=["viva"])
 
 _VIVA_GAP_MAX_RESULTS = 1  # keep turns fast; LLM escalation kicks in from turn 3+
+
+
+# ── Shared helpers ─────────────────────────────────────────────────────────────
+
+def _dedup_orders(raw_orders: list[dict]) -> list[dict]:
+    """Deduplicate orders by (order_type, orderable_name), merging notes."""
+    seen: dict[tuple, int] = {}
+    deduped: list[dict] = []
+    for order in raw_orders:
+        name = (order.get("orderable_name") or "").strip()
+        if not name or name == "—":
+            order["orderable_name"] = None
+            order["confidence"] = "low"
+        key = (
+            (order.get("order_type") or "").lower(),
+            (order.get("orderable_name") or "").lower().strip(),
+        )
+        if key[1] and key in seen:
+            existing = deduped[seen[key]]
+            extra_notes = order.get("notes") or ""
+            extra_instr = (order.get("order_details") or {}).get("instructions") or ""
+            existing_notes = existing.get("notes") or ""
+            existing_instr = (existing.get("order_details") or {}).get("instructions") or ""
+            if extra_notes and extra_notes not in existing_notes:
+                existing["notes"] = f"{existing_notes}; {extra_notes}".lstrip("; ")
+            if extra_instr and extra_instr not in existing_instr:
+                if existing.get("order_details"):
+                    existing["order_details"]["instructions"] = f"{existing_instr}; {extra_instr}".lstrip("; ")
+        else:
+            seen[key] = len(deduped)
+            deduped.append(order)
+    return deduped
+
+
+def _flatten_active_orders(active_orders: dict | None) -> list[dict]:
+    """Convert MongoDB active_orders dict into a flat list for the simulator."""
+    if not active_orders:
+        return []
+    result = []
+    for cat_key, type_label in [
+        ("medications", "med"), ("labs", "lab"), ("procedures", "procedure"),
+        ("vents", "vents"), ("diets", "diet"), ("bloods", "blood"),
+    ]:
+        for item in active_orders.get(cat_key, []):
+            result.append({
+                "order_type": type_label,
+                "orderable_name": (
+                    item.get("name") or item.get("investigation") or item.get("pType") or ""
+                ),
+                "order_details": {
+                    k: item[k] for k in ("quantity", "unit", "route", "frequency", "instructions")
+                    if item.get(k)
+                },
+                "notes": item.get("notes", ""),
+                "confidence": "high",
+            })
+    return result
+
+
+def _orders_placed_text(orders: list[dict]) -> str:
+    """Build a human-readable summary of placed orders for the teacher prompt."""
+    if not orders:
+        return "No orders placed by user this turn."
+    lines = ["User placed the following orders:"]
+    for o in orders:
+        name = o.get("orderable_name") or "—"
+        t = o.get("order_type", "")
+        instr = (o.get("order_details") or {}).get("instructions") or o.get("notes") or ""
+        line = f"  • [{t.upper()}] {name}"
+        if instr:
+            line += f" — {instr}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _generate_pending_orders(
+    clinical_context: str,
+    question: str,
+    phase: str,
+    difficulty: str,
+    cpmrn: str,
+    kb: KBConfig,
+    model: str | None,
+) -> tuple[list[dict], float]:
+    """
+    Run student agent + order gen for a scenario to produce AI-suggested orders.
+    Returns (orders, cost_usd). Never raises — returns ([], 0.0) on failure.
+    """
+    try:
+        snap_result = await asyncio.to_thread(
+            run_viva_student_turn,
+            clinical_context, question, phase, difficulty, cpmrn, kb, model,
+        )
+        student_snap = snap_result["snapshots"][0]
+        all_steps = (
+            student_snap.get("immediate_next_steps", []) +
+            student_snap.get("monitoring_followup", [])
+        )
+        cost = student_snap.get("cost_usd", 0.0)
+        if not all_steps:
+            return [], cost
+        try:
+            all_steps = await asyncio.to_thread(
+                annotate_recommendations, all_steps, cpmrn, model,
+            )
+        except Exception:
+            pass
+        active_resp = get_active_orders(cpmrn)
+        active = active_resp.get("active_orders") if not active_resp.get("error") else None
+        order_result = await asyncio.to_thread(
+            run_order_generation, all_steps, cpmrn, "adult", model, kb, active, None,
+        )
+        raw_orders = order_result.get("orders", [])
+        cost += order_result.get("cost_usd", 0.0)
+        return _dedup_orders(raw_orders), cost
+    except Exception as exc:
+        log.warning("_generate_pending_orders failed: %s", exc)
+        return [], 0.0
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -314,6 +434,20 @@ async def start_viva(req: StartRequest, kb: KBConfig = Depends(resolve_kb)):
         kb_name=kb.name,
         kb=kb,
     )
+
+    # Generate AI-suggested orders for turn 1 so the user sees suggestions immediately
+    log.info("Viva %s start: generating initial pending orders", session_id)
+    pending_orders, pending_cost = await _generate_pending_orders(
+        first_scenario.get("clinical_context", ""),
+        first_scenario.get("question", ""),
+        first_scenario.get("phase", "MANAGEMENT"),
+        first_scenario.get("difficulty", "MEDIUM"),
+        VIVA_DUMMY_CPMRN, kb, model,
+    )
+    session["pending_orders"] = pending_orders
+    session["total_cost_usd"] = round(session.get("total_cost_usd", 0.0) + pending_cost, 6)
+    save_session(session, kb)
+    log.info("Viva %s start: %d initial pending orders generated", session_id, len(pending_orders))
     return {"session": session}
 
 
@@ -358,6 +492,161 @@ async def fork_viva(session_id: str, kb: KBConfig = Depends(resolve_kb)):
     return {"session": session}
 
 
+@router.post("/{session_id}/advance")
+async def advance_session(
+    session_id: str,
+    req: TurnRequest,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    """
+    Advance the viva after the user has placed/ignored orders:
+      1. Read active orders from MongoDB (what the user actually placed)
+      2. Run simulator on those orders
+      3. Gap resolution
+      4. Teacher generates next scenario
+      5. Student agent + order gen → pending_orders for next scenario
+    """
+    try:
+        session = load_session(session_id, kb)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is already complete")
+
+    next_scenario = session.get("next_scenario")
+    if not next_scenario:
+        raise HTTPException(status_code=400, detail="No pending scenario in session")
+
+    model = req.model or session.get("model") or None
+    turn_num = session["current_turn"] + 1
+
+    # ── 1. Read active orders from MongoDB ────────────────────────────────────
+    try:
+        active_resp = get_active_orders(VIVA_DUMMY_CPMRN)
+        active_orders_dict = active_resp.get("active_orders") if not active_resp.get("error") else {}
+    except Exception as exc:
+        log.warning("Viva %s advance turn %d: could not load active orders: %s", session_id, turn_num, exc)
+        active_orders_dict = {}
+    placed_orders = _flatten_active_orders(active_orders_dict)
+    log.info("Viva %s advance turn %d: %d orders placed by user", session_id, turn_num, len(placed_orders))
+
+    # ── 2. Simulator ──────────────────────────────────────────────────────────
+    simulation_summary = ""
+    log.info("Viva %s advance turn %d: running simulator", session_id, turn_num)
+    try:
+        sim_result = await asyncio.to_thread(
+            simulate_and_write,
+            session["trajectory"],
+            placed_orders,
+            VIVA_DUMMY_CPMRN,
+            next_scenario.get("clinical_context", ""),
+            turn_num,
+            session["max_turns"],
+            model,
+        )
+        simulation_summary = sim_result.get("summary", "")
+        log.info("Viva %s advance turn %d: simulation complete — %s", session_id, turn_num, simulation_summary[:120])
+    except Exception as exc:
+        log.warning("Viva %s advance turn %d: simulation failed: %s", session_id, turn_num, exc)
+
+    # ── 3. Gap resolution ─────────────────────────────────────────────────────
+    log.info("Viva %s advance turn %d: resolving gaps", session_id, turn_num)
+    gaps_before = _count_pending_gaps(kb)
+    gap_stats = await asyncio.to_thread(resolve_all_gaps, kb, _VIVA_GAP_MAX_RESULTS)
+    gaps_resolved = max(0, gaps_before - _count_pending_gaps(kb))
+    gap_cost = gap_stats.get("cost_usd", 0.0)
+    log.info("Viva %s advance turn %d: %d gaps resolved", session_id, turn_num, gaps_resolved)
+
+    # ── 4. Teacher generates next scenario ────────────────────────────────────
+    student_answer_text = _orders_placed_text(placed_orders)
+    log.info("Viva %s advance turn %d: teacher generating next step", session_id, turn_num)
+
+    replay_queue: list = session.get("replay_queue", [])
+    if "replay_queue" in session:
+        if replay_queue:
+            next_queued = replay_queue.pop(0)
+            session["replay_queue"] = replay_queue
+            teacher_result = {"complete": False, "scenario": next_queued}
+        else:
+            teacher_result = {"complete": True, "outcome": "Replay complete."}
+    else:
+        teacher_result = await asyncio.to_thread(
+            generate_next_turn,
+            session["trajectory"],
+            session["turns"],
+            student_answer_text,
+            turn_num,
+            session["max_turns"],
+            simulation_summary,
+            model,
+        )
+        if not teacher_result.get("complete"):
+            additional_notes = teacher_result["scenario"].pop("additional_notes", [])
+            if additional_notes:
+                try:
+                    await asyncio.to_thread(write_patient_state, {"notes": additional_notes}, VIVA_DUMMY_CPMRN)
+                    log.info("Viva %s advance turn %d: wrote %d additional notes", session_id, turn_num, len(additional_notes))
+                except Exception as exc:
+                    log.warning("Could not write teacher additional notes: %s", exc)
+
+    # ── 5. Generate pending orders for next scenario ──────────────────────────
+    complete = teacher_result["complete"] or turn_num >= session["max_turns"]
+    pending_orders: list[dict] = []
+    pending_cost = 0.0
+    if not complete and teacher_result.get("scenario"):
+        next_s = teacher_result["scenario"]
+        log.info("Viva %s advance turn %d: generating pending orders for next scenario", session_id, turn_num)
+        pending_orders, pending_cost = await _generate_pending_orders(
+            next_s.get("clinical_context", ""),
+            next_s.get("question", ""),
+            next_s.get("phase", "MANAGEMENT"),
+            next_s.get("difficulty", "MEDIUM"),
+            VIVA_DUMMY_CPMRN, kb, model,
+        )
+        log.info("Viva %s advance turn %d: %d pending orders generated", session_id, turn_num, len(pending_orders))
+
+    # ── Persist ───────────────────────────────────────────────────────────────
+    turn_cost = gap_cost + pending_cost
+    turn_record = {
+        "turn_num": turn_num,
+        "scenario": next_scenario,
+        "chat_run_id": None,
+        "order_run_id": None,
+        "student_answer_text": student_answer_text,
+        "student_snap": {},
+        "orders": placed_orders,
+        "simulation_summary": simulation_summary,
+        "gaps_resolved": gaps_resolved,
+        "cost_usd": turn_cost,
+    }
+    session["turns"].append(turn_record)
+    session["current_turn"] = turn_num
+    session["total_cost_usd"] = round(session.get("total_cost_usd", 0.0) + turn_cost, 6)
+
+    if complete:
+        session["status"] = "complete"
+        session["outcome"] = teacher_result.get("outcome", "Case concluded.")
+        session["next_scenario"] = None
+        session["pending_orders"] = []
+    else:
+        session["next_scenario"] = teacher_result["scenario"]
+        session["pending_orders"] = pending_orders
+
+    save_session(session, kb)
+    return {
+        "turn_num": turn_num,
+        "placed_orders": placed_orders,
+        "gaps_resolved": gaps_resolved,
+        "complete": complete,
+        "outcome": session.get("outcome"),
+        "next_scenario": session.get("next_scenario"),
+        "pending_orders": pending_orders,
+        "cost_usd": turn_cost,
+        "session": session,
+    }
+
+
 @router.post("/{session_id}/turn")
 async def run_turn(
     session_id: str,
@@ -365,7 +654,7 @@ async def run_turn(
     kb: KBConfig = Depends(resolve_kb),
 ):
     """
-    Run one complete viva turn:
+    Legacy automated turn (kept for backward compatibility):
       1. Student assessment (wiki-grounded CDS)
       2. Order generation from immediate_next_steps (with active orders context)
       3. Gap resolution (blocking)
@@ -413,6 +702,17 @@ async def run_turn(
     order_cost = 0.0
 
     if all_steps:
+        # ── 2a. Safety annotation — enrich recs with organ function / safety context
+        try:
+            all_steps = await asyncio.to_thread(
+                annotate_recommendations,
+                all_steps,
+                VIVA_DUMMY_CPMRN,
+                model,
+            )
+        except Exception as exc:
+            log.warning("Order safety annotation failed (continuing with originals): %s", exc)
+
         try:
             active_orders_resp = get_active_orders(VIVA_DUMMY_CPMRN)
             active_orders = active_orders_resp.get("active_orders") if not active_orders_resp.get("error") else None
@@ -434,38 +734,7 @@ async def run_turn(
             raw_orders = order_result.get("orders", [])
             order_run_id = order_result.get("run_id")
             order_cost = order_result.get("cost_usd", 0.0)
-
-            # Enforce: no catalog match → must be low confidence (goes to instructions card)
-            for order in raw_orders:
-                name = (order.get("orderable_name") or "").strip()
-                if not name or name == "—":
-                    order["orderable_name"] = None
-                    order["confidence"] = "low"
-
-            # Dedup by (order_type, orderable_name) — keep first, merge notes/instructions
-            seen: dict[tuple, int] = {}
-            deduped: list[dict] = []
-            for order in raw_orders:
-                key = (
-                    (order.get("order_type") or "").lower(),
-                    (order.get("orderable_name") or "").lower().strip(),
-                )
-                if key[1] and key in seen:
-                    existing = deduped[seen[key]]
-                    extra_notes = order.get("notes") or ""
-                    extra_instr = (order.get("order_details") or {}).get("instructions") or ""
-                    existing_notes = existing.get("notes") or ""
-                    existing_instr = (existing.get("order_details") or {}).get("instructions") or ""
-                    if extra_notes and extra_notes not in existing_notes:
-                        existing["notes"] = f"{existing_notes}; {extra_notes}".lstrip("; ")
-                    if extra_instr and extra_instr not in existing_instr:
-                        if existing.get("order_details"):
-                            existing["order_details"]["instructions"] = f"{existing_instr}; {extra_instr}".lstrip("; ")
-                else:
-                    seen[key] = len(deduped)
-                    deduped.append(order)
-            generated_orders = deduped
-
+            generated_orders = _dedup_orders(raw_orders)
             log.info(
                 "Viva %s turn %d: %d orders generated (%d after dedup)  cost=$%.4f",
                 session_id, turn_num, len(raw_orders), len(generated_orders), order_cost,
@@ -669,35 +938,7 @@ async def rerun_turn(
             raw_orders = order_result.get("orders", [])
             order_run_id = order_result.get("run_id")
             order_cost = order_result.get("cost_usd", 0.0)
-
-            for order in raw_orders:
-                name = (order.get("orderable_name") or "").strip()
-                if not name or name == "—":
-                    order["orderable_name"] = None
-                    order["confidence"] = "low"
-
-            seen: dict[tuple, int] = {}
-            deduped: list[dict] = []
-            for order in raw_orders:
-                key = (
-                    (order.get("order_type") or "").lower(),
-                    (order.get("orderable_name") or "").lower().strip(),
-                )
-                if key[1] and key in seen:
-                    existing = deduped[seen[key]]
-                    extra_notes = order.get("notes") or ""
-                    extra_instr = (order.get("order_details") or {}).get("instructions") or ""
-                    existing_notes = existing.get("notes") or ""
-                    existing_instr = (existing.get("order_details") or {}).get("instructions") or ""
-                    if extra_notes and extra_notes not in existing_notes:
-                        existing["notes"] = f"{existing_notes}; {extra_notes}".lstrip("; ")
-                    if extra_instr and extra_instr not in existing_instr:
-                        if existing.get("order_details"):
-                            existing["order_details"]["instructions"] = f"{existing_instr}; {extra_instr}".lstrip("; ")
-                else:
-                    seen[key] = len(deduped)
-                    deduped.append(order)
-            generated_orders = deduped
+            generated_orders = _dedup_orders(raw_orders)
         except Exception as exc:
             log.warning("Order generation failed for rerun turn %d: %s", turn_num, exc)
 

@@ -159,6 +159,8 @@ Guidelines:
 - Think step-by-step about what clinical data is most relevant to this question.
 - Retrieve only what you need — do not call every tool blindly.
 - After each tool result, decide whether you have enough information or need more.
+- Always call get_patient_history early — diagnoses, home medications, and renal labs
+  affect nearly every dosing and safety decision downstream.
 - When you have gathered sufficient data, output a concise PATIENT DATA BRIEF summarising
   what you found (actual values with timestamps where available).
 - The brief will be used for further clinical reasoning and wiki-grounded synthesis.
@@ -167,10 +169,14 @@ Guidelines:
 
 _DONE_SYSTEM = """\
 You are a senior ICU clinician. Based on the patient data you have retrieved,
-write a concise clinical handover brief (200-300 words) covering:
+write a concise clinical handover brief (200-300 words) covering these sections \
+in order (all are mandatory — write "None" or "Not available" if data was not retrieved):
 
 **Primary Syndrome** — dominant problem and severity.
 **Key Abnormalities** — bulleted, with actual values from the retrieved data.
+**Renal Function** — latest Creatinine, eGFR, and BUN if available; state "Not available" if not retrieved. This section is mandatory — it drives renally-adjusted dosing.
+**Diagnoses / PMHX** — list all known chronic conditions and diagnoses; if none recorded write "None". Mandatory — affects drug safety (e.g. hepatotoxic drugs, contraindications).
+**Home Medications** — list all pre-admission medications with doses; if none recorded write "None". Mandatory — affects dosing for tolerance-dependent drugs.
 **Active Medications & Interventions** — what is currently running.
 **Current Status** — trajectory and most urgent concern.
 
