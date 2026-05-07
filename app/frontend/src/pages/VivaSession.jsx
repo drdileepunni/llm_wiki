@@ -18,6 +18,7 @@ import {
   cancelVivaBatchRun,
   deleteVivaBatchRun,
   extendVivaBatchRun,
+  getVivaBatchCatalog,
 } from '../api'
 import { useAppState } from '../AppStateContext'
 import {
@@ -1438,6 +1439,8 @@ function VivaBatchPanel({ kbName }) {
   const [iterations, setIterations] = useState(3)
   const [maxTurns, setMaxTurns] = useState(6)
   const [model, setModel] = useState('')
+  const [diagnosisId, setDiagnosisId] = useState('')
+  const [diagnoses, setDiagnoses] = useState([])
 
   // Load batch runs list
   const loadRuns = useCallback(() => {
@@ -1447,6 +1450,10 @@ function VivaBatchPanel({ kbName }) {
   }, [kbName])
 
   useEffect(() => { loadRuns() }, [loadRuns])
+
+  useEffect(() => {
+    getVivaBatchCatalog().then(d => setDiagnoses(d.groups || [])).catch(() => {})
+  }, [])
 
   // Poll selected run while running
   useEffect(() => {
@@ -1473,7 +1480,7 @@ function VivaBatchPanel({ kbName }) {
     setError(null)
     try {
       const data = await startVivaBatch(
-        { nSessions, mode, iterations, maxTurns, model: model || null },
+        { nSessions, mode, iterations, maxTurns, model: model || null, diagnosisId: diagnosisId || null },
         kbName,
       )
       const stub = {
@@ -1542,6 +1549,20 @@ function VivaBatchPanel({ kbName }) {
                 <option value="full">Full (all {totalCombinations})</option>
               </select>
               <p className="text-[10px] text-muted mt-1">{BATCH_MODE_INFO[mode]}</p>
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] text-muted uppercase tracking-wider">Diagnosis</span>
+              <select
+                value={diagnosisId}
+                onChange={e => setDiagnosisId(e.target.value)}
+                className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">All (weighted mix)</option>
+                {diagnoses.map(d => (
+                  <option key={d.id} value={d.id}>{d.label}</option>
+                ))}
+              </select>
             </label>
 
             {mode !== 'full' && (
@@ -1674,6 +1695,19 @@ function VivaBatchPanel({ kbName }) {
                     <span className="ml-2 inline-block w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" />
                   )}
                 </p>
+              </div>
+            )}
+
+            {/* Stop button — shown while running */}
+            {selectedRun.status === 'running' && (
+              <div className="flex justify-end">
+                <button
+                  onClick={() => handleCancel(selectedRun.run_id)}
+                  className="flex items-center gap-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 font-medium text-xs px-3 py-1.5 rounded transition-colors"
+                >
+                  <StopCircleIcon className="w-3.5 h-3.5" />
+                  Stop Batch
+                </button>
               </div>
             )}
 

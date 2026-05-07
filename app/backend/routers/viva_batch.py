@@ -41,12 +41,13 @@ _jobs: dict[str, dict] = {}
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class BatchStartRequest(BaseModel):
-    n_sessions:  int         = 10
-    mode:        str         = "weighted"   # "weighted" | "random" | "full"
-    iterations:  int         = 3
-    max_turns:   int         = 6
-    model:       str | None  = None
-    seed:        int | None  = None
+    n_sessions:    int         = 10
+    mode:          str         = "weighted"   # "weighted" | "random" | "full"
+    iterations:    int         = 3
+    max_turns:     int         = 6
+    model:         str | None  = None
+    seed:          int | None  = None
+    diagnosis_id:  str | None  = None        # optional filter — None means all diagnoses
 
 
 class ExtendRequest(BaseModel):
@@ -186,6 +187,7 @@ async def _do_batch_run(
             run_id,
             stop_event,
             req.seed,
+            req.diagnosis_id,
         )
         _jobs[run_id] = {"status": "done"}
     except Exception as exc:

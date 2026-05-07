@@ -472,6 +472,7 @@ def start_viva_batch(
     run_id: str,
     stop_event: threading.Event,
     seed: int | None = None,
+    diagnosis_filter: str | None = None,
 ) -> str:
     """
     Synchronous batch orchestrator — call via asyncio.to_thread.
@@ -482,7 +483,7 @@ def start_viva_batch(
       C. Bulk gap resolution
       D. Compute gaps_per_session convergence metric
     """
-    state = _init_state(run_id, n_sessions, mode, iterations, max_turns, model, kb, seed)
+    state = _init_state(run_id, n_sessions, mode, iterations, max_turns, model, kb, seed, diagnosis_filter)
     _save_batch(state, kb)
 
     try:
@@ -492,7 +493,7 @@ def start_viva_batch(
             # ── A. Sample scenarios ──────────────────────────────────────────
             _update_phase(state, f"sampling_scenarios_iter_{iteration}", kb, stop_event)
             iter_seed = None if seed is None else (seed * 31 + iteration) & 0xFFFFFFFF
-            entries = sample_scenarios(n_sessions, mode, seed=iter_seed)  # type: ignore[arg-type]
+            entries = sample_scenarios(n_sessions, mode, seed=iter_seed, diagnosis_filter=diagnosis_filter)  # type: ignore[arg-type]
             state["sessions_by_iteration"][str(iteration)] = []
             _log_entry(state, "sampling",
                        f"Iter {iteration}: sampled {len(entries)} scenarios (mode={mode})")
@@ -651,12 +652,13 @@ def continue_viva_batch(
                f"Run extended: +{additional_iterations} iterations (new total: {new_total})")
     _save_batch(state, kb)
 
-    n_sessions  = state["n_sessions"]
-    mode        = state["mode"]
-    max_turns   = state["max_turns_per_session"]
-    model       = state.get("model")
-    seed        = state.get("seed")
-    start_iter  = state["current_iteration"] + 1
+    n_sessions       = state["n_sessions"]
+    mode             = state["mode"]
+    max_turns        = state["max_turns_per_session"]
+    model            = state.get("model")
+    seed             = state.get("seed")
+    diagnosis_filter = state.get("diagnosis_filter")
+    start_iter       = state["current_iteration"] + 1
 
     try:
         for iteration in range(start_iter, new_total + 1):
@@ -664,7 +666,7 @@ def continue_viva_batch(
 
             _update_phase(state, f"sampling_scenarios_iter_{iteration}", kb, stop_event)
             iter_seed = None if seed is None else (seed * 31 + iteration) & 0xFFFFFFFF
-            entries = sample_scenarios(n_sessions, mode, seed=iter_seed)  # type: ignore[arg-type]
+            entries = sample_scenarios(n_sessions, mode, seed=iter_seed, diagnosis_filter=diagnosis_filter)  # type: ignore[arg-type]
             state["sessions_by_iteration"][str(iteration)] = []
             _log_entry(state, "sampling",
                        f"Iter {iteration}: sampled {len(entries)} scenarios (mode={mode})")
@@ -803,6 +805,7 @@ def _init_state(
     model: str | None,
     kb: KBConfig,
     seed: int | None,
+    diagnosis_filter: str | None = None,
 ) -> dict:
     return {
         "run_id":              run_id,
@@ -819,6 +822,7 @@ def _init_state(
         "max_turns_per_session": max_turns,
         "model":               model,
         "seed":                seed,
+        "diagnosis_filter":    diagnosis_filter,
         # Progress
         "current_iteration":   0,
         "sessions_by_iteration": {},

@@ -117,6 +117,7 @@ def sample_scenarios(
     n: int,
     mode: Literal["weighted", "random", "full"] = "weighted",
     seed: int | None = None,
+    diagnosis_filter: str | None = None,
 ) -> list[ScenarioEntry]:
     """
     Return up to n ScenarioEntry items from the catalog.
@@ -126,8 +127,13 @@ def sample_scenarios(
                  admission count (mimics real ICU mix).
       random   — sample without replacement, uniform probability.
       full     — return all 210 entries (n is ignored).
+
+    If diagnosis_filter is set, only entries with that diagnosis_id are sampled.
     """
     catalog = build_catalog(seed=seed)
+
+    if diagnosis_filter:
+        catalog = [e for e in catalog if e.diagnosis_id == diagnosis_filter]
 
     if mode == "full":
         return catalog

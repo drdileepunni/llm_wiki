@@ -218,6 +218,16 @@ export async function resolveAll(kbName, maxResults = 3) {
   return res.json()
 }
 
+export async function resolveOne(gapFile, kbName, maxResults = 3) {
+  const res = await fetch(`${BASE}/resolve/resolve-one`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ gap_file: gapFile, max_results: maxResults }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function resolveBatchStatus(batchId) {
   return fetch(`${BASE}/resolve/batch/${batchId}`).then(r => r.json())
 }
@@ -701,7 +711,7 @@ export async function listVivaBatchRuns(kbName) {
   return res.json()
 }
 
-export async function startVivaBatch({ nSessions, mode, iterations, maxTurns, model, seed }, kbName) {
+export async function startVivaBatch({ nSessions, mode, iterations, maxTurns, model, seed, diagnosisId }, kbName) {
   const res = await fetch(`${BASE}/viva-batch/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
@@ -712,6 +722,7 @@ export async function startVivaBatch({ nSessions, mode, iterations, maxTurns, mo
       max_turns: maxTurns || 6,
       model: model || null,
       seed: seed ?? null,
+      diagnosis_id: diagnosisId || null,
     }),
   })
   if (!res.ok) throw new Error(await res.text())

@@ -18,3 +18,4 @@ kbs/agent_school/learn_runs/*
 app/logs/*
 app/traces/*
 app/traces/*
+kbs/agent_school/viva_batch_runs/*
