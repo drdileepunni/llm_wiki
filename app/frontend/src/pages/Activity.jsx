@@ -4,12 +4,11 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   getWikiActivity, getWikiFile,
-  getWikiGaps, resolveAll, resolveBatchStatus, deleteGap, updateGap, createGap, resolveJobStatus,
+  getWikiGaps, resolveAll, resolveOne, resolveBatchStatus, deleteGap, updateGap, createGap, resolveJobStatus,
   getWikiContamination, runDefrag, runMigrateScope, runScanContamination,
   markFalsePositive, runReconcileGaps, verifyGaps,
 } from '../api'
 import { useAppState } from '../AppStateContext'
-import ResolveModal from '../components/ResolveModal'
 
 function stripFrontmatter(text) {
   return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
@@ -215,7 +214,7 @@ function JobCard({ job, onUpdate }) {
   )
 }
 
-function GapCard({ gap, activeKB, onResolve, onDelete, deleting, onUpdated, isExpanded, onToggle }) {
+function GapCard({ gap, activeKB, onResolve, onDelete, deleting, resolving, onUpdated, isExpanded, onToggle }) {
   const stem = gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleVal, setTitleVal]         = useState(gap.title)
@@ -352,7 +351,10 @@ function GapCard({ gap, activeKB, onResolve, onDelete, deleting, onUpdated, isEx
             >
               {isExpanded ? '▲' : '▼'}
             </button>
-            <button onClick={onResolve} className="px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium">Resolve</button>
+            <button onClick={onResolve} disabled={resolving} className="px-2.5 py-1 text-xs bg-accent/20 hover:bg-accent/40 border border-accent/30 rounded-md text-accent transition-colors font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5">
+              {resolving && <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>}
+              {resolving ? 'Resolving…' : 'Resolve'}
+            </button>
             <button onClick={onDelete} disabled={deleting} className="w-6 h-6 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-950/30 border border-transparent hover:border-red-800/40 transition-all disabled:opacity-40 text-sm leading-none" title="Delete gap">×</button>
           </div>
         </div>
@@ -531,8 +533,8 @@ function NewGapForm({ activeKB, onCreated, onCancel }) {
 function GapsPanel({ activeKB, onResolved }) {
   const [gaps, setGaps]               = useState([])
   const [loading, setLoading]         = useState(true)
-  const [resolveGap, setResolveGap]   = useState(null)
   const [deletingGap, setDeletingGap] = useState(null)
+  const [resolvingGap, setResolvingGap] = useState(null)
   const [showNewGap, setShowNewGap]   = useState(false)
   const [jobs, setJobs]               = useState([])
   const [batchId, setBatchId]         = useState(null)
@@ -563,7 +565,7 @@ function GapsPanel({ activeKB, onResolved }) {
           newJobs.forEach(j => addedJobIds.current.add(j.job_id))
           setJobs(prev => [...newJobs.map(j => ({ ...j, status: 'running' })), ...prev])
         }
-        if (data.status === 'done') { clearInterval(iv); setBatchId(null); refreshGaps(); onResolved?.() }
+        if (data.status === 'done') { clearInterval(iv); setBatchId(null); setResolvingGap(null); refreshGaps(); onResolved?.() }
       } catch { clearInterval(iv) }
     }, 3000)
     return () => clearInterval(iv)
@@ -589,6 +591,19 @@ function GapsPanel({ activeKB, onResolved }) {
       setBatchId(data.batch_id)
       setBatchInfo({ total_gaps: gaps.length, completed_gaps: 0, status: 'running' })
     } catch (e) { console.error('resolve-all failed:', e) }
+  }
+
+  const handleResolveOne = async (gap) => {
+    try {
+      addedJobIds.current = new Set()
+      setResolvingGap(gap.file)
+      const data = await resolveOne(gap.file, activeKB)
+      setBatchId(data.batch_id)
+      setBatchInfo({ total_gaps: 1, completed_gaps: 0, status: 'running' })
+    } catch (e) {
+      console.error('resolve-one failed:', e)
+      setResolvingGap(null)
+    }
   }
 
   const [reconciling, setReconciling] = useState(false)
@@ -677,9 +692,10 @@ function GapsPanel({ activeKB, onResolved }) {
               key={gap.file || i}
               gap={gap}
               activeKB={activeKB}
-              onResolve={() => setResolveGap(gap)}
+              onResolve={() => handleResolveOne(gap)}
               onDelete={() => handleDeleteGap(gap)}
               deleting={deletingGap === (gap.file?.replace('wiki/gaps/', '').replace('.md', '') || gap.title)}
+              resolving={resolvingGap === gap.file}
               onUpdated={(updated) => setGaps(prev => prev.map(g => g.file === gap.file ? { ...g, ...updated } : g))}
               isExpanded={expandedGap === (gap.file || gap.title)}
               onToggle={() => setExpandedGap(prev =>
@@ -690,13 +706,6 @@ function GapsPanel({ activeKB, onResolved }) {
         )}
       </div>
 
-      {resolveGap && (
-        <ResolveModal
-          gap={resolveGap}
-          onClose={() => setResolveGap(null)}
-          onJobsStarted={(newJobs) => setJobs(prev => [...newJobs, ...prev])}
-        />
-      )}
     </div>
   )
 }

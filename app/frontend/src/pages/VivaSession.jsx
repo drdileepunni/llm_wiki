@@ -92,7 +92,7 @@ function badge(label, colorClass) {
 
 // ── Provenance panel ───────────────────────────────────────────────────────────
 
-function WhyPanel({ order, orderRunId, onClose }) {
+function WhyPanel({ order, orderRunId, onClose, onApply, onDismiss }) {
   const [trace, setTrace] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -162,6 +162,24 @@ function WhyPanel({ order, orderRunId, onClose }) {
           {error && <p className="text-red-400">Error: {error}</p>}
           {!loading && !trace && !error && (
             <p className="text-muted italic">No trace available — run this session again to capture provenance.</p>
+          )}
+
+          {/* Edit diff — shown prominently when this is an edit suggestion */}
+          {order.action === 'edit' && (order.from_dose || order.to_dose) && (
+            <section className="bg-ink-800 rounded-lg p-3">
+              <p className="text-[9px] uppercase tracking-widest text-muted mb-2">Proposed Change</p>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-red-400/80 line-through">{order.from_dose || '—'}</span>
+                <span className="text-muted">→</span>
+                <span className="text-green-400 font-medium">{order.to_dose || '—'}</span>
+              </div>
+            </section>
+          )}
+          {order.action === 'stop' && (
+            <section className="bg-red-900/20 border border-red-500/20 rounded-lg p-3">
+              <p className="text-[9px] uppercase tracking-widest text-muted mb-1">Proposed Action</p>
+              <p className="text-red-400 text-sm font-medium">Discontinue this order</p>
+            </section>
           )}
 
           {/* 1 · Source recommendation */}
@@ -270,6 +288,30 @@ function WhyPanel({ order, orderRunId, onClose }) {
           )}
 
         </div>
+
+        {/* Apply / Dismiss for edit and stop suggestions */}
+        {(onApply || onDismiss) && (order.action === 'edit' || order.action === 'stop') && (
+          <div className="px-4 py-3 border-t border-border bg-ink-800/50 flex-shrink-0 flex items-center gap-2">
+            {onApply && (
+              <button
+                onClick={() => { onApply(order); onClose() }}
+                className="flex items-center gap-1.5 bg-accent/90 text-black text-xs font-medium px-3 py-1.5 rounded hover:bg-accent transition-colors"
+              >
+                <CheckIcon className="w-3 h-3" />
+                {order.action === 'stop' ? 'Stop Order' : 'Apply Change'}
+              </button>
+            )}
+            {onDismiss && (
+              <button
+                onClick={() => { onDismiss(order); onClose() }}
+                className="flex items-center gap-1.5 text-xs text-muted hover:text-white border border-border hover:border-accent/50 px-3 py-1.5 rounded transition-colors"
+              >
+                <XMarkIcon className="w-3 h-3" />
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
 
         {/* footer with run ids */}
         {trace && (
@@ -805,7 +847,7 @@ function IOTab({ io }) {
   )
 }
 
-function OrdersTab({ orders }) {
+function OrdersTab({ orders, pendingEdits = [], onEditClick }) {
   if (!orders) return <p className="text-muted text-xs italic py-4">No orders.</p>
   const sections = [
     { key: 'medications', label: 'Medications', color: 'text-blue-300' },
@@ -827,22 +869,46 @@ function OrdersTab({ orders }) {
           <div key={key}>
             <p className={`text-[9px] uppercase tracking-widest mb-1.5 ${color}`}>{label} ({items.length})</p>
             <div className="space-y-1">
-              {items.map((item, i) => (
-                <div key={i} className="bg-ink-800 rounded px-3 py-2">
-                  <p className="text-xs text-white font-medium">
-                    {item.name || item.investigation || item.pType || '—'}
-                  </p>
-                  <p className="text-[10px] text-muted font-mono mt-0.5">
-                    {[
-                      !isNA(item.quantity) && `${item.quantity}${!isNA(item.unit) ? ` ${item.unit}` : ''}`.trim(),
-                      !isNA(item.route) && item.route,
-                      !isNA(item.frequency) && item.frequency,
-                      !isNA(item.discipline) && item.discipline,
-                    ].filter(Boolean).join(' · ')}
-                    {!isNA(item.instructions) && ` — ${item.instructions}`}
-                  </p>
-                </div>
-              ))}
+              {items.map((item, i) => {
+                const pendingEdit = pendingEdits.find(e =>
+                  e.existing_order_no != null && String(e.existing_order_no) === String(item.orderNo)
+                )
+                return (
+                  <div key={i} className={`bg-ink-800 rounded px-3 py-2 ${pendingEdit ? 'ring-1 ring-amber-400/40' : ''}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs text-white font-medium">
+                        {item.name || item.investigation || item.pType || '—'}
+                      </p>
+                      {pendingEdit && (
+                        <button
+                          onClick={() => onEditClick && onEditClick(pendingEdit)}
+                          title="AI suggests a change — click to review"
+                          className="flex items-center gap-1 flex-shrink-0 text-[9px] font-medium text-amber-400 bg-amber-400/10 border border-amber-400/30 rounded px-1.5 py-0.5 hover:bg-amber-400/20 transition-colors"
+                        >
+                          <PencilIcon className="w-2.5 h-2.5" />
+                          change
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-muted font-mono mt-0.5">
+                      {[
+                        !isNA(item.quantity) && `${item.quantity}${!isNA(item.unit) ? ` ${item.unit}` : ''}`.trim(),
+                        !isNA(item.route) && item.route,
+                        !isNA(item.frequency) && item.frequency,
+                        !isNA(item.discipline) && item.discipline,
+                      ].filter(Boolean).join(' · ')}
+                      {!isNA(item.instructions) && ` — ${item.instructions}`}
+                    </p>
+                    {pendingEdit && pendingEdit.from_dose && pendingEdit.to_dose && (
+                      <div className="flex items-center gap-1.5 mt-1 text-[10px]">
+                        <span className="text-red-400/70 line-through">{pendingEdit.from_dose}</span>
+                        <span className="text-muted">→</span>
+                        <span className="text-green-400">{pendingEdit.to_dose}</span>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )
@@ -902,8 +968,8 @@ function HistoryTab({ history }) {
 
 const CHART_TABS = ['vitals', 'labs', 'io', 'orders', 'notes', 'hx']
 
-function PatientChartPanel({ currentScenario, refreshTrigger }) {
-  const [tab, setTab] = useState('vitals')
+function PatientChartPanel({ currentScenario, refreshTrigger, pendingEdits = [], onEditClick }) {
+  const [tab, setTab] = useState('orders')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -927,7 +993,7 @@ function PatientChartPanel({ currentScenario, refreshTrigger }) {
   useEffect(() => { if (refreshTrigger > 0) refresh() }, [refreshTrigger])
 
   return (
-    <div className="w-96 flex-shrink-0 border-l border-border bg-ink-900 flex flex-col">
+    <div className="w-1/3 flex-shrink-0 border-l border-border bg-ink-900 flex flex-col">
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-ink-800 flex-shrink-0">
@@ -994,7 +1060,7 @@ function PatientChartPanel({ currentScenario, refreshTrigger }) {
             {tab === 'vitals'  && <VitalsTab  vitals={data.vitals} historyCount={data.vitals_history_count} />}
             {tab === 'labs'    && <LabsTab    labs={data.labs} />}
             {tab === 'io'      && <IOTab      io={data.io} />}
-            {tab === 'orders'  && <OrdersTab  orders={data.orders} />}
+            {tab === 'orders'  && <OrdersTab  orders={data.orders} pendingEdits={pendingEdits} onEditClick={onEditClick} />}
             {tab === 'notes'   && <NotesTab   notes={data.notes} />}
             {tab === 'hx'      && <HistoryTab history={data.history} />}
           </>
@@ -1343,6 +1409,20 @@ export default function VivaSession() {
     }
   }
 
+  async function handleApplyEdit(order) {
+    try {
+      await placeVivaOrder(order)
+      setPendingOrders(prev => prev.filter(o => o !== order && o.existing_order_no !== order.existing_order_no))
+      setChartRefreshTrigger(t => t + 1)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  function handleDismissEdit(order) {
+    setPendingOrders(prev => prev.filter(o => o !== order && o.existing_order_no !== order.existing_order_no))
+  }
+
   async function handleAdvance() {
     if (!session || advancing) return
     setAdvancing(true)
@@ -1419,11 +1499,24 @@ export default function VivaSession() {
   const turns = session?.turns || []
   const currentScenario = session?.next_scenario
 
-  // Split pending orders: actionable (high/medium) vs low-confidence (instructions)
+  // Split pending orders:
+  //   editPending  — edits/stops to existing active orders → shown as badges on chart panel
+  //   actionablePending — new orders, high/medium confidence → shown as full cards
+  //   instructionsPending — new orders, low confidence → grouped instructions card
+  const editPending = pendingOrders.filter(o => {
+    const a = (o.action || 'new').toLowerCase()
+    return a === 'edit' || a === 'stop'
+  })
   const actionablePending = pendingOrders
     .map((o, i) => ({ ...o, _idx: i }))
-    .filter(o => (o.confidence || 'medium') !== 'low')
-  const instructionsPending = pendingOrders.filter(o => (o.confidence || 'medium') === 'low')
+    .filter(o => {
+      const a = (o.action || 'new').toLowerCase()
+      return a === 'new' && (o.confidence || 'medium') !== 'low'
+    })
+  const instructionsPending = pendingOrders.filter(o => {
+    const a = (o.action || 'new').toLowerCase()
+    return a === 'new' && (o.confidence || 'medium') === 'low'
+  })
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -1605,6 +1698,8 @@ export default function VivaSession() {
         <PatientChartPanel
           currentScenario={currentScenario}
           refreshTrigger={chartRefreshTrigger}
+          pendingEdits={editPending}
+          onEditClick={(order) => setProvenance({ order, orderRunId: order.order_run_id })}
         />
       )}
 
@@ -1613,6 +1708,8 @@ export default function VivaSession() {
           order={provenance.order}
           orderRunId={provenance.orderRunId}
           onClose={() => setProvenance(null)}
+          onApply={provenance.order?.action === 'edit' || provenance.order?.action === 'stop' ? handleApplyEdit : undefined}
+          onDismiss={provenance.order?.action === 'edit' || provenance.order?.action === 'stop' ? handleDismissEdit : undefined}
         />
       )}
     </div>

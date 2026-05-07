@@ -167,6 +167,10 @@ async def _generate_pending_orders(
         )
         raw_orders = order_result.get("orders", [])
         cost += order_result.get("cost_usd", 0.0)
+        run_id = order_result.get("run_id")
+        if run_id:
+            for o in raw_orders:
+                o["order_run_id"] = run_id
         return _dedup_orders(raw_orders), cost
     except Exception as exc:
         log.warning("_generate_pending_orders failed: %s", exc)

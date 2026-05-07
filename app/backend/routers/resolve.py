@@ -58,6 +58,11 @@ class ResolveAllRequest(BaseModel):
     max_results: int = 3
 
 
+class ResolveOneRequest(BaseModel):
+    gap_file:   str
+    max_results: int = 3
+
+
 class VerifyGapsRequest(BaseModel):
     gap_stem: str = ""   # empty = verify all non-patient gaps
 
@@ -124,6 +129,19 @@ async def resolve_all(
     return {"batch_id": batch_id}
 
 
+@router.post("/resolve-one")
+async def resolve_one(
+    req: ResolveOneRequest,
+    background_tasks: BackgroundTasks,
+    kb: KBConfig = Depends(resolve_kb),
+):
+    """Start async resolution of a single gap file. Returns batch_id immediately."""
+    batch_id = str(uuid.uuid4())[:8]
+    _batches[batch_id] = {"status": "running", "total_gaps": 0, "completed_gaps": 0, "job_ids": []}
+    background_tasks.add_task(_do_resolve_all, batch_id, req.max_results, kb, req.gap_file)
+    return {"batch_id": batch_id}
+
+
 @router.get("/batch/{batch_id}")
 def get_batch(batch_id: str):
     batch = _batches.get(batch_id)
@@ -144,11 +162,13 @@ def get_batch(batch_id: str):
 
 # ── Background tasks ──────────────────────────────────────────────────────────
 
-async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig):
+async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig, gap_file_filter: str = ""):
     gaps_dir = kb.wiki_dir / "gaps"
     gaps = []
     if gaps_dir.exists():
         for f in sorted(gaps_dir.glob("*.md")):
+            if gap_file_filter and f"wiki/gaps/{f.name}" != gap_file_filter:
+                continue
             text = f.read_text(encoding="utf-8", errors="replace")
             referenced_page = ""
             subtype = ""

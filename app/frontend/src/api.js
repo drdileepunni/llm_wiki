@@ -218,6 +218,16 @@ export async function resolveAll(kbName, maxResults = 3) {
   return res.json()
 }
 
+export async function resolveOne(gapFile, kbName, maxResults = 3) {
+  const res = await fetch(`${BASE}/resolve/resolve-one`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ gap_file: gapFile, max_results: maxResults }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function resolveBatchStatus(batchId) {
   return fetch(`${BASE}/resolve/batch/${batchId}`).then(r => r.json())
 }

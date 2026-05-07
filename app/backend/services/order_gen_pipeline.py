@@ -64,7 +64,11 @@ _TOOL_EXTRACT_INTENTS = {
         "and emit one intent per entity. A single recommendation string may contain "
         "multiple drugs, procedures, or labs — emit a separate intent for each one. "
         "For example, 'Have etomidate 0.3 mg/kg IV and rocuronium 1 mg/kg IV ready' "
-        "must produce two intents (index=same, catalog_query='etomidate' and 'rocuronium')."
+        "must produce two intents (index=same, catalog_query='etomidate' and 'rocuronium'). "
+        "CRITICAL for labs: if a recommendation mentions multiple lab tests by name "
+        "(e.g. 'check creatinine, K+, Mg2+, and BNP' or 'urgent serum creatinine, potassium, BNP'), "
+        "you MUST emit one intent per individual test — never bundle them into a single "
+        "'lab panel' intent. Each test name becomes its own catalog_query."
     ),
     "input_schema": {
         "type": "object",

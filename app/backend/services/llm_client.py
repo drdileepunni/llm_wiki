@@ -580,7 +580,7 @@ class OllamaLLMClient:
                     f"{self._base_url}/api/chat",
                     json=payload,
                     headers=headers,
-                    timeout=180,
+                    timeout=600,
                 )
                 resp.raise_for_status()
                 raw_data = resp.json()
