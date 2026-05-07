@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   startViva,
   advanceVivaSession,
@@ -12,6 +12,12 @@ import {
   placeVivaOrder,
   getVivaProvenance,
   getVivaPatientLiveState,
+  startVivaBatch,
+  listVivaBatchRuns,
+  getVivaBatchRun,
+  cancelVivaBatchRun,
+  deleteVivaBatchRun,
+  extendVivaBatchRun,
 } from '../api'
 import { useAppState } from '../AppStateContext'
 import {
@@ -31,6 +37,9 @@ import {
   ExclamationTriangleIcon,
   QuestionMarkCircleIcon,
   CircleStackIcon,
+  RectangleStackIcon,
+  StopCircleIcon,
+  ChartBarIcon,
 } from '@heroicons/react/24/outline'
 
 const MODEL_OPTIONS = [
@@ -92,7 +101,7 @@ function badge(label, colorClass) {
 
 // ── Provenance panel ───────────────────────────────────────────────────────────
 
-function WhyPanel({ order, orderRunId, onClose, onApply, onDismiss }) {
+function WhyPanel({ order, orderRunId, onClose }) {
   const [trace, setTrace] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -162,24 +171,6 @@ function WhyPanel({ order, orderRunId, onClose, onApply, onDismiss }) {
           {error && <p className="text-red-400">Error: {error}</p>}
           {!loading && !trace && !error && (
             <p className="text-muted italic">No trace available — run this session again to capture provenance.</p>
-          )}
-
-          {/* Edit diff — shown prominently when this is an edit suggestion */}
-          {order.action === 'edit' && (order.from_dose || order.to_dose) && (
-            <section className="bg-ink-800 rounded-lg p-3">
-              <p className="text-[9px] uppercase tracking-widest text-muted mb-2">Proposed Change</p>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-red-400/80 line-through">{order.from_dose || '—'}</span>
-                <span className="text-muted">→</span>
-                <span className="text-green-400 font-medium">{order.to_dose || '—'}</span>
-              </div>
-            </section>
-          )}
-          {order.action === 'stop' && (
-            <section className="bg-red-900/20 border border-red-500/20 rounded-lg p-3">
-              <p className="text-[9px] uppercase tracking-widest text-muted mb-1">Proposed Action</p>
-              <p className="text-red-400 text-sm font-medium">Discontinue this order</p>
-            </section>
           )}
 
           {/* 1 · Source recommendation */}
@@ -288,30 +279,6 @@ function WhyPanel({ order, orderRunId, onClose, onApply, onDismiss }) {
           )}
 
         </div>
-
-        {/* Apply / Dismiss for edit and stop suggestions */}
-        {(onApply || onDismiss) && (order.action === 'edit' || order.action === 'stop') && (
-          <div className="px-4 py-3 border-t border-border bg-ink-800/50 flex-shrink-0 flex items-center gap-2">
-            {onApply && (
-              <button
-                onClick={() => { onApply(order); onClose() }}
-                className="flex items-center gap-1.5 bg-accent/90 text-black text-xs font-medium px-3 py-1.5 rounded hover:bg-accent transition-colors"
-              >
-                <CheckIcon className="w-3 h-3" />
-                {order.action === 'stop' ? 'Stop Order' : 'Apply Change'}
-              </button>
-            )}
-            {onDismiss && (
-              <button
-                onClick={() => { onDismiss(order); onClose() }}
-                className="flex items-center gap-1.5 text-xs text-muted hover:text-white border border-border hover:border-accent/50 px-3 py-1.5 rounded transition-colors"
-              >
-                <XMarkIcon className="w-3 h-3" />
-                Dismiss
-              </button>
-            )}
-          </div>
-        )}
 
         {/* footer with run ids */}
         {trace && (
@@ -847,7 +814,7 @@ function IOTab({ io }) {
   )
 }
 
-function OrdersTab({ orders, pendingEdits = [], onEditClick }) {
+function OrdersTab({ orders }) {
   if (!orders) return <p className="text-muted text-xs italic py-4">No orders.</p>
   const sections = [
     { key: 'medications', label: 'Medications', color: 'text-blue-300' },
@@ -869,46 +836,22 @@ function OrdersTab({ orders, pendingEdits = [], onEditClick }) {
           <div key={key}>
             <p className={`text-[9px] uppercase tracking-widest mb-1.5 ${color}`}>{label} ({items.length})</p>
             <div className="space-y-1">
-              {items.map((item, i) => {
-                const pendingEdit = pendingEdits.find(e =>
-                  e.existing_order_no != null && String(e.existing_order_no) === String(item.orderNo)
-                )
-                return (
-                  <div key={i} className={`bg-ink-800 rounded px-3 py-2 ${pendingEdit ? 'ring-1 ring-amber-400/40' : ''}`}>
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-xs text-white font-medium">
-                        {item.name || item.investigation || item.pType || '—'}
-                      </p>
-                      {pendingEdit && (
-                        <button
-                          onClick={() => onEditClick && onEditClick(pendingEdit)}
-                          title="AI suggests a change — click to review"
-                          className="flex items-center gap-1 flex-shrink-0 text-[9px] font-medium text-amber-400 bg-amber-400/10 border border-amber-400/30 rounded px-1.5 py-0.5 hover:bg-amber-400/20 transition-colors"
-                        >
-                          <PencilIcon className="w-2.5 h-2.5" />
-                          change
-                        </button>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-muted font-mono mt-0.5">
-                      {[
-                        !isNA(item.quantity) && `${item.quantity}${!isNA(item.unit) ? ` ${item.unit}` : ''}`.trim(),
-                        !isNA(item.route) && item.route,
-                        !isNA(item.frequency) && item.frequency,
-                        !isNA(item.discipline) && item.discipline,
-                      ].filter(Boolean).join(' · ')}
-                      {!isNA(item.instructions) && ` — ${item.instructions}`}
-                    </p>
-                    {pendingEdit && pendingEdit.from_dose && pendingEdit.to_dose && (
-                      <div className="flex items-center gap-1.5 mt-1 text-[10px]">
-                        <span className="text-red-400/70 line-through">{pendingEdit.from_dose}</span>
-                        <span className="text-muted">→</span>
-                        <span className="text-green-400">{pendingEdit.to_dose}</span>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
+              {items.map((item, i) => (
+                <div key={i} className="bg-ink-800 rounded px-3 py-2">
+                  <p className="text-xs text-white font-medium">
+                    {item.name || item.investigation || item.pType || '—'}
+                  </p>
+                  <p className="text-[10px] text-muted font-mono mt-0.5">
+                    {[
+                      !isNA(item.quantity) && `${item.quantity}${!isNA(item.unit) ? ` ${item.unit}` : ''}`.trim(),
+                      !isNA(item.route) && item.route,
+                      !isNA(item.frequency) && item.frequency,
+                      !isNA(item.discipline) && item.discipline,
+                    ].filter(Boolean).join(' · ')}
+                    {!isNA(item.instructions) && ` — ${item.instructions}`}
+                  </p>
+                </div>
+              ))}
             </div>
           </div>
         )
@@ -968,8 +911,8 @@ function HistoryTab({ history }) {
 
 const CHART_TABS = ['vitals', 'labs', 'io', 'orders', 'notes', 'hx']
 
-function PatientChartPanel({ currentScenario, refreshTrigger, pendingEdits = [], onEditClick }) {
-  const [tab, setTab] = useState('orders')
+function PatientChartPanel({ currentScenario, refreshTrigger }) {
+  const [tab, setTab] = useState('vitals')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -993,7 +936,7 @@ function PatientChartPanel({ currentScenario, refreshTrigger, pendingEdits = [],
   useEffect(() => { if (refreshTrigger > 0) refresh() }, [refreshTrigger])
 
   return (
-    <div className="w-1/3 flex-shrink-0 border-l border-border bg-ink-900 flex flex-col">
+    <div className="w-96 flex-shrink-0 border-l border-border bg-ink-900 flex flex-col">
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-ink-800 flex-shrink-0">
@@ -1060,7 +1003,7 @@ function PatientChartPanel({ currentScenario, refreshTrigger, pendingEdits = [],
             {tab === 'vitals'  && <VitalsTab  vitals={data.vitals} historyCount={data.vitals_history_count} />}
             {tab === 'labs'    && <LabsTab    labs={data.labs} />}
             {tab === 'io'      && <IOTab      io={data.io} />}
-            {tab === 'orders'  && <OrdersTab  orders={data.orders} pendingEdits={pendingEdits} onEditClick={onEditClick} />}
+            {tab === 'orders'  && <OrdersTab  orders={data.orders} />}
             {tab === 'notes'   && <NotesTab   notes={data.notes} />}
             {tab === 'hx'      && <HistoryTab history={data.history} />}
           </>
@@ -1349,8 +1292,469 @@ function NewVivaForm({ onStart, patient }) {
 
 // ── Main page ──────────────────────────────────────────────────────────────────
 
+// ── Viva Batch Panel ───────────────────────────────────────────────────────────
+
+const BATCH_MODE_INFO = {
+  weighted: 'Sample proportional to ICU admission frequency',
+  random:   'Uniform random sampling across all combinations',
+  full:     'Run all 210 diagnosis × complication combinations',
+}
+
+function IterationBreakdownTable({ metrics, sessionsByIteration }) {
+  if (!metrics?.length) return null
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr className="border-b border-border text-muted">
+            <th className="text-left py-1.5 pr-3 font-medium">Iter / Session</th>
+            <th className="text-left py-1.5 pr-3 font-medium">Diagnosis</th>
+            <th className="text-left py-1.5 pr-3 font-medium">Complication</th>
+            <th className="text-right py-1.5 pr-3 font-medium">Gaps gen.</th>
+            <th className="text-right py-1.5 pr-3 font-medium">Resolved</th>
+            <th className="text-right py-1.5 pr-3 font-medium">Gaps/sess</th>
+            <th className="text-right py-1.5 font-medium">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {metrics.map((m) => {
+            const sessions = sessionsByIteration?.[String(m.iteration)] || []
+            return (
+              <>
+                {/* Iteration summary row */}
+                <tr key={`iter-${m.iteration}`} className="border-b border-border/60 bg-ink-800/40">
+                  <td className="py-1.5 pr-3 text-white font-mono font-semibold">Iter {m.iteration}</td>
+                  <td className="py-1.5 pr-3 text-muted font-mono text-[10px]" colSpan={2}>
+                    {m.sessions_run} session{m.sessions_run !== 1 ? 's' : ''}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-amber-300">{m.gaps_generated}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-green-400">{m.gaps_resolved}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono">
+                    <span className={m.gaps_per_session < 1 ? 'text-green-400' : m.gaps_per_session < 3 ? 'text-amber-400' : 'text-red-400'}>
+                      {m.gaps_per_session?.toFixed(1)}
+                    </span>
+                  </td>
+                  <td className="py-1.5 text-right font-mono text-muted">${(m.total_cost_usd || 0).toFixed(3)}</td>
+                </tr>
+                {/* Per-session sub-rows */}
+                {sessions.map((s, i) => {
+                  const sess = typeof s === 'string' ? { session_id: s } : s
+                  return (
+                    <tr key={`sess-${m.iteration}-${i}`} className="border-b border-border/20 text-[10px]">
+                      <td className="py-1 pr-3 pl-4 text-muted font-mono">↳ {i + 1}</td>
+                      <td className="py-1 pr-3 text-muted/80 truncate max-w-[140px]">{sess.diagnosis || '—'}</td>
+                      <td className="py-1 pr-3 text-muted/80 truncate max-w-[120px]">{sess.complication || '—'}</td>
+                      <td className="py-1 pr-3 text-right text-muted font-mono" colSpan={2}>{sess.turns != null ? `${sess.turns} turns` : ''}</td>
+                      <td className="py-1 pr-3" />
+                      <td className="py-1 text-right font-mono text-muted/60">${(sess.cost_usd || 0).toFixed(4)}</td>
+                    </tr>
+                  )
+                })}
+              </>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function MetricsTable({ metrics }) {
+  return <IterationBreakdownTable metrics={metrics} sessionsByIteration={{}} />
+}
+
+function BatchRunCard({ run, onCancel, onDelete, onSelect, selected }) {
+  const isRunning = run.status === 'running'
+  const statusColor = {
+    running: 'text-yellow-400', complete: 'text-green-400',
+    stopped: 'text-muted', error: 'text-red-400',
+  }[run.status] || 'text-muted'
+
+  return (
+    <div
+      onClick={() => onSelect(run.run_id)}
+      className={`border rounded-lg p-3 cursor-pointer transition-colors ${
+        selected ? 'border-accent/50 bg-accent/5' : 'border-border hover:border-border/80 hover:bg-ink-800'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-[10px] font-mono uppercase ${statusColor}`}>{run.status}</span>
+            {run.converged && <span className="text-[10px] font-mono text-green-400 bg-green-400/10 px-1 rounded">converged</span>}
+            <span className="text-[10px] text-muted font-mono">{run.run_id}</span>
+          </div>
+          <p className="text-xs text-white mt-0.5 font-mono">
+            {run.n_sessions} sessions · {run.iterations} iters · iter {run.current_iteration}/{run.iterations}
+          </p>
+          {run.current_phase && (
+            <p className="text-[10px] text-muted mt-0.5 truncate">{run.current_phase.replace(/_/g, ' ')}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {isRunning && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onCancel(run.run_id) }}
+              className="p-1 rounded text-muted hover:text-amber-400 transition-colors"
+              title="Cancel"
+            >
+              <StopCircleIcon className="w-3.5 h-3.5" />
+            </button>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(run.run_id) }}
+            className="p-1 rounded text-muted hover:text-red-400 transition-colors"
+            title="Delete"
+          >
+            <TrashIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+      {run.metrics?.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-border/40">
+          <MetricsTable metrics={run.metrics} />
+        </div>
+      )}
+      <div className="flex justify-between mt-1.5 text-[10px] text-muted font-mono">
+        <span>{run.started_at ? new Date(run.started_at).toLocaleString() : ''}</span>
+        <span>${(run.total_cost_usd || 0).toFixed(3)}</span>
+      </div>
+    </div>
+  )
+}
+
+function VivaBatchPanel({ kbName }) {
+  const [batchRuns, setBatchRuns] = useState([])
+  const [selectedRunId, setSelectedRunId] = useState(null)
+  const [selectedRun, setSelectedRun] = useState(null)
+  const [launching, setLaunching] = useState(false)
+  const [extending, setExtending] = useState(false)
+  const [additionalIter, setAdditionalIter] = useState(3)
+  const [error, setError] = useState(null)
+
+  // Form state
+  const [nSessions, setNSessions] = useState(10)
+  const [mode, setMode] = useState('weighted')
+  const [iterations, setIterations] = useState(3)
+  const [maxTurns, setMaxTurns] = useState(6)
+  const [model, setModel] = useState('')
+
+  // Load batch runs list
+  const loadRuns = useCallback(() => {
+    listVivaBatchRuns(kbName)
+      .then(d => setBatchRuns(d.runs || []))
+      .catch(() => {})
+  }, [kbName])
+
+  useEffect(() => { loadRuns() }, [loadRuns])
+
+  // Poll selected run while running
+  useEffect(() => {
+    if (!selectedRunId) return
+    let timer
+    const poll = () => {
+      getVivaBatchRun(selectedRunId, kbName)
+        .then(d => {
+          setSelectedRun(d)
+          setBatchRuns(prev => prev.map(r => r.run_id === selectedRunId
+            ? { ...r, status: d.status, current_phase: d.current_phase, current_iteration: d.current_iteration, metrics: d.metrics, converged: d.converged, total_cost_usd: d.total_cost_usd, completed_at: d.completed_at }
+            : r
+          ))
+          if (d.status === 'running') timer = setTimeout(poll, 3000)
+        })
+        .catch(() => {})
+    }
+    poll()
+    return () => clearTimeout(timer)
+  }, [selectedRunId, kbName])
+
+  async function handleLaunch() {
+    setLaunching(true)
+    setError(null)
+    try {
+      const data = await startVivaBatch(
+        { nSessions, mode, iterations, maxTurns, model: model || null },
+        kbName,
+      )
+      const stub = {
+        run_id: data.run_id, status: 'running', current_phase: 'initializing',
+        n_sessions: nSessions, iterations, current_iteration: 0,
+        metrics: [], converged: false, total_cost_usd: 0, started_at: new Date().toISOString(),
+      }
+      setBatchRuns(prev => [stub, ...prev])
+      setSelectedRunId(data.run_id)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLaunching(false)
+    }
+  }
+
+  async function handleCancel(runId) {
+    await cancelVivaBatchRun(runId, kbName).catch(() => {})
+    loadRuns()
+  }
+
+  async function handleDelete(runId) {
+    await deleteVivaBatchRun(runId, kbName).catch(() => {})
+    setBatchRuns(prev => prev.filter(r => r.run_id !== runId))
+    if (selectedRunId === runId) { setSelectedRunId(null); setSelectedRun(null) }
+  }
+
+  async function handleExtend(runId) {
+    setExtending(true)
+    setError(null)
+    try {
+      await extendVivaBatchRun(runId, additionalIter, kbName)
+      // resume polling by re-setting selectedRunId
+      setSelectedRunId(null)
+      setTimeout(() => setSelectedRunId(runId), 50)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setExtending(false)
+    }
+  }
+
+  const totalCombinations = 14 * 15  // 210
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* Left: launch form + runs list */}
+      <div className="w-72 flex-shrink-0 flex flex-col border-r border-border overflow-y-auto">
+        {/* Launch form */}
+        <div className="px-4 py-4 border-b border-border space-y-3">
+          <h3 className="text-xs font-semibold text-white flex items-center gap-1.5">
+            <ChartBarIcon className="w-3.5 h-3.5 text-accent" />
+            New Batch Run
+          </h3>
+
+          <div className="space-y-2">
+            <label className="block">
+              <span className="text-[10px] text-muted uppercase tracking-wider">Mode</span>
+              <select
+                value={mode}
+                onChange={e => setMode(e.target.value)}
+                className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+              >
+                <option value="weighted">Weighted (by frequency)</option>
+                <option value="random">Random (uniform)</option>
+                <option value="full">Full (all {totalCombinations})</option>
+              </select>
+              <p className="text-[10px] text-muted mt-1">{BATCH_MODE_INFO[mode]}</p>
+            </label>
+
+            {mode !== 'full' && (
+              <label className="block">
+                <span className="text-[10px] text-muted uppercase tracking-wider">Sessions per iteration</span>
+                <input
+                  type="number" min={1} max={210}
+                  value={nSessions}
+                  onChange={e => setNSessions(Number(e.target.value))}
+                  className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+                />
+              </label>
+            )}
+
+            <label className="block">
+              <span className="text-[10px] text-muted uppercase tracking-wider">Max iterations</span>
+              <input
+                type="number" min={1} max={20}
+                value={iterations}
+                onChange={e => setIterations(Number(e.target.value))}
+                className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+              />
+              <p className="text-[10px] text-muted mt-1">Stops early when gaps/session converges</p>
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] text-muted uppercase tracking-wider">Turns per session</span>
+              <input
+                type="number" min={2} max={20}
+                value={maxTurns}
+                onChange={e => setMaxTurns(Number(e.target.value))}
+                className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] text-muted uppercase tracking-wider">Model</span>
+              <select
+                value={model}
+                onChange={e => setModel(e.target.value)}
+                className="w-full mt-1 bg-ink-700 border border-border rounded px-2 py-1.5 text-xs text-white"
+              >
+                {MODEL_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {error && <p className="text-red-400 text-xs">{error}</p>}
+
+          <button
+            onClick={handleLaunch}
+            disabled={launching}
+            className="w-full flex items-center justify-center gap-1.5 bg-accent text-black font-medium text-xs px-3 py-2 rounded hover:bg-accent/90 disabled:opacity-40 transition-colors"
+          >
+            {launching ? (
+              <><ClockIcon className="w-3.5 h-3.5 animate-spin" />Launching…</>
+            ) : (
+              <><PlayIcon className="w-3.5 h-3.5" />Launch Batch</>
+            )}
+          </button>
+        </div>
+
+        {/* Runs list */}
+        <div className="flex-1 overflow-y-auto py-2 px-3 space-y-2">
+          {batchRuns.length === 0 && (
+            <p className="text-xs text-muted px-1 py-4 text-center">No batch runs yet</p>
+          )}
+          {batchRuns.map(run => (
+            <BatchRunCard
+              key={run.run_id}
+              run={run}
+              selected={selectedRunId === run.run_id}
+              onSelect={setSelectedRunId}
+              onCancel={handleCancel}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Right: selected run detail */}
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        {!selectedRun && (
+          <div className="flex flex-col items-center justify-center h-full text-muted text-xs gap-2">
+            <RectangleStackIcon className="w-8 h-8" />
+            <p>Select a run to see details, or launch a new batch above.</p>
+            <p className="text-center max-w-xs opacity-70">
+              Each batch runs N scenarios from the 14 diagnosis × 15 complication catalog,
+              then resolves all generated knowledge gaps. Repeats for up to max iterations
+              until gaps/session converges.
+            </p>
+          </div>
+        )}
+
+        {selectedRun && (
+          <div className="space-y-4 max-w-2xl">
+            {/* Run header */}
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-white font-mono">{selectedRun.run_id}</span>
+                  <span className={`text-[10px] font-mono uppercase ${
+                    selectedRun.status === 'running' ? 'text-yellow-400' :
+                    selectedRun.status === 'complete' ? 'text-green-400' : 'text-muted'
+                  }`}>{selectedRun.status}</span>
+                  {selectedRun.converged && (
+                    <span className="text-[10px] font-mono text-green-400 bg-green-400/10 px-1.5 py-0.5 rounded">
+                      ✓ converged
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted mt-0.5">
+                  {selectedRun.n_sessions} sessions · {selectedRun.mode} mode ·{' '}
+                  {selectedRun.max_turns_per_session} turns/session ·{' '}
+                  iter {selectedRun.current_iteration || 0}/{selectedRun.iterations}
+                </p>
+              </div>
+              <p className="text-xs font-mono text-muted">${(selectedRun.total_cost_usd || 0).toFixed(4)}</p>
+            </div>
+
+            {/* Current phase */}
+            {selectedRun.current_phase && (
+              <div className="border border-border rounded px-3 py-2">
+                <p className="text-[10px] text-muted uppercase tracking-wider mb-0.5">Current phase</p>
+                <p className="text-xs text-white font-mono">
+                  {selectedRun.current_phase.replace(/_/g, ' ')}
+                  {selectedRun.status === 'running' && (
+                    <span className="ml-2 inline-block w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" />
+                  )}
+                </p>
+              </div>
+            )}
+
+            {/* Unified iteration + session breakdown */}
+            {selectedRun.metrics?.length > 0 && (
+              <div className="border border-border rounded p-3">
+                <p className="text-[10px] text-muted uppercase tracking-wider mb-2">
+                  Iteration metrics
+                  <span className="ml-2 normal-case text-muted/60">gaps/session → 0 means wiki coverage improving</span>
+                </p>
+                <IterationBreakdownTable
+                  metrics={selectedRun.metrics}
+                  sessionsByIteration={selectedRun.sessions_by_iteration || {}}
+                />
+              </div>
+            )}
+
+            {/* Log */}
+            {selectedRun.log?.length > 0 && (
+              <div className="border border-border rounded p-3">
+                <p className="text-[10px] text-muted uppercase tracking-wider mb-2">Activity log</p>
+                <div className="space-y-0.5 max-h-64 overflow-y-auto text-[10px] font-mono">
+                  {selectedRun.log.slice(-50).map((entry, i) => (
+                    <div key={i} className={`flex gap-2 ${
+                      entry.phase === 'session_error' ? 'text-red-400' :
+                      entry.phase === 'converged' ? 'text-green-400' :
+                      entry.phase === 'iteration_done' ? 'text-accent' :
+                      'text-muted'
+                    }`}>
+                      <span className="flex-shrink-0 opacity-50">
+                        {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : ''}
+                      </span>
+                      <span>{entry.message}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Extend: shown when run is complete (converged or not) */}
+            {(selectedRun.status === 'complete' || selectedRun.status === 'stopped') && (
+              <div className="border border-border rounded p-3 space-y-2">
+                <p className="text-[10px] text-muted uppercase tracking-wider">
+                  Add more iterations
+                  {selectedRun.converged && (
+                    <span className="ml-2 normal-case text-green-400/70">run has converged — extend to verify</span>
+                  )}
+                </p>
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-muted whitespace-nowrap">Additional iterations</label>
+                  <input
+                    type="number" min={1} max={20}
+                    value={additionalIter}
+                    onChange={e => setAdditionalIter(Number(e.target.value))}
+                    className="w-20 bg-ink-700 border border-border rounded px-2 py-1 text-xs text-white"
+                  />
+                  <button
+                    onClick={() => handleExtend(selectedRun.run_id)}
+                    disabled={extending}
+                    className="flex items-center gap-1.5 bg-accent/20 hover:bg-accent/30 text-accent border border-accent/30 font-medium text-xs px-3 py-1.5 rounded transition-colors disabled:opacity-40"
+                  >
+                    {extending ? (
+                      <><ClockIcon className="w-3.5 h-3.5 animate-spin" />Extending…</>
+                    ) : (
+                      <><ArrowPathIcon className="w-3.5 h-3.5" />Continue Run</>
+                    )}
+                  </button>
+                </div>
+                {error && <p className="text-red-400 text-[10px]">{error}</p>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function VivaSession() {
   const { activeKB } = useAppState()
+  const [mainView, setMainView] = useState('sessions') // 'sessions' | 'batch'
   const [sessions, setSessions] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [session, setSession] = useState(null)
@@ -1407,20 +1811,6 @@ export default function VivaSession() {
     } catch (e) {
       setError(e.message)
     }
-  }
-
-  async function handleApplyEdit(order) {
-    try {
-      await placeVivaOrder(order)
-      setPendingOrders(prev => prev.filter(o => o !== order && o.existing_order_no !== order.existing_order_no))
-      setChartRefreshTrigger(t => t + 1)
-    } catch (e) {
-      setError(e.message)
-    }
-  }
-
-  function handleDismissEdit(order) {
-    setPendingOrders(prev => prev.filter(o => o !== order && o.existing_order_no !== order.existing_order_no))
   }
 
   async function handleAdvance() {
@@ -1499,24 +1889,11 @@ export default function VivaSession() {
   const turns = session?.turns || []
   const currentScenario = session?.next_scenario
 
-  // Split pending orders:
-  //   editPending  — edits/stops to existing active orders → shown as badges on chart panel
-  //   actionablePending — new orders, high/medium confidence → shown as full cards
-  //   instructionsPending — new orders, low confidence → grouped instructions card
-  const editPending = pendingOrders.filter(o => {
-    const a = (o.action || 'new').toLowerCase()
-    return a === 'edit' || a === 'stop'
-  })
+  // Split pending orders: actionable (high/medium) vs low-confidence (instructions)
   const actionablePending = pendingOrders
     .map((o, i) => ({ ...o, _idx: i }))
-    .filter(o => {
-      const a = (o.action || 'new').toLowerCase()
-      return a === 'new' && (o.confidence || 'medium') !== 'low'
-    })
-  const instructionsPending = pendingOrders.filter(o => {
-    const a = (o.action || 'new').toLowerCase()
-    return a === 'new' && (o.confidence || 'medium') === 'low'
-  })
+    .filter(o => (o.confidence || 'medium') !== 'low')
+  const instructionsPending = pendingOrders.filter(o => (o.confidence || 'medium') === 'low')
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -1531,7 +1908,29 @@ export default function VivaSession() {
 
         <PatientPanel patient={patient} onSaved={setPatient} />
 
+        {/* View selector */}
+        <div className="flex border-b border-border">
+          <button
+            onClick={() => setMainView('sessions')}
+            className={`flex-1 py-2 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+              mainView === 'sessions' ? 'text-accent border-b-2 border-accent' : 'text-muted hover:text-white'
+            }`}
+          >
+            Sessions
+          </button>
+          <button
+            onClick={() => setMainView('batch')}
+            className={`flex-1 py-2 text-[10px] font-medium uppercase tracking-wider transition-colors flex items-center justify-center gap-1 ${
+              mainView === 'batch' ? 'text-accent border-b-2 border-accent' : 'text-muted hover:text-white'
+            }`}
+          >
+            <RectangleStackIcon className="w-3 h-3" />
+            Batch
+          </button>
+        </div>
+
         <div className="flex-1 overflow-y-auto py-2">
+          {mainView === 'sessions' && (
           <button
             onClick={() => { setActiveId(null); setSession(null); setError(null); setPendingOrders([]) }}
             className={`w-full text-left px-4 py-3 text-sm transition-colors ${
@@ -1542,8 +1941,9 @@ export default function VivaSession() {
           >
             + New Viva
           </button>
+          )}
 
-          {sessions.map(s => (
+          {mainView === 'sessions' && sessions.map(s => (
             <div key={s.session_id} className="relative group">
               <button
                 onClick={() => handleSelectSession(s.session_id)}
@@ -1573,6 +1973,9 @@ export default function VivaSession() {
       </aside>
 
       {/* Centre: main content */}
+      {mainView === 'batch' ? (
+        <VivaBatchPanel kbName={activeKB} />
+      ) : (
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {activeId === null && !session ? (
           <NewVivaForm onStart={handleStart} patient={patient} />
@@ -1692,14 +2095,13 @@ export default function VivaSession() {
           </>
         ) : null}
       </div>
+      )}
 
-      {/* Right panel — permanent patient chart during session */}
-      {session && (
+      {/* Right panel — permanent patient chart during session (sessions view only) */}
+      {mainView === 'sessions' && session && (
         <PatientChartPanel
           currentScenario={currentScenario}
           refreshTrigger={chartRefreshTrigger}
-          pendingEdits={editPending}
-          onEditClick={(order) => setProvenance({ order, orderRunId: order.order_run_id })}
         />
       )}
 
@@ -1708,8 +2110,6 @@ export default function VivaSession() {
           order={provenance.order}
           orderRunId={provenance.orderRunId}
           onClose={() => setProvenance(null)}
-          onApply={provenance.order?.action === 'edit' || provenance.order?.action === 'stop' ? handleApplyEdit : undefined}
-          onDismiss={provenance.order?.action === 'edit' || provenance.order?.action === 'stop' ? handleDismissEdit : undefined}
         />
       )}
     </div>

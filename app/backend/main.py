@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, logs, graph, vm
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -19,6 +19,7 @@ app = FastAPI(title="LLM Wiki")
 
 _POLL_PREFIXES = (
     "/api/viva/viva_",
+    "/api/viva-batch/vbatch_",
     "/api/learn/jobs/",
     "/api/clinical-assess/jobs/",
     "/api/resolve/batch/",
@@ -53,6 +54,7 @@ app.include_router(assess.router)
 app.include_router(clinical_assess.router)
 app.include_router(learn.router)
 app.include_router(order_gen.router)
+app.include_router(viva_batch.router)
 app.include_router(viva.router)
 app.include_router(logs.router)
 app.include_router(graph.router)

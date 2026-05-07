@@ -218,16 +218,6 @@ export async function resolveAll(kbName, maxResults = 3) {
   return res.json()
 }
 
-export async function resolveOne(gapFile, kbName, maxResults = 3) {
-  const res = await fetch(`${BASE}/resolve/resolve-one`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
-    body: JSON.stringify({ gap_file: gapFile, max_results: maxResults }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
 export async function resolveBatchStatus(batchId) {
   return fetch(`${BASE}/resolve/batch/${batchId}`).then(r => r.json())
 }
@@ -693,6 +683,73 @@ export async function rerunVivaTurn(sessionId, turnNum, model = null, kbName) {
 
 export async function getVivaProvenance(orderRunId) {
   const res = await fetch(`${BASE}/viva/provenance?order_run_id=${encodeURIComponent(orderRunId)}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Viva batch ────────────────────────────────────────────────────────────────
+
+export async function getVivaBatchCatalog() {
+  const res = await fetch(`${BASE}/viva-batch/catalog`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function listVivaBatchRuns(kbName) {
+  const res = await fetch(`${BASE}/viva-batch/`, { headers: kbHeaders(kbName) })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function startVivaBatch({ nSessions, mode, iterations, maxTurns, model, seed }, kbName) {
+  const res = await fetch(`${BASE}/viva-batch/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({
+      n_sessions: nSessions,
+      mode: mode || 'weighted',
+      iterations: iterations || 3,
+      max_turns: maxTurns || 6,
+      model: model || null,
+      seed: seed ?? null,
+    }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getVivaBatchRun(runId, kbName) {
+  const res = await fetch(`${BASE}/viva-batch/${encodeURIComponent(runId)}`, {
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function cancelVivaBatchRun(runId, kbName) {
+  const res = await fetch(`${BASE}/viva-batch/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteVivaBatchRun(runId, kbName) {
+  const res = await fetch(`${BASE}/viva-batch/${encodeURIComponent(runId)}`, {
+    method: 'DELETE',
+    headers: kbHeaders(kbName),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function extendVivaBatchRun(runId, additionalIterations, kbName) {
+  const res = await fetch(`${BASE}/viva-batch/${encodeURIComponent(runId)}/extend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ additional_iterations: additionalIterations }),
+  })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
