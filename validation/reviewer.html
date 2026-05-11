@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CDS Validation — Reviewer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: { 900: '#0f1117', 800: '#161b27', 700: '#1e2535', 600: '#252d3d' },
+          accent: '#7c6af7',
+        }
+      }
+    }
+  }
+</script>
+<style>
+  body { background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif; }
+  .rating-btn { transition: all 0.15s; }
+  .rating-btn:hover { transform: translateY(-1px); }
+  .rating-btn.selected-appropriate { background: rgba(34,197,94,0.2); border-color: #22c55e; color: #4ade80; }
+  .rating-btn.selected-uncertain   { background: rgba(234,179, 8,0.2); border-color: #eab308; color: #facc15; }
+  .rating-btn.selected-inappropriate { background: rgba(239,68,68,0.2); border-color: #ef4444; color: #f87171; }
+  .progress-fill { transition: width 0.4s ease; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #161b27; } ::-webkit-scrollbar-thumb { background: #252d3d; border-radius: 2px; }
+  .fade-in { animation: fadeIn 0.2s ease; } @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; }
+  .cat-header { background: #1e2535; border-left: 3px solid #7c6af7; padding: 6px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #a5b4fc; }
+</style>
+</head>
+<body>
+
+<div id="app" class="min-h-screen"></div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────────
+let data = null
+let reviewerName = ''
+let reviewerRole = ''
+let currentScenario = 0
+let currentTurn = 0  // 0..N-1 = turns; N = summary
+let ratings = {}     // { scenarioId: { turns: { 1: { orderId: rating } }, categories: { med: {rating,comment} }, overall: {rating,comment} } }
+
+const ROLES = ['Intensivist', 'Pulmonologist', 'Fellow (Critical Care)', 'Senior Resident', 'Nurse Practitioner', 'Other']
+const CAT_LABELS = { med:'Medications', lab:'Investigations', procedure:'Procedures', monitoring:'Monitoring', vents:'Ventilation', comm:'Consultations', diet:'Nutrition & Diet', blood:'Blood Products' }
+const OVERALL_RATINGS = ['appropriate', 'partially_appropriate', 'inappropriate']
+const OVERALL_LABELS  = { appropriate: 'Appropriate', partially_appropriate: 'Partially Appropriate', inappropriate: 'Inappropriate' }
+const OVERALL_COLORS  = { appropriate: 'text-green-400 border-green-500/40 bg-green-500/10 hover:bg-green-500/20', partially_appropriate: 'text-yellow-400 border-yellow-500/40 bg-yellow-500/10 hover:bg-yellow-500/20', inappropriate: 'text-red-400 border-red-500/40 bg-red-500/10 hover:bg-red-500/20' }
+const SELECTED_COLORS = { appropriate: 'bg-green-500/25 border-green-400 text-green-300', partially_appropriate: 'bg-yellow-500/25 border-yellow-400 text-yellow-300', inappropriate: 'bg-red-500/25 border-red-400 text-red-300' }
+
+const STORAGE_KEY = 'cds_validation_state'
+
+// ─── Persistence ────────────────────────────────────────────────────────────
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ reviewerName, reviewerRole, currentScenario, currentTurn, ratings }))
+  } catch(e) {}
+}
+
+function loadState() {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY)
+    if (!s) return false
+    const saved = JSON.parse(s)
+    reviewerName    = saved.reviewerName    || ''
+    reviewerRole    = saved.reviewerRole    || ''
+    currentScenario = saved.currentScenario || 0
+    currentTurn     = saved.currentTurn     || 0
+    ratings         = saved.ratings         || {}
+    return !!reviewerName
+  } catch(e) { return false }
+}
+
+function clearState() {
+  localStorage.removeItem(STORAGE_KEY)
+  reviewerName = ''; reviewerRole = ''; currentScenario = 0; currentTurn = 0; ratings = {}
+}
+
+// ─── Rating helpers ──────────────────────────────────────────────────────────
+function ensureScenario(sid) {
+  if (!ratings[sid]) ratings[sid] = { turns: {}, categories: {}, overall: { rating: '', comment: '' } }
+}
+
+function setOrderRating(sid, turnNum, orderId, value) {
+  ensureScenario(sid)
+  if (!ratings[sid].turns[turnNum]) ratings[sid].turns[turnNum] = {}
+  ratings[sid].turns[turnNum][orderId] = value
+  saveState()
+  render()
+}
+
+function setCategoryRating(sid, cat, field, value) {
+  ensureScenario(sid)
+  if (!ratings[sid].categories[cat]) ratings[sid].categories[cat] = { rating: '', comment: '' }
+  ratings[sid].categories[cat][field] = value
+  saveState()
+  render()
+}
+
+function setOverall(sid, field, value) {
+  ensureScenario(sid)
+  ratings[sid].overall[field] = value
+  saveState()
+  render()
+}
+
+// ─── Completion checks ───────────────────────────────────────────────────────
+function turnComplete(scenario, turnIdx) {
+  const turn = scenario.turns[turnIdx]
+  const sid  = scenario.scenario_id
+  if (!turn.orders.length) return true
+  const turnRatings = ratings[sid]?.turns?.[turn.turn_num] || {}
+  return turn.orders.every(o => !!turnRatings[o.id])
+}
+
+function summaryComplete(scenario) {
+  const sid  = scenario.scenario_id
+  const cats = scenario.categories || []
+  const catsDone = cats.every(c => !!ratings[sid]?.categories?.[c]?.rating)
+  const overallDone = !!ratings[sid]?.overall?.rating
+  return catsDone && overallDone
+}
+
+// ─── Progress ────────────────────────────────────────────────────────────────
+function totalSteps()    { return data.scenarios.reduce((acc, s) => acc + s.total_turns + 1, 0) }
+function completedSteps() {
+  let done = 0
+  data.scenarios.forEach((s, si) => {
+    if (si < currentScenario) { done += s.total_turns + 1; return }
+    if (si === currentScenario) done += currentTurn
+  })
+  return done
+}
+
+// ─── Export / Submit ─────────────────────────────────────────────────────────
+function buildResult() {
+  return {
+    app_version: '1.0',
+    reviewer_name: reviewerName,
+    reviewer_role: reviewerRole,
+    reviewed_at: new Date().toISOString(),
+    kb: data.kb,
+    scenarios: data.scenarios.map(s => ({
+      scenario_id:       s.scenario_id,
+      topic:             s.topic,
+      diagnosis:         s.diagnosis,
+      complication:      s.complication,
+      turns: s.turns.map(t => ({
+        turn_num: t.turn_num,
+        order_ratings: t.orders.map(o => ({
+          id:          o.id,
+          order_type:  o.order_type,
+          display:     o.display,
+          rating:      ratings[s.scenario_id]?.turns?.[t.turn_num]?.[o.id] || null,
+        }))
+      })),
+      category_ratings: ratings[s.scenario_id]?.categories || {},
+      overall:          ratings[s.scenario_id]?.overall    || { rating: '', comment: '' },
+    }))
+  }
+}
+
+function downloadJSON(result) {
+  const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `reviewer_${reviewerName.replace(/\s+/g,'_').toLowerCase()}_${Date.now()}.json`
+  a.click()
+}
+
+async function submitResults() {
+  const result = buildResult()
+  downloadJSON(result)  // always download as backup
+  try {
+    const r = await fetch('/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(result) })
+    if (r.ok) {
+      document.getElementById('submit-status').textContent = '✓ Submitted and downloaded successfully.'
+      document.getElementById('submit-status').className = 'text-sm text-green-400 mt-2'
+    } else {
+      throw new Error('server error')
+    }
+  } catch(e) {
+    document.getElementById('submit-status').textContent = 'Server not available — file downloaded. Please send the JSON file to the study coordinator.'
+    document.getElementById('submit-status').className = 'text-sm text-yellow-400 mt-2'
+  }
+}
+
+// ─── Render: Welcome ─────────────────────────────────────────────────────────
+function renderWelcome() {
+  const app = document.getElementById('app')
+  app.innerHTML = `
+  <div class="max-w-lg mx-auto px-6 py-20 fade-in">
+    <div class="flex items-center gap-3 mb-8">
+      <div class="w-10 h-10 rounded-lg bg-accent/20 flex items-center justify-center text-accent text-lg">⚕</div>
+      <div>
+        <h1 class="text-xl font-bold text-white">CDS Order Validation</h1>
+        <p class="text-xs text-slate-400">Clinical Decision Support — Expert Review</p>
+      </div>
+    </div>
+
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-6 space-y-5">
+      <div>
+        <p class="text-sm text-slate-300 leading-relaxed">
+          You will review <strong class="text-white">${data.n_scenarios} clinical scenarios</strong>.
+          For each scenario, the CDS tool has suggested a set of orders across multiple turns.
+          Please rate each order as <span class="text-green-400 font-medium">Appropriate</span>,
+          <span class="text-yellow-400 font-medium">Uncertain</span>, or
+          <span class="text-red-400 font-medium">Inappropriate</span>,
+          then provide an overall assessment.
+        </p>
+        <p class="text-xs text-slate-500 mt-2">Estimated time: 15–25 minutes · Progress is saved automatically.</p>
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Your name</label>
+          <input id="inp-name" type="text" placeholder="Dr. ..." value="${reviewerName}"
+            class="w-full bg-ink-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-accent/60" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Role</label>
+          <select id="inp-role" class="w-full bg-ink-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-accent/60">
+            <option value="">Select...</option>
+            ${ROLES.map(r => `<option value="${r}" ${reviewerRole===r?'selected':''}>${r}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <button id="btn-start" onclick="handleStart()"
+        class="w-full bg-accent hover:bg-accent/90 text-white font-semibold text-sm py-2.5 rounded-lg transition-colors disabled:opacity-40">
+        Begin Review →
+      </button>
+    </div>
+  </div>`
+
+  const btn  = document.getElementById('btn-start')
+  const name = document.getElementById('inp-name')
+  const role = document.getElementById('inp-role')
+  const check = () => btn.disabled = !name.value.trim() || !role.value
+  name.addEventListener('input', check)
+  role.addEventListener('change', check)
+  check()
+}
+
+function handleStart() {
+  reviewerName = document.getElementById('inp-name').value.trim()
+  reviewerRole = document.getElementById('inp-role').value
+  saveState()
+  render()
+}
+
+// ─── Render: Turn ────────────────────────────────────────────────────────────
+function renderTurn() {
+  const scenario = data.scenarios[currentScenario]
+  const turn     = scenario.turns[currentTurn]
+  const sid      = scenario.scenario_id
+  const isLast   = currentTurn === scenario.total_turns - 1
+  const done     = turnComplete(scenario, currentTurn)
+
+  const pct = Math.round((completedSteps() / totalSteps()) * 100)
+
+  // Group orders by category for display
+  const cats = {}
+  turn.orders.forEach(o => { if (!cats[o.order_type]) cats[o.order_type] = []; cats[o.order_type].push(o) })
+
+  const turnRatings = ratings[sid]?.turns?.[turn.turn_num] || {}
+
+  let ordersHtml = ''
+  const catOrder = ['med','lab','procedure','monitoring','vents','comm','diet','blood']
+  catOrder.forEach(cat => {
+    if (!cats[cat]) return
+    ordersHtml += `<div class="cat-header mt-4 mb-1 rounded">${CAT_LABELS[cat] || cat}</div>`
+    cats[cat].forEach(order => {
+      const r = turnRatings[order.id] || ''
+      ordersHtml += `
+      <div class="border border-white/8 rounded-lg p-3 mb-2 bg-ink-800 hover:bg-ink-700 transition-colors">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-medium text-white leading-snug">${escHtml(order.display)}</p>
+            ${order.action !== 'new' ? `<span class="badge mt-1 ${order.action==='stop'?'bg-red-500/15 text-red-400':'bg-blue-500/15 text-blue-400'}">${order.action.toUpperCase()}</span>` : ''}
+            ${order.instructions ? `<p class="text-xs text-slate-400 mt-1 leading-relaxed">${escHtml(order.instructions)}</p>` : ''}
+            ${order.dose_calculation ? `<p class="text-xs text-slate-500 mt-1 font-mono">${escHtml(order.dose_calculation)}</p>` : ''}
+            ${order.confidence ? `<span class="badge mt-1 ${order.confidence==='high'?'bg-green-500/10 text-green-400/70':order.confidence==='low'?'bg-red-500/10 text-red-400/70':'bg-slate-500/10 text-slate-400'}">${order.confidence} confidence</span>` : ''}
+          </div>
+          <div class="flex flex-col gap-1 flex-shrink-0">
+            ${['appropriate','uncertain','inappropriate'].map(v => {
+              const icons = { appropriate:'✓', uncertain:'?', inappropriate:'✗' }
+              const colors = { appropriate:'border-green-700 text-green-500 hover:bg-green-500/15', uncertain:'border-yellow-700 text-yellow-500 hover:bg-yellow-500/15', inappropriate:'border-red-700 text-red-500 hover:bg-red-500/15' }
+              const sel = { appropriate:'selected-appropriate', uncertain:'selected-uncertain', inappropriate:'selected-inappropriate' }
+              return `<button class="rating-btn w-8 h-8 rounded border ${colors[v]} font-bold text-sm ${r===v?sel[v]:''}"
+                onclick="setOrderRating('${sid}',${turn.turn_num},'${order.id}','${v}')">${icons[v]}</button>`
+            }).join('')}
+          </div>
+        </div>
+      </div>`
+    })
+  })
+
+  if (!turn.orders.length) {
+    ordersHtml = `<p class="text-slate-500 text-sm italic py-4">No orders placed this turn.</p>`
+  }
+
+  const phaseColor = { EVOLVING:'bg-blue-500/15 text-blue-300', MANAGEMENT:'bg-purple-500/15 text-purple-300', CONCLUSION:'bg-green-500/15 text-green-300' }
+
+  document.getElementById('app').innerHTML = `
+  <div class="max-w-3xl mx-auto px-4 py-6 fade-in">
+
+    <!-- Progress bar -->
+    <div class="mb-6">
+      <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+        <span>Scenario ${currentScenario+1} of ${data.n_scenarios} · Turn ${currentTurn+1} of ${scenario.total_turns}</span>
+        <span>${pct}% complete</span>
+      </div>
+      <div class="w-full bg-ink-700 rounded-full h-1.5">
+        <div class="progress-fill bg-accent h-1.5 rounded-full" style="width:${pct}%"></div>
+      </div>
+    </div>
+
+    <!-- Scenario header -->
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <h2 class="text-base font-semibold text-white leading-snug mb-2">${escHtml(scenario.topic)}</h2>
+      <div class="flex flex-wrap gap-2">
+        ${scenario.diagnosis    ? `<span class="badge bg-blue-500/15 text-blue-300">${escHtml(scenario.diagnosis)}</span>` : ''}
+        ${scenario.complication ? `<span class="badge bg-purple-500/15 text-purple-300">${escHtml(scenario.complication)}</span>` : ''}
+        <span class="badge ${phaseColor[turn.phase] || 'bg-slate-500/15 text-slate-300'}">${turn.phase || ''}</span>
+        <span class="badge bg-slate-700/60 text-slate-400">${turn.difficulty || ''}</span>
+      </div>
+    </div>
+
+    <!-- Clinical context -->
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-2 font-semibold">Clinical Context — Turn ${turn.turn_num}</p>
+      <p class="text-sm text-slate-200 leading-relaxed">${escHtml(turn.clinical_context)}</p>
+      ${turn.question ? `<div class="mt-3 pt-3 border-t border-white/8"><p class="text-[10px] text-accent/70 uppercase tracking-wider mb-1 font-semibold">Clinical Question</p><p class="text-sm text-accent/90 leading-relaxed font-medium">${escHtml(turn.question)}</p></div>` : ''}
+    </div>
+
+    <!-- Orders -->
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-3 font-semibold">
+        CDS Orders — Rate each order
+        <span class="ml-2 normal-case text-slate-600">${turn.orders.length} order${turn.orders.length!==1?'s':''}</span>
+      </p>
+      ${ordersHtml}
+    </div>
+
+    ${currentTurn > 0 && turn.simulation_summary ? `
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-2 font-semibold">Patient Response (previous turn)</p>
+      <p class="text-xs text-slate-400 font-mono leading-relaxed whitespace-pre-line">${escHtml(turn.simulation_summary)}</p>
+    </div>` : ''}
+
+    <!-- Navigation -->
+    <div class="flex items-center justify-between">
+      <button onclick="goBack()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors px-3 py-2">← Back</button>
+      <div class="flex items-center gap-2">
+        ${!done ? `<span class="text-xs text-yellow-400/70">Rate all orders to continue</span>` : ''}
+        <button onclick="goNext()" ${done?'':'disabled'}
+          class="bg-accent hover:bg-accent/90 disabled:opacity-30 text-white font-semibold text-sm px-5 py-2 rounded-lg transition-colors">
+          ${isLast ? 'Review Summary →' : 'Next Turn →'}
+        </button>
+      </div>
+    </div>
+  </div>`
+}
+
+// ─── Render: Summary (per-scenario) ──────────────────────────────────────────
+function renderSummary() {
+  const scenario = data.scenarios[currentScenario]
+  const sid      = scenario.scenario_id
+  const cats     = scenario.categories || []
+  const done     = summaryComplete(scenario)
+  const isLastScenario = currentScenario === data.n_scenarios - 1
+  const pct = Math.round((completedSteps() / totalSteps()) * 100)
+
+  let catHtml = cats.map(cat => {
+    const catR = ratings[sid]?.categories?.[cat] || {}
+    return `
+    <div class="border border-white/8 rounded-lg p-4 bg-ink-800 mb-3">
+      <p class="text-xs font-semibold text-slate-300 mb-3">${CAT_LABELS[cat] || cat}</p>
+      <div class="flex flex-wrap gap-2 mb-3">
+        ${OVERALL_RATINGS.map(v => {
+          const selected = catR.rating === v
+          return `<button onclick="setCategoryRating('${sid}','${cat}','rating','${v}')"
+            class="rating-btn text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors
+            ${selected ? SELECTED_COLORS[v] : OVERALL_COLORS[v]}">${OVERALL_LABELS[v]}</button>`
+        }).join('')}
+      </div>
+      <input type="text" placeholder="Optional notes..." value="${escAttr(catR.comment||'')}"
+        oninput="setCategoryRating('${sid}','${cat}','comment',this.value)"
+        class="w-full bg-ink-700 border border-white/8 rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-accent/40" />
+    </div>`
+  }).join('')
+
+  const overall = ratings[sid]?.overall || {}
+  document.getElementById('app').innerHTML = `
+  <div class="max-w-3xl mx-auto px-4 py-6 fade-in">
+    <div class="mb-6">
+      <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
+        <span>Scenario ${currentScenario+1} of ${data.n_scenarios} · Summary</span>
+        <span>${pct}% complete</span>
+      </div>
+      <div class="w-full bg-ink-700 rounded-full h-1.5">
+        <div class="progress-fill bg-accent h-1.5 rounded-full" style="width:${pct}%"></div>
+      </div>
+    </div>
+
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <h2 class="text-sm font-semibold text-white mb-1">${escHtml(scenario.topic)}</h2>
+      <p class="text-xs text-slate-500">Reviewed ${scenario.total_turns} turn${scenario.total_turns!==1?'s':''}</p>
+    </div>
+
+    <!-- Per-category -->
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-4">
+      <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-4 font-semibold">Overall per-category assessment</p>
+      ${catHtml || '<p class="text-slate-500 text-sm italic">No categories found.</p>'}
+    </div>
+
+    <!-- Overall case -->
+    <div class="bg-ink-800 border border-white/10 rounded-xl p-4 mb-6">
+      <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-3 font-semibold">Overall case management</p>
+      <div class="flex flex-wrap gap-2 mb-3">
+        ${OVERALL_RATINGS.map(v => {
+          const selected = overall.rating === v
+          return `<button onclick="setOverall('${sid}','rating','${v}')"
+            class="rating-btn font-medium px-4 py-2 rounded-lg border text-sm transition-colors
+            ${selected ? SELECTED_COLORS[v] : OVERALL_COLORS[v]}">${OVERALL_LABELS[v]}</button>`
+        }).join('')}
+      </div>
+      <textarea rows="3" placeholder="Clinical comments (optional)..."
+        oninput="setOverall('${sid}','comment',this.value)"
+        class="w-full bg-ink-700 border border-white/8 rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-accent/40 resize-none">${escHtml(overall.comment||'')}</textarea>
+    </div>
+
+    <div class="flex items-center justify-between">
+      <button onclick="goBack()" class="text-xs text-slate-500 hover:text-slate-300 transition-colors px-3 py-2">← Back</button>
+      <div class="flex items-center gap-2">
+        ${!done ? `<span class="text-xs text-yellow-400/70">Complete all ratings to continue</span>` : ''}
+        <button onclick="completeScenario()" ${done?'':'disabled'}
+          class="bg-accent hover:bg-accent/90 disabled:opacity-30 text-white font-semibold text-sm px-5 py-2 rounded-lg transition-colors">
+          ${isLastScenario ? 'Finish & Submit →' : 'Next Scenario →'}
+        </button>
+      </div>
+    </div>
+  </div>`
+}
+
+// ─── Render: Done ─────────────────────────────────────────────────────────────
+function renderDone() {
+  const total = data.scenarios.reduce((acc, s) => acc + s.turns.reduce((a, t) => a + t.orders.length, 0), 0)
+  document.getElementById('app').innerHTML = `
+  <div class="max-w-lg mx-auto px-6 py-20 fade-in text-center">
+    <div class="text-4xl mb-4">✓</div>
+    <h1 class="text-2xl font-bold text-white mb-2">Review Complete</h1>
+    <p class="text-slate-400 mb-2">You rated <strong class="text-white">${total} orders</strong> across <strong class="text-white">${data.n_scenarios} scenarios</strong>.</p>
+    <p class="text-slate-400 text-sm mb-8">Thank you, ${escHtml(reviewerName)}.</p>
+
+    <div class="space-y-3">
+      <button onclick="submitResults()" class="w-full bg-accent hover:bg-accent/90 text-white font-semibold py-3 rounded-xl transition-colors">
+        Download & Submit Results
+      </button>
+      <p id="submit-status" class="text-sm text-slate-500"></p>
+      <button onclick="startOver()" class="w-full text-slate-500 hover:text-slate-300 text-sm py-2 transition-colors">
+        Start a new review session
+      </button>
+    </div>
+  </div>`
+}
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+function goNext() {
+  const scenario = data.scenarios[currentScenario]
+  if (currentTurn < scenario.total_turns) {
+    currentTurn++
+  }
+  saveState()
+  render()
+}
+
+function goBack() {
+  if (currentTurn > 0) {
+    currentTurn--
+  } else if (currentScenario > 0) {
+    currentScenario--
+    currentTurn = data.scenarios[currentScenario].total_turns
+  }
+  saveState()
+  render()
+}
+
+function completeScenario() {
+  if (currentScenario < data.n_scenarios - 1) {
+    currentScenario++
+    currentTurn = 0
+    saveState()
+    render()
+  } else {
+    // All done — mark as complete
+    currentScenario = data.n_scenarios
+    saveState()
+    render()
+  }
+}
+
+function startOver() {
+  if (confirm('This will clear your saved progress. Continue?')) {
+    clearState()
+    render()
+  }
+}
+
+// ─── Main render ──────────────────────────────────────────────────────────────
+function render() {
+  if (!reviewerName) { renderWelcome(); return }
+  if (currentScenario >= data.n_scenarios) { renderDone(); return }
+  const scenario = data.scenarios[currentScenario]
+  if (currentTurn >= scenario.total_turns) { renderSummary(); return }
+  renderTurn()
+}
+
+// ─── Utils ────────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+function escAttr(s) { return escHtml(s) }
+
+// ─── Bootstrap ───────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  document.getElementById('app').innerHTML = `
+    <div class="flex items-center justify-center min-h-screen">
+      <div class="text-center">
+        <div class="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+        <p class="text-slate-500 text-sm">Loading scenarios…</p>
+      </div>
+    </div>`
+
+  try {
+    const res = await fetch('data/scenarios.json')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    data = await res.json()
+  } catch(e) {
+    document.getElementById('app').innerHTML = `
+      <div class="flex items-center justify-center min-h-screen">
+        <div class="text-center max-w-sm">
+          <p class="text-red-400 font-medium mb-2">Could not load scenarios.json</p>
+          <p class="text-slate-500 text-sm">Run <code class="bg-ink-700 px-1 rounded">python export_scenarios.py</code> first, then serve with <code class="bg-ink-700 px-1 rounded">python serve.py</code>.</p>
+          <p class="text-slate-600 text-xs mt-2">${e.message}</p>
+        </div>
+      </div>`
+    return
+  }
+
+  // Restore saved session or start fresh
+  const hasSaved = loadState()
+  if (hasSaved && currentScenario > 0) {
+    // Show resume banner briefly
+    const name = reviewerName
+    document.getElementById('app').innerHTML = `
+      <div class="flex items-center justify-center min-h-screen">
+        <div class="text-center">
+          <p class="text-slate-300 mb-4">Welcome back, <strong>${escHtml(name)}</strong>.</p>
+          <div class="flex gap-3 justify-center">
+            <button onclick="render()" class="bg-accent text-white text-sm font-medium px-4 py-2 rounded-lg">Resume →</button>
+            <button onclick="clearState();render()" class="border border-white/10 text-slate-400 text-sm px-4 py-2 rounded-lg hover:text-white">Start Over</button>
+          </div>
+        </div>
+      </div>`
+    return
+  }
+
+  render()
+})
+</script>
+</body>
+</html>
