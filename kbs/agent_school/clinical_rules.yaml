@@ -1,0 +1,6 @@
+- id: always-trial-fluid-resuscitation-30-cf9cbf
+  enabled: true
+  triggers: []
+  rule: Always trial fluid resuscitation (30 ml/kg bolus) BEFORE initiating vasopressors,
+    unless cardiogenic shock is confirmed or fluid-overloaded. Steps must reflect
+    this sequence — fluids first, pressors as second-line.

@@ -769,6 +769,72 @@ export async function getGraphData(kbName) {
   return fetch(`${BASE}/graph/data`, { headers: kbHeaders(kbName) }).then(r => r.json())
 }
 
+// ── Validation ─────────────────────────────────────────────────────────────────
+
+export async function getValidationCatalog() {
+  return fetch(`${BASE}/validation/catalog`).then(r => r.json())
+}
+
+export async function getValidationAnalysis() {
+  return fetch(`${BASE}/validation/analysis`).then(r => r.json())
+}
+
+export async function deleteValidationResult(filename) {
+  const res = await fetch(`${BASE}/validation/results/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function labelValidationResult(filename, label) {
+  const res = await fetch(`${BASE}/validation/results/label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, label }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getValidationResults() {
+  return fetch(`${BASE}/validation/results`).then(r => r.json())
+}
+
+export async function startValidationRun(body) {
+  const res = await fetch(`${BASE}/validation/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getValidationRunStatus(runId) {
+  return fetch(`${BASE}/validation/run/${runId}`).then(r => r.json())
+}
+
+export async function startValidationServe(body) {
+  const res = await fetch(`${BASE}/validation/serve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getValidationServeStatus() {
+  return fetch(`${BASE}/validation/serve/status`).then(r => r.json())
+}
+
+export async function stopValidationServe() {
+  const res = await fetch(`${BASE}/validation/serve/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function generateOrders({ recommendations, cpmrn, patientType, model }, kbName) {
   const res = await fetch(`${BASE}/orders/generate`, {
     method: 'POST',
@@ -779,6 +845,43 @@ export async function generateOrders({ recommendations, cpmrn, patientType, mode
       patient_type: patientType || 'adult',
       model: model || null,
     }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Clinical Rules ──────────────────────────────────────────────────────────
+
+export async function listClinicalRules(kbName) {
+  const res = await fetch(`${BASE}/clinical-rules/`, { headers: kbHeaders(kbName) })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createClinicalRule(rule, kbName) {
+  const res = await fetch(`${BASE}/clinical-rules/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify(rule),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateClinicalRule(ruleId, rule, kbName) {
+  const res = await fetch(`${BASE}/clinical-rules/${encodeURIComponent(ruleId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify(rule),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteClinicalRule(ruleId, kbName) {
+  const res = await fetch(`${BASE}/clinical-rules/${encodeURIComponent(ruleId)}`, {
+    method: 'DELETE',
+    headers: kbHeaders(kbName),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()

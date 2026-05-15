@@ -14,6 +14,8 @@ import Activity from './pages/Activity'
 import GapIntelligence from './pages/GapIntelligence'
 import VivaSession from './pages/VivaSession'
 import Graph from './pages/Graph'
+import Validation from './pages/Validation'
+import ClinicalRules from './pages/ClinicalRules'
 
 export default function App() {
   return (
@@ -35,6 +37,8 @@ export default function App() {
             <Route path="gap-intelligence" element={<GapIntelligence />} />
             <Route path="viva" element={<VivaSession />} />
             <Route path="graph" element={<Graph />} />
+            <Route path="validation" element={<Validation />} />
+            <Route path="clinical-rules" element={<ClinicalRules />} />
           </Route>
         </Routes>
       </BrowserRouter>

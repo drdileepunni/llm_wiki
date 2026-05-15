@@ -46,7 +46,7 @@ from ..services.emr import (
 from ..services.emr.db import get_db
 from ..services.order_gen_pipeline import run_order_generation
 from ..services.order_safety_annotator import annotate_recommendations
-from ..services.viva_simulator import simulate_and_write, write_patient_state
+from ..services.viva_simulator import simulate_and_write, write_patient_state, get_result_delay
 
 log = logging.getLogger("wiki.viva")
 
@@ -136,24 +136,27 @@ async def _generate_pending_orders(
     cpmrn: str,
     kb: KBConfig,
     model: str | None,
-) -> tuple[list[dict], float]:
+    pending_conditionals: list[dict] | None = None,
+) -> tuple[list[dict], float, list[dict]]:
     """
     Run student agent + order gen for a scenario to produce AI-suggested orders.
-    Returns (orders, cost_usd). Never raises — returns ([], 0.0) on failure.
+    Returns (orders, cost_usd, conditional_orders). Never raises — returns ([], 0.0, []) on failure.
     """
     try:
         snap_result = await asyncio.to_thread(
             run_viva_student_turn,
             clinical_context, question, phase, difficulty, cpmrn, kb, model,
+            pending_conditionals,
         )
         student_snap = snap_result["snapshots"][0]
+        conditional_orders = student_snap.get("conditional_orders", [])
         all_steps = (
             student_snap.get("immediate_next_steps", []) +
             student_snap.get("monitoring_followup", [])
         )
         cost = student_snap.get("cost_usd", 0.0)
         if not all_steps:
-            return [], cost
+            return [], cost, conditional_orders
         try:
             all_steps = await asyncio.to_thread(
                 annotate_recommendations, all_steps, cpmrn, model,
@@ -171,10 +174,10 @@ async def _generate_pending_orders(
         if run_id:
             for o in raw_orders:
                 o["order_run_id"] = run_id
-        return _dedup_orders(raw_orders), cost
+        return _dedup_orders(raw_orders), cost, conditional_orders
     except Exception as exc:
         log.warning("_generate_pending_orders failed: %s", exc)
-        return [], 0.0
+        return [], 0.0, []
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -525,6 +528,19 @@ async def advance_session(
     model = req.model or session.get("model") or None
     turn_num = session["current_turn"] + 1
 
+    # ── 0. Gather pending conditionals from prior turns (deduplicated) ────────
+    all_prior_conditionals: list[dict] = []
+    for t in session.get("turns", []):
+        for c in t.get("conditional_orders", []):
+            if not any(
+                p.get("condition") == c.get("condition") and p.get("action") == c.get("action")
+                for p in all_prior_conditionals
+            ):
+                all_prior_conditionals.append(c)
+    pending_conditionals_for_turn = all_prior_conditionals or None
+    log.info("Viva %s advance turn %d: %d pending conditional(s) from prior turns",
+             session_id, turn_num, len(all_prior_conditionals))
+
     # ── 1. Read active orders from MongoDB ────────────────────────────────────
     try:
         active_resp = get_active_orders(VIVA_DUMMY_CPMRN)
@@ -535,8 +551,40 @@ async def advance_session(
     placed_orders = _flatten_active_orders(active_orders_dict)
     log.info("Viva %s advance turn %d: %d orders placed by user", session_id, turn_num, len(placed_orders))
 
+    # ── 1.5. Time delta + pending lab queue ──────────────────────────────────
+    time_delta_minutes: int = next_scenario.get("time_delta_minutes", 60)
+    session_elapsed_minutes: int = session.get("session_elapsed_minutes", 0)
+    turn_end_minutes: int = session_elapsed_minutes + time_delta_minutes
+
+    pending_lab_queue: list[dict] = session.get("pending_lab_queue", [])
+    available_labs = [e["name"] for e in pending_lab_queue if e["available_at_minutes"] <= turn_end_minutes]
+    still_pending = [e["name"] for e in pending_lab_queue if e["available_at_minutes"] > turn_end_minutes]
+
+    new_queue_entries: list[dict] = []
+    for o in placed_orders:
+        if o.get("order_type") in ("lab", "procedure"):
+            name = o.get("orderable_name", "")
+            if name:
+                delay = get_result_delay(name)
+                new_queue_entries.append({
+                    "name": name,
+                    "ordered_at_minutes": turn_end_minutes,
+                    "available_at_minutes": turn_end_minutes + delay,
+                    "ordered_turn": turn_num,
+                })
+    updated_lab_queue = (
+        [e for e in pending_lab_queue if e["available_at_minutes"] > turn_end_minutes]
+        + new_queue_entries
+    )
+    log.info(
+        "Viva %s advance turn %d: time_delta=%dm  elapsed=%dm  available_labs=%s  pending=%s",
+        session_id, turn_num, time_delta_minutes, turn_end_minutes,
+        available_labs, still_pending,
+    )
+
     # ── 2. Simulator ──────────────────────────────────────────────────────────
     simulation_summary = ""
+    vital_timeline: list[dict] = []
     log.info("Viva %s advance turn %d: running simulator", session_id, turn_num)
     try:
         sim_result = await asyncio.to_thread(
@@ -548,8 +596,12 @@ async def advance_session(
             turn_num,
             session["max_turns"],
             model,
+            time_delta_minutes,
+            available_labs or None,
+            still_pending or None,
         )
         simulation_summary = sim_result.get("summary", "")
+        vital_timeline = sim_result.get("vital_timeline", [])
         log.info("Viva %s advance turn %d: simulation complete — %s", session_id, turn_num, simulation_summary[:120])
     except Exception as exc:
         log.warning("Viva %s advance turn %d: simulation failed: %s", session_id, turn_num, exc)
@@ -601,14 +653,18 @@ async def advance_session(
     if not complete and teacher_result.get("scenario"):
         next_s = teacher_result["scenario"]
         log.info("Viva %s advance turn %d: generating pending orders for next scenario", session_id, turn_num)
-        pending_orders, pending_cost = await _generate_pending_orders(
+        pending_orders, pending_cost, new_conditionals = await _generate_pending_orders(
             next_s.get("clinical_context", ""),
             next_s.get("question", ""),
             next_s.get("phase", "MANAGEMENT"),
             next_s.get("difficulty", "MEDIUM"),
             VIVA_DUMMY_CPMRN, kb, model,
+            pending_conditionals=pending_conditionals_for_turn,
         )
-        log.info("Viva %s advance turn %d: %d pending orders generated", session_id, turn_num, len(pending_orders))
+        log.info("Viva %s advance turn %d: %d pending orders generated  %d conditional(s)",
+                 session_id, turn_num, len(pending_orders), len(new_conditionals))
+    else:
+        new_conditionals = []
 
     # ── Persist ───────────────────────────────────────────────────────────────
     turn_cost = gap_cost + pending_cost
@@ -623,10 +679,17 @@ async def advance_session(
         "simulation_summary": simulation_summary,
         "gaps_resolved": gaps_resolved,
         "cost_usd": turn_cost,
+        "conditional_orders": new_conditionals,
+        "turn_delta_minutes": time_delta_minutes,
+        "session_elapsed_minutes": turn_end_minutes,
+        "vital_timeline": vital_timeline,
+        "available_labs_this_turn": available_labs,
     }
     session["turns"].append(turn_record)
     session["current_turn"] = turn_num
     session["total_cost_usd"] = round(session.get("total_cost_usd", 0.0) + turn_cost, 6)
+    session["session_elapsed_minutes"] = turn_end_minutes
+    session["pending_lab_queue"] = updated_lab_queue
 
     if complete:
         session["status"] = "complete"
@@ -679,6 +742,19 @@ async def run_turn(
     model = req.model or session.get("model") or None
     turn_num = session["current_turn"] + 1
 
+    # ── 0. Gather pending conditionals from prior turns ───────────────────────
+    _prior_conditionals: list[dict] = []
+    for t in session.get("turns", []):
+        for c in t.get("conditional_orders", []):
+            if not any(
+                p.get("condition") == c.get("condition") and p.get("action") == c.get("action")
+                for p in _prior_conditionals
+            ):
+                _prior_conditionals.append(c)
+    _pending_conds = _prior_conditionals or None
+    log.info("Viva %s turn %d: %d pending conditional(s) from prior turns",
+             session_id, turn_num, len(_prior_conditionals))
+
     # ── 1. Student assessment (agentic — queries MongoDB with tools) ──────────
     log.info("Viva %s turn %d: student assessment", session_id, turn_num)
     snap_result = await asyncio.to_thread(
@@ -690,6 +766,7 @@ async def run_turn(
         VIVA_DUMMY_CPMRN,
         kb,
         model,
+        pending_conditionals=_pending_conds,
     )
     student_snap = snap_result["snapshots"][0]
     student_answer_text = _build_student_answer_text(student_snap)
@@ -748,8 +825,40 @@ async def run_turn(
 
     turn_cost += order_cost
 
-    # ── 2.5. Simulation — write patient responses to MongoDB ──────────────────
+    # ── 2.5. Time delta + pending lab queue ──────────────────────────────────
+    _time_delta_minutes: int = next_scenario.get("time_delta_minutes", 60)
+    _session_elapsed: int = session.get("session_elapsed_minutes", 0)
+    _turn_end_minutes: int = _session_elapsed + _time_delta_minutes
+
+    _pending_lab_queue: list[dict] = session.get("pending_lab_queue", [])
+    _available_labs = [e["name"] for e in _pending_lab_queue if e["available_at_minutes"] <= _turn_end_minutes]
+    _still_pending = [e["name"] for e in _pending_lab_queue if e["available_at_minutes"] > _turn_end_minutes]
+
+    _new_queue_entries: list[dict] = []
+    for o in generated_orders:
+        if o.get("order_type") in ("lab", "procedure"):
+            name = o.get("orderable_name", "")
+            if name:
+                delay = get_result_delay(name)
+                _new_queue_entries.append({
+                    "name": name,
+                    "ordered_at_minutes": _turn_end_minutes,
+                    "available_at_minutes": _turn_end_minutes + delay,
+                    "ordered_turn": turn_num,
+                })
+    _updated_lab_queue = (
+        [e for e in _pending_lab_queue if e["available_at_minutes"] > _turn_end_minutes]
+        + _new_queue_entries
+    )
+    log.info(
+        "Viva %s turn %d: time_delta=%dm  elapsed=%dm  available_labs=%s  pending=%s",
+        session_id, turn_num, _time_delta_minutes, _turn_end_minutes,
+        _available_labs, _still_pending,
+    )
+
+    # ── 2.6. Simulation — write patient responses to MongoDB ─────────────────
     simulation_summary = ""
+    vital_timeline: list[dict] = []
     if generated_orders:
         log.info("Viva %s turn %d: running simulator", session_id, turn_num)
         try:
@@ -762,8 +871,12 @@ async def run_turn(
                 turn_num,
                 session["max_turns"],
                 model,
+                _time_delta_minutes,
+                _available_labs or None,
+                _still_pending or None,
             )
             simulation_summary = sim_result.get("summary", "")
+            vital_timeline = sim_result.get("vital_timeline", [])
             log.info("Viva %s turn %d: simulation complete — %s", session_id, turn_num, simulation_summary[:120])
         except Exception as exc:
             log.warning("Viva %s turn %d: simulation failed: %s", session_id, turn_num, exc)
@@ -837,11 +950,18 @@ async def run_turn(
         "simulation_summary": simulation_summary,
         "gaps_resolved": gaps_resolved,
         "cost_usd": turn_cost,
+        "conditional_orders": student_snap.get("conditional_orders", []),
+        "turn_delta_minutes": _time_delta_minutes,
+        "session_elapsed_minutes": _turn_end_minutes,
+        "vital_timeline": vital_timeline,
+        "available_labs_this_turn": _available_labs,
     }
 
     session["turns"].append(turn_record)
     session["current_turn"] = turn_num
     session["total_cost_usd"] = round(session.get("total_cost_usd", 0.0) + turn_cost, 6)
+    session["session_elapsed_minutes"] = _turn_end_minutes
+    session["pending_lab_queue"] = _updated_lab_queue
 
     complete = teacher_result["complete"] or turn_num >= session["max_turns"]
     if complete:

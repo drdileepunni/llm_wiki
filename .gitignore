@@ -20,3 +20,4 @@ app/traces/*
 app/traces/*
 kbs/agent_school/viva_batch_runs/*
 validation/data/*
+validation/results/*

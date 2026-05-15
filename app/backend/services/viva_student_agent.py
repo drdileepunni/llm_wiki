@@ -327,6 +327,102 @@ def _tool_loop(
     return data_brief, total_in, total_out
 
 
+# ── Public Phase 1 / Phase 2 split (used by A/B pipeline) ────────────────────
+
+def collect_patient_brief(
+    clinical_context: str,
+    question: str,
+    cpmrn: str,
+    model: str | None = None,
+) -> tuple[str, int, int]:
+    """
+    Run Phase 1 only: ReAct tool loop → PATIENT DATA BRIEF.
+    Returns (data_brief, input_tokens, output_tokens).
+
+    Call this once per turn in A/B testing so both arms share the same
+    patient data snapshot rather than each querying MongoDB independently.
+    """
+    llm = get_llm_client(model=model)
+    return _tool_loop(clinical_context, question, cpmrn, llm)
+
+
+def run_cds_from_brief(
+    data_brief: str,
+    clinical_context: str,
+    question: str,
+    phase: str,
+    difficulty: str,
+    kb: KBConfig,
+    model: str | None = None,
+    grounding_mode: str = "wiki",
+    pending_conditionals: list[dict] | None = None,
+) -> dict:
+    """
+    Run Phase 2 only: wiki-grounded CDS synthesis from a pre-computed data brief.
+    Returns the same snap dict as run_viva_student_turn (minus loop token fields).
+
+    Use alongside collect_patient_brief() when multiple arms should share Phase 1.
+    """
+    assembled_question = (
+        f"{data_brief}\n\n"
+        f"Clinical context: {clinical_context}\n\n"
+        f"Question: {question}"
+    )
+
+    log.info("run_cds_from_brief: CDS synthesis  grounding_mode=%s  pending_conditionals=%d",
+             grounding_mode, len(pending_conditionals) if pending_conditionals else 0)
+    result = run_chat(
+        question=assembled_question,
+        kb=kb,
+        model=model,
+        mode="cds",
+        grounding_mode=grounding_mode,
+        pending_conditionals=pending_conditionals,
+    )
+
+    text_gaps = scan_text_gaps(
+        steps=result.get("immediate_next_steps", []),
+        clinical_context=clinical_context,
+        kb=kb,
+        model=model,
+        source_name=f"ab-cds: {grounding_mode}",
+        force_gap_step_texts=result.get("_step4_failed_texts"),
+    )
+
+    gap_sections = list(result.get("gap_sections") or [])
+    if text_gaps:
+        gap_sections += [g.split("/")[-1].replace(".md", "") for g in text_gaps]
+
+    return {
+        "snapshot_num":          1,
+        "snapshot_dir":          "ab",
+        "clinical_context":      clinical_context,
+        "question":              question,
+        "phase":                 phase,
+        "difficulty":            difficulty,
+        "data_brief":            data_brief,
+        "chat_run_id":           result.get("chat_run_id", ""),
+        "agent_answer":          result["answer"],
+        "immediate_next_steps":  result.get("immediate_next_steps", []),
+        "clinical_direction":    result.get("clinical_direction", []),
+        "immediate_actions":     result.get("clinical_direction", []),
+        "clinical_reasoning":    result.get("clinical_reasoning", []),
+        "specific_parameters":   result.get("specific_parameters", []),
+        "monitoring_followup":   result.get("monitoring_followup", []),
+        "alternative_considerations": result.get("alternative_considerations", []),
+        "pages_consulted":       result["pages_consulted"],
+        "wiki_links":            result.get("wiki_links", []),
+        "gap_registered":        result.get("gap_registered"),
+        "gap_entity":            result.get("gap_entity"),
+        "gap_sections":          gap_sections,
+        "markers_resolved_by_medgemma": result.get("markers_resolved_by_medgemma", 0),
+        "conditional_orders":    result.get("conditional_orders", []),
+        "tokens_in":             result["input_tokens"],
+        "tokens_out":            result["output_tokens"],
+        "cost_usd":              result["cost_usd"],
+    }
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def run_viva_student_turn(
@@ -337,6 +433,8 @@ def run_viva_student_turn(
     cpmrn: str,
     kb: KBConfig,
     model: str | None = None,
+    grounding_mode: str = "wiki",
+    pending_conditionals: list[dict] | None = None,
 ) -> dict:
     """
     Run one viva student assessment turn.
@@ -359,67 +457,24 @@ def run_viva_student_turn(
         len(data_brief), loop_in, loop_out, loop_cost,
     )
 
-    # ── Phase 2: wiki-grounded CDS synthesis ──────────────────────────────────
-    # Assemble the question the same way run_custom_snapshot does:
-    # data_brief plays the role of _summarize_timeline(csv_content)
-    assembled_question = (
-        f"{data_brief}\n\n"
-        f"Clinical context: {clinical_context}\n\n"
-        f"Question: {question}"
-    )
-
-    log.info("Viva student agent: running wiki-grounded CDS synthesis")
-    result = run_chat(
-        question=assembled_question,
-        kb=kb,
-        model=model,
-        mode="cds",
-    )
-
-    # ── Gap scan on immediate_next_steps ──────────────────────────────────────
-    text_gaps = scan_text_gaps(
-        steps=result.get("immediate_next_steps", []),
+    # ── Phase 2: CDS synthesis from brief ────────────────────────────────────
+    snap = run_cds_from_brief(
+        data_brief=data_brief,
         clinical_context=clinical_context,
+        question=question,
+        phase=phase,
+        difficulty=difficulty,
         kb=kb,
         model=model,
-        source_name=f"viva-student: {run_id}",
-        force_gap_step_texts=result.get("_step4_failed_texts"),
+        grounding_mode=grounding_mode,
+        pending_conditionals=pending_conditionals,
     )
+    snap["snapshot_dir"] = "viva"
+    snap["chat_run_id"]  = snap.get("chat_run_id") or chat_run_id
 
-    gap_sections = list(result.get("gap_sections") or [])
-    if text_gaps:
-        gap_sections += [g.split("/")[-1].replace(".md", "") for g in text_gaps]
-
-    # ── Assemble snap dict (same schema as run_custom_snapshot) ──────────────
-    total_in  = loop_in  + result["input_tokens"]
-    total_out = loop_out + result["output_tokens"]
-    total_cost = loop_cost + result["cost_usd"]
-
-    snap = {
-        "snapshot_num":          1,
-        "snapshot_dir":          "viva",
-        "clinical_context":      clinical_context,
-        "question":              question,
-        "phase":                 phase,
-        "difficulty":            difficulty,
-        "data_brief":            data_brief,          # what the agent retrieved
-        "chat_run_id":           result.get("chat_run_id") or chat_run_id,
-        "agent_answer":          result["answer"],
-        "immediate_next_steps":  result.get("immediate_next_steps", []),
-        "clinical_direction":    result.get("clinical_direction", []),
-        "immediate_actions":     result.get("clinical_direction", []),
-        "clinical_reasoning":    result.get("clinical_reasoning", []),
-        "specific_parameters":   result.get("specific_parameters", []),
-        "monitoring_followup":   result.get("monitoring_followup", []),
-        "alternative_considerations": result.get("alternative_considerations", []),
-        "pages_consulted":       result["pages_consulted"],
-        "wiki_links":            result.get("wiki_links", []),
-        "gap_registered":        result.get("gap_registered"),
-        "gap_entity":            result.get("gap_entity"),
-        "gap_sections":          gap_sections,
-        "tokens_in":             total_in,
-        "tokens_out":            total_out,
-        "cost_usd":              total_cost,
-    }
+    # ── Roll up Phase 1 tokens into the snap ─────────────────────────────────
+    snap["tokens_in"]  = loop_in  + snap["tokens_in"]
+    snap["tokens_out"] = loop_out + snap["tokens_out"]
+    snap["cost_usd"]   = loop_cost + snap["cost_usd"]
 
     return {"snapshots": [snap]}

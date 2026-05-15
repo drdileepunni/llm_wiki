@@ -2,9 +2,10 @@ import logging
 import json
 import re
 import uuid
+import yaml
 from pathlib import Path
 from datetime import date, datetime, timezone
-from ..config import MODEL, REASONING_MODEL as _DEFAULT_REASONING_MODEL, TRACES_DIR, KBConfig, _default_kb
+from ..config import MODEL, REASONING_MODEL as _DEFAULT_REASONING_MODEL, KG_FALLBACK_MODEL as _MEDGEMMA_MODEL, TRACES_DIR, KBConfig, _default_kb
 from .token_tracker import log_call
 from .llm_client import get_llm_client
 from .ingest_pipeline import write_gap_files
@@ -391,6 +392,112 @@ def _rewrite_grounded_steps(
     return result, (total_in, total_out), failed
 
 
+# ── Arm B helpers: MedGemma-only grounding (no wiki) ─────────────────────────
+
+
+def _cds_step2_medgemma(
+    specific_queries: list[dict],
+    clinical_context: str,
+    llm_medgemma,
+) -> tuple[list[dict], int, int]:
+    """
+    Arm B Step 2: query MedGemma directly for every specific_query using its
+    parametric medical knowledge — no vector search, no wiki context.
+
+    Returns (specific_parameters, input_tokens, output_tokens).
+    The returned list has the same schema as the wiki-grounded Step 2 output so
+    Steps 3-4 can be reused unchanged.  source is set to 'medgemma:4b'.
+    """
+    if not specific_queries:
+        return [], 0, 0
+
+    param_list = "\n".join(
+        f"- parameter: {sq['parameter']}  |  search hint: {sq['search_query']}"
+        for sq in specific_queries
+    )
+    prompt = (
+        f"Clinical context: {clinical_context}\n\n"
+        "For each parameter below, provide the exact, immediately actionable clinical value "
+        "from your medical knowledge.\n\n"
+        "Rules:\n"
+        "- grounded=true if you can provide a specific, clinically usable value with confidence.\n"
+        "- grounded=false ONLY if you genuinely have no reliable knowledge of this value.\n"
+        "- value: exact dose, range, or setting (e.g. '0.01–0.1 mcg/kg/min', '6 mL/kg IBW').\n"
+        "- source: always 'medgemma:4b' when grounded=true, empty string otherwise.\n"
+        "- entity: the drug, device, or clinical entity (e.g. 'Noradrenaline', 'Mechanical Ventilation').\n"
+        "- section_heading: the knowledge-base section (e.g. 'Dosing', 'Ventilator Settings').\n"
+        "- subtype: one of medication | investigation | procedure | condition | default.\n"
+        "- For grounded=false: populate resolution_question and missing_values.\n\n"
+        f"Parameters to look up:\n{param_list}"
+    )
+    response = llm_medgemma.create_message(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[_CDS_GROUND_TOOL],
+        system=(
+            "You are a clinical pharmacology and critical care expert. "
+            "Answer from your medical knowledge. Be precise and use standard clinical values."
+        ),
+        max_tokens=1500,
+        force_tool=True,
+    )
+    ground_block = next((b for b in response.content if b.type == "tool_use"), None)
+    specific_parameters: list[dict] = ground_block.input.get("groundings", []) if ground_block else []
+    # Ensure source tag is always set
+    for p in specific_parameters:
+        if p.get("grounded") and not p.get("source"):
+            p["source"] = "medgemma:4b"
+    log.info(
+        "CDS Step 2B (MedGemma): %d/%d params grounded  in=%d  out=%d",
+        sum(1 for p in specific_parameters if p.get("grounded")),
+        len(specific_parameters),
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+    )
+    return specific_parameters, response.usage.input_tokens, response.usage.output_tokens
+
+
+def _cds_step4_medgemma(
+    steps: list[str],
+    llm_medgemma,
+) -> tuple[list[str], int, int, int]:
+    """
+    Arm B Step 4: ask MedGemma to fill any remaining '(value not in wiki)' markers
+    using its parametric knowledge.
+
+    Returns (rewritten_steps, input_tokens, output_tokens, markers_resolved).
+    """
+    flagged_indices = [i for i, s in enumerate(steps) if _NOT_IN_WIKI_PATTERN.search(s)]
+    if not flagged_indices:
+        return steps, 0, 0, 0
+
+    result = list(steps)
+    total_in = total_out = resolved = 0
+    for i in flagged_indices:
+        step = steps[i]
+        resp = llm_medgemma.create_message(
+            messages=[{"role": "user", "content": (
+                f"The following clinical step has one or more missing-value markers:\n{step}\n\n"
+                "Replace EVERY '(value not in wiki — consult local protocol)' placeholder with the "
+                "exact clinical value from your medical knowledge (dose, setting, or target range). "
+                "Return ONLY the complete rewritten step text — no explanation, no markdown, no prefix."
+            )}],
+            tools=[],
+            system="You are a clinical expert. Return only the corrected clinical step text.",
+            max_tokens=200,
+            force_tool=False,
+        )
+        total_in  += resp.usage.input_tokens
+        total_out += resp.usage.output_tokens
+        text = next((b.text for b in resp.content if hasattr(b, "text") and b.text), "").strip()
+        if text and not _NOT_IN_WIKI_PATTERN.search(text):
+            result[i] = text
+            resolved += 1
+            log.info("  CDS Step 4B (MedGemma): resolved marker in step %d", i)
+        else:
+            log.info("  CDS Step 4B (MedGemma): could not resolve marker in step %d", i)
+    return result, total_in, total_out, resolved
+
+
 def scan_text_gaps(
     steps: list[str],
     clinical_context: str,
@@ -637,8 +744,44 @@ _CDS_REASON_TOOL = {
                     "corresponding query here for its key parameters."
                 ),
             },
+            "conditional_orders": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "condition": {
+                            "type": "string",
+                            "description": (
+                                "The clinical if-condition, specific and measurable. "
+                                "E.g. 'If amiodarone 300 mg IV bolus fails to cardiovert AF within 60 min'."
+                            ),
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": (
+                                "The complete action to take if the condition is met. "
+                                "Include full drug name, dose, route, rate, and duration. "
+                                "E.g. 'Start amiodarone infusion: 900 mg in 500 ml 5% dextrose over 24 h'."
+                            ),
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Short label, e.g. 'Amiodarone infusion if bolus fails'.",
+                        },
+                    },
+                    "required": ["condition", "action", "summary"],
+                },
+                "description": (
+                    "If-then conditional sequences in your clinical plan that should NOT be executed immediately. "
+                    "List each conditional action here — do NOT include it in clinical_direction or immediate_next_steps. "
+                    "These are cached and injected into subsequent turns so the model can apply them if the condition was met. "
+                    "Examples: 'If noradrenaline >0.5 mcg/kg/min → add vasopressin 0.03 units/min', "
+                    "'If MAP <65 despite 30 ml/kg fluids → start noradrenaline'. "
+                    "Leave empty [] if there are no if-then chains in your plan."
+                ),
+            },
         },
-        "required": ["clinical_direction", "clinical_reasoning", "monitoring_followup", "alternative_considerations", "specific_queries"],
+        "required": ["clinical_direction", "clinical_reasoning", "monitoring_followup", "alternative_considerations", "specific_queries", "conditional_orders"],
     },
 }
 
@@ -830,6 +973,39 @@ _CDS_TOOL = {
 }
 
 
+def _load_clinical_rules(kb: "KBConfig", question: str) -> list[str]:
+    """
+    Load clinical_rules.yaml for the KB and return rule texts relevant to the question.
+    Rules with empty triggers are always included. Rules with triggers are included if any
+    trigger keyword appears case-insensitively in the question. Returns [] on any error.
+    """
+    rules_path = kb.wiki_root / "clinical_rules.yaml"
+    if not rules_path.exists():
+        return []
+    try:
+        with rules_path.open("r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except Exception as exc:
+        log.warning("Failed to load clinical_rules.yaml for KB %s: %s", kb.name, exc)
+        return []
+    if not isinstance(raw, list):
+        return []
+    q_lower = question.lower()
+    matched: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("enabled", True):
+            continue
+        rule_text = entry.get("rule", "").strip()
+        if not rule_text:
+            continue
+        triggers = entry.get("triggers", [])
+        if not triggers or any(t.lower() in q_lower for t in triggers):
+            matched.append(rule_text)
+    return matched
+
+
 def run_chat(
     question: str,
     kb: "KBConfig | None" = None,
@@ -839,11 +1015,16 @@ def run_chat(
     mode: str = "qna",
     include_patient_context: bool = False,
     reasoning_model: str | None = None,
+    grounding_mode: str = "wiki",   # "wiki" | "medgemma"
+    pending_conditionals: list[dict] | None = None,
 ) -> dict:
     """
     mode="qna"  — prose markdown answer with wiki citations (default)
     mode="cds"  — structured clinical decision: immediate_actions, clinical_reasoning,
                   monitoring_followup, alternative_considerations
+
+    grounding_mode="wiki"     — Arm A: vector search + wiki grounding (default)
+    grounding_mode="medgemma" — Arm B: MedGemma parametric knowledge, no wiki
     """
     if kb is None:
         kb = _default_kb()
@@ -894,6 +1075,26 @@ QUERY RULES — read carefully:
 - Keep each search_query short and focused on the clinical concept only — no patient-specific details.
 - If a clinical direction involves both a drug AND a procedure, generate queries for both independently."""
 
+        # ── Clinical guardrails injection ─────────────────────────────────────
+        _clinical_rules = _load_clinical_rules(kb, question)
+        if _clinical_rules:
+            reason_prompt += "\n\nCLINICAL GUARDRAILS — you MUST respect these in your clinical_direction and sequence of immediate_next_steps:\n"
+            reason_prompt += "\n".join(f"{i+1}. {r}" for i, r in enumerate(_clinical_rules))
+            log.info("CDS Step 1: injected %d clinical guardrail(s)", len(_clinical_rules))
+
+        # ── Pending conditionals injection ────────────────────────────────────
+        if pending_conditionals:
+            _cond_lines = [
+                f"{i+1}. Condition: {c.get('condition', '')}\n   Action: {c.get('action', '')}"
+                for i, c in enumerate(pending_conditionals)
+            ]
+            reason_prompt += (
+                "\n\nPENDING CONDITIONALS FROM PREVIOUS TURNS — apply these if the condition was met "
+                "based on the current clinical picture:\n"
+                + "\n".join(_cond_lines)
+            )
+            log.info("CDS Step 1: injected %d pending conditional(s)", len(pending_conditionals))
+
         reason_msg = reason_prompt
         if images:
             reason_msg = [
@@ -920,26 +1121,96 @@ QUERY RULES — read carefully:
         monitoring_followup        = inp1.get("monitoring_followup", [])
         alternative_considerations = inp1.get("alternative_considerations", [])
         specific_queries           = inp1.get("specific_queries", [])
-        log.info("CDS Step 1: direction=%d  reasoning=%d  queries=%d", len(clinical_direction), len(clinical_reasoning), len(specific_queries))
+        conditional_orders         = inp1.get("conditional_orders", [])
+        log.info("CDS Step 1: direction=%d  reasoning=%d  queries=%d  conditionals=%d",
+                 len(clinical_direction), len(clinical_reasoning), len(specific_queries), len(conditional_orders))
         chat_trace["step1"] = {
             "clinical_direction": clinical_direction,
             "clinical_reasoning": clinical_reasoning,
             "monitoring_followup": monitoring_followup,
             "alternative_considerations": alternative_considerations,
             "specific_queries": specific_queries,
+            "conditional_orders": conditional_orders,
             "input_tokens": step1.usage.input_tokens,
             "output_tokens": step1.usage.output_tokens,
         }
 
-        # Call 2: targeted vector search per parameter, then ground
+        # Call 2: targeted retrieval + grounding (wiki) OR direct MedGemma query (medgemma)
         pages_consulted: set = set()
         specific_parameters: list = []
         score_by_param: dict = {}   # parameter name → top retrieval score from Step 2
 
-        if specific_queries:
+        if grounding_mode == "medgemma":
+            # ── Arm B: MedGemma parametric grounding — no wiki ───────────────
+            log.info("CDS Step 2B (MedGemma): querying %d params directly", len(specific_queries))
+            _mg_llm = get_llm_client(model=_MEDGEMMA_MODEL)
+            specific_parameters, _s2_in, _s2_out = _cds_step2_medgemma(
+                specific_queries, question, _mg_llm
+            )
+            total_input  += _s2_in
+            total_output += _s2_out
+            chat_trace["step2"] = {
+                "mode": "medgemma",
+                "model": _MEDGEMMA_MODEL,
+                "retrievals": [
+                    {
+                        "parameter": p["parameter"],
+                        "grounded": p.get("grounded", False),
+                        "value": p.get("value", ""),
+                        "source": p.get("source", ""),
+                    }
+                    for p in specific_parameters
+                ],
+                "input_tokens": _s2_in,
+                "output_tokens": _s2_out,
+            }
+            pages = []
+
+        elif specific_queries:
             param_contexts = []
             for sq in specific_queries:
-                # ── Multi-query retrieval: use both search_query and parameter name ──
+                # ── Tier 1: check resolved gap index before vector search ─────────
+                tier1_hit = None
+                try:
+                    for _q in [sq["search_query"], sq["parameter"]]:
+                        tier1_hit = vs_mod.search_resolved_index(_q, kb.wiki_dir)
+                        if tier1_hit:
+                            break
+                except Exception as _t1e:
+                    log.debug("Tier 1 index check failed (non-fatal): %s", _t1e)
+
+                if tier1_hit:
+                    filled_page    = tier1_hit.get("filled_page", "")
+                    filled_section = tier1_hit.get("filled_section", "")
+                    match_score    = tier1_hit.get("_match_score", 0.0)
+                    full_path      = kb.wiki_dir / filled_page
+                    tier1_context  = "(no content)"
+                    if full_path.exists():
+                        page_content  = full_path.read_text(encoding="utf-8")
+                        section_text  = vs_mod.extract_section(page_content, filled_section) or page_content[:2000]
+                        tier1_context = f"### {filled_page} — {filled_section} [resolved gap shortcut score={match_score:.2f}]\n\n{section_text}"
+                        pages_consulted.add(filled_page)
+                    try:
+                        vs_mod.increment_shortcut_hits(kb.wiki_dir, filled_page, filled_section)
+                    except Exception:
+                        pass
+                    log.info(
+                        "  Tier 1 hit: %r → %s#%s (score=%.2f verified=%s)",
+                        sq["search_query"], filled_page, filled_section,
+                        match_score, tier1_hit.get("retrieval_verified"),
+                    )
+                    param_contexts.append({
+                        "parameter": sq["parameter"],
+                        "search_query": sq["search_query"],
+                        "context": tier1_context,
+                        "top_score": match_score,
+                        "pages_hit": [filled_page] if full_path.exists() else [],
+                        "sections_searched": [],
+                        "tier": 1,
+                    })
+                    continue
+
+                # ── Tier 2: normal vector search ──────────────────────────────────
                 queries_to_run = list(dict.fromkeys([sq["search_query"], sq["parameter"]]))
                 raw_hit_lists = [
                     vs_mod.search_sections(q, kb.wiki_dir, top_k=10, include_patients=include_patient_context)
@@ -961,6 +1232,11 @@ QUERY RULES — read carefully:
                         log.info("  Fallback retrieval %r → top score %.2f", short_q, hits[0]["score"] if hits else 0)
 
                 top_score = hits[0]["score"] if hits else 0.0
+                # All retrieved sections with scores — stored for observability
+                sections_searched = [
+                    {"path": h["path"], "section": h["section"], "score": round(h["score"], 3)}
+                    for h in hits
+                ]
                 log.info("  Retrieval %r+%r → %d hits  top=%.2f", sq["search_query"], sq["parameter"], len(hits),
                          top_score)
 
@@ -1003,6 +1279,8 @@ QUERY RULES — read carefully:
                     "context": "\n\n---\n\n".join(param_page_texts) if param_page_texts else "(no relevant wiki pages found)",
                     "top_score": top_score,
                     "pages_hit": [h["path"] for h in hits if h["score"] >= _MIN_RETRIEVAL_SCORE],
+                    "sections_searched": sections_searched,
+                    "tier": 2,
                 })
 
             # Index retrieval score by parameter name so we can gate the pre-write check
@@ -1068,6 +1346,8 @@ QUERY RULES — read carefully:
                     "search_query": pc.get("search_query", ""),
                     "top_score": pc.get("top_score", 0.0),
                     "pages_hit": pc.get("pages_hit", []),
+                    "sections_searched": pc.get("sections_searched", []),
+                    "tier": pc.get("tier", 2),
                     "grounded": g.get("grounded", False),
                     "value": g.get("value", ""),
                     "source": g.get("source", ""),
@@ -1078,8 +1358,11 @@ QUERY RULES — read carefully:
                 "input_tokens": step2.usage.input_tokens,
                 "output_tokens": step2.usage.output_tokens,
             }
+            pages = list(pages_consulted)
 
-        pages = list(pages_consulted)
+        else:
+            # No specific_queries at all — nothing to retrieve
+            pages = list(pages_consulted)
 
         # ── Metric 1: record a CDS query hit for every page consulted ────────
         if pages_consulted:
@@ -1095,10 +1378,35 @@ QUERY RULES — read carefully:
         immediate_next_steps: list = []
         if clinical_direction or specific_parameters:
             direction_text = "\n".join(f"- {d}" for d in clinical_direction)
-            params_text = "\n".join(
-                f"- {p['parameter']}: {p['value']} ({'wiki-grounded' if p.get('grounded') else 'not in wiki'})"
-                for p in specific_parameters if p.get("value")
-            ) or "(none)"
+
+            if grounding_mode == "medgemma":
+                params_text = "\n".join(
+                    f"- {p['parameter']}: {p['value']} (medgemma-grounded)"
+                    for p in specific_parameters if p.get("value")
+                ) or "(none)"
+                _values_rule = (
+                    "- Use the medgemma-provided values listed below directly. "
+                    "If a value is marked medgemma-grounded, use it as-is. "
+                    "If a parameter has no value (not grounded), write the clinical action but replace the "
+                    "specific value with '(value not in wiki — consult local protocol)'.\n"
+                )
+                _params_header = "SPECIFIC PARAMETERS (medgemma-grounded)"
+            else:
+                params_text = "\n".join(
+                    f"- {p['parameter']}: {p['value']} ({'wiki-grounded' if p.get('grounded') else 'not in wiki'})"
+                    for p in specific_parameters if p.get("value")
+                ) or "(none)"
+                _values_rule = (
+                    "- Use ONLY wiki-grounded values for specific numeric parameters. "
+                    "If the wiki provides a range (e.g. '5–8 cmH₂O', '6–8 mL/kg IBW', '0.01–3 mcg/kg/min'), "
+                    "use the lower bound as the initial starting value unless the source explicitly marks "
+                    "a different point as the starting value. Always resolve ranges to a single number in the step text. "
+                    "If a value is not wiki-grounded at all, write the clinical action but replace the specific "
+                    "value with '(value not in wiki — consult local protocol)'. "
+                    "Do NOT invent or estimate values from clinical training.\n"
+                )
+                _params_header = "SPECIFIC PARAMETERS (wiki-grounded)"
+
             synth_prompt = (
                 "You are a senior ICU consultant. Translate the clinical reasoning and parameters below "
                 "into a prioritised list of IMMEDIATE NEXT STEPS for the bedside team.\n\n"
@@ -1109,17 +1417,12 @@ QUERY RULES — read carefully:
                 "- For DRUGS: specify drug name, dose, route, rate, and any renal/hepatic adjustment. "
                 "Note monitoring parameters (e.g. 'recheck glucose in 30 min').\n"
                 "- For TARGETS: give the exact numeric range (e.g. 'MAP 65–70 mmHg', 'SpO2 94–98%').\n"
-                "- Use ONLY wiki-grounded values for specific numeric parameters. "
-                "If the wiki provides a range (e.g. '5–8 cmH₂O', '6–8 mL/kg IBW', '0.01–3 mcg/kg/min'), "
-                "use the lower bound as the initial starting value unless the source explicitly marks "
-                "a different point as the starting value. Always resolve ranges to a single number in the step text. "
-                "If a value is not wiki-grounded at all, write the clinical action but replace the specific "
-                "value with '(value not in wiki — consult local protocol)'. "
-                "Do NOT invent or estimate values from clinical training.\n"
+                + _values_rule +
                 "- Order by clinical urgency (life threats first).\n"
-                "- 5–8 steps maximum.\n\n"
+                "- 5–8 steps maximum.\n"
+                "- Do NOT include actions listed in conditional_orders — those are if-then chains cached for future turns.\n\n"
                 f"CLINICAL DIRECTION:\n{direction_text}\n\n"
-                f"SPECIFIC PARAMETERS (wiki-grounded):\n{params_text}"
+                f"{_params_header}:\n{params_text}"
             )
             log.info("CDS Step 3: synthesising immediate next steps")
             step3 = llm.create_message(
@@ -1141,27 +1444,47 @@ QUERY RULES — read carefully:
                 "output_tokens": step3.usage.output_tokens,
             }
 
-        # Step 4: rewrite any remaining markers where the wiki actually has the value
+        # Step 4: rewrite any remaining markers
         _step4_failed_texts: set[str] = set()
+        _markers_resolved_by_medgemma = 0
         if immediate_next_steps:
             steps_before_rewrite = list(immediate_next_steps)
             markers_before = sum(1 for s in steps_before_rewrite if _NOT_IN_WIKI_PATTERN.search(s))
-            immediate_next_steps, rewrite_tokens, failed_idx = _rewrite_grounded_steps(
-                immediate_next_steps, kb, llm
-            )
-            total_input  += rewrite_tokens[0]
-            total_output += rewrite_tokens[1]
-            # Collect the original text of steps Step 4 couldn't resolve
-            _step4_failed_texts = {steps_before_rewrite[i] for i in failed_idx if i < len(steps_before_rewrite)}
-            markers_after = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
-            chat_trace["step4"] = {
-                "markers_before": markers_before,
-                "markers_resolved": markers_before - markers_after,
-                "markers_remaining": markers_after,
-                "failed_step_indices": sorted(failed_idx),
-                "input_tokens": rewrite_tokens[0],
-                "output_tokens": rewrite_tokens[1],
-            }
+
+            if grounding_mode == "medgemma":
+                # Arm B: MedGemma resolves any remaining markers
+                _mg_llm4 = get_llm_client(model=_MEDGEMMA_MODEL)
+                immediate_next_steps, _s4_in, _s4_out, _markers_resolved_by_medgemma = \
+                    _cds_step4_medgemma(immediate_next_steps, _mg_llm4)
+                total_input  += _s4_in
+                total_output += _s4_out
+                markers_after = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
+                chat_trace["step4"] = {
+                    "mode": "medgemma",
+                    "markers_before": markers_before,
+                    "markers_resolved": _markers_resolved_by_medgemma,
+                    "markers_remaining": markers_after,
+                    "input_tokens": _s4_in,
+                    "output_tokens": _s4_out,
+                }
+            else:
+                # Arm A: wiki-based marker rewrite
+                immediate_next_steps, rewrite_tokens, failed_idx = _rewrite_grounded_steps(
+                    immediate_next_steps, kb, llm
+                )
+                total_input  += rewrite_tokens[0]
+                total_output += rewrite_tokens[1]
+                _step4_failed_texts = {steps_before_rewrite[i] for i in failed_idx if i < len(steps_before_rewrite)}
+                markers_after = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
+                chat_trace["step4"] = {
+                    "mode": "wiki",
+                    "markers_before": markers_before,
+                    "markers_resolved": markers_before - markers_after,
+                    "markers_remaining": markers_after,
+                    "failed_step_indices": sorted(failed_idx),
+                    "input_tokens": rewrite_tokens[0],
+                    "output_tokens": rewrite_tokens[1],
+                }
 
         # Register gap files for ungrounded parameters.
         # Pre-write vector check is only run when Step 2 retrieval score was LOW (<0.60)
@@ -1176,7 +1499,9 @@ QUERY RULES — read carefully:
         gap_sections: list = []
         gap_written = None
         ungrounded = [p for p in specific_parameters if not p.get("grounded", True)]
-        if ungrounded:
+        # Build lookup: parameter name → param_context (for sections_searched)
+        pc_by_param = {pc["parameter"]: pc for pc in param_contexts}
+        if ungrounded and grounding_mode == "wiki":
             gap_entries: list = []
             from .canonical_registry import resolve as _resolve_canonical
             for param in ungrounded:
@@ -1214,6 +1539,11 @@ QUERY RULES — read carefully:
                     entry["missing_values"] = param["missing_values"]
                 if param.get("subtype"):
                     entry["subtype"] = param["subtype"]
+                # Attach the sections that were searched so write_gap_files can persist them
+                pc = pc_by_param.get(param["parameter"], {})
+                searched = pc.get("sections_searched", [])
+                if searched:
+                    entry["searched_sections"] = searched
                 gap_entries.append(entry)
             if gap_entries:
                 try:
@@ -1267,6 +1597,7 @@ QUERY RULES — read carefully:
 
         return {
             "mode": "cds",
+            "grounding_mode": grounding_mode,
             "chat_run_id": chat_run_id,
             "answer": "",
             "immediate_next_steps": immediate_next_steps,
@@ -1286,6 +1617,8 @@ QUERY RULES — read carefully:
             "gap_registered": gap_written,
             "gap_entity": gap_entity or None,
             "gap_sections": gap_sections or [],
+            "markers_resolved_by_medgemma": _markers_resolved_by_medgemma,
+            "conditional_orders": conditional_orders,
         }
 
     # ── QnA mode: section-level retrieval + link traversal then answer ───────

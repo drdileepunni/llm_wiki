@@ -529,6 +529,39 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
 
         # Prefer incoming resolution_question (more specific context) over existing
         resolution_question = gap.get("resolution_question", "").strip() or existing_question
+
+        # ── Dedup: check if a semantically equivalent gap already exists ──────
+        # Works in embedding space so paraphrase variants collapse into one gap.
+        if resolution_question and not gap_path.exists():
+            try:
+                from . import vector_store as _vs
+                dup_stem = _vs.find_duplicate_gap(resolution_question, kb.wiki_dir, exclude_stem=stem)
+                if dup_stem and dup_stem != stem:
+                    dup_path = gaps_dir / f"{dup_stem}.md"
+                    if dup_path.exists():
+                        log.info(
+                            "  write_gap_files: dedup — merging '%s' into existing gap '%s'",
+                            stem, dup_stem,
+                        )
+                        # Repoint to the existing gap instead of creating a new file
+                        stem = dup_stem
+                        gap_path = dup_path
+                        existing_text = gap_path.read_text(encoding="utf-8")
+                        existing_missing = _parse_gap_missing(existing_text)
+                        existing_question = _parse_gap_resolution_question(existing_text)
+                        existing_section_times = _parse_gap_section_times_opened(existing_text)
+                        existing_times_opened = 0
+                        for _l in existing_text.splitlines():
+                            if _l.startswith("created:"):
+                                created = _l.split(":", 1)[1].strip().strip('"')
+                            elif _l.startswith("times_opened:"):
+                                try:
+                                    existing_times_opened = int(_l.split(":", 1)[1].strip())
+                                except ValueError:
+                                    pass
+                        resolution_question = resolution_question or existing_question
+            except Exception as _de:
+                log.debug("write_gap_files: dedup check failed (non-fatal): %s", _de)
         subtype = gap.get("subtype", "").strip()
 
         # placement: "confirmed" when retrieval was strong; "approximate" when section
@@ -605,6 +638,19 @@ def write_gap_files(knowledge_gaps: list, kb: "KBConfig", source_name: str) -> l
             _record_gap_open(page, kb.wiki_dir)
         except Exception as _me:
             log.debug("page_metrics: record_gap_open failed (non-fatal): %s", _me)
+
+        # Store query embedding + searched_sections in gap metadata sidecar
+        # (kept separate from frontmatter to avoid large YAML arrays)
+        try:
+            from . import vector_store as _vs
+            _vs.store_gap_metadata(
+                stem=stem,
+                wiki_dir=kb.wiki_dir,
+                resolution_question=resolution_question,
+                searched_sections=gap.get("searched_sections") or [],
+            )
+        except Exception as _me:
+            log.debug("store_gap_metadata failed (non-fatal): %s", _me)
 
         written.append(rel_gap)
         log.info(

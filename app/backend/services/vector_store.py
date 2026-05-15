@@ -385,6 +385,281 @@ def remove_sections(page_path: str, wiki_dir: Path) -> None:
     _save_sections(wiki_dir, records)
 
 
+# ── Resolved gap index ────────────────────────────────────────────────────────
+# Stores query embeddings + fill location for gaps that have been resolved.
+# Used for two-tier retrieval: before normal vector search, check if a similar
+# query was already resolved and route directly to the filled section.
+# Also stores per-gap metadata (searched_sections at open time) in a sidecar
+# file so gap frontmatter stays clean.
+
+_RESOLVED_INDEX_FILE = "resolved_gap_index.json"
+_GAP_METADATA_FILE   = "gaps/_metadata.json"
+_RESOLVED_THRESHOLD  = 0.90   # cosine similarity for Tier 1 hit
+_DEDUP_THRESHOLD     = 0.92   # cosine similarity to collapse duplicate gaps
+
+
+def _load_resolved_index(wiki_dir: Path) -> list[dict]:
+    p = wiki_dir / _RESOLVED_INDEX_FILE
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("Resolved gap index corrupt, resetting: %s", e)
+        return []
+
+
+def _save_resolved_index(wiki_dir: Path, entries: list[dict]) -> None:
+    (wiki_dir / _RESOLVED_INDEX_FILE).write_text(
+        json.dumps(entries, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _load_gap_metadata(wiki_dir: Path) -> dict:
+    p = wiki_dir / _GAP_METADATA_FILE
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("Gap metadata file corrupt, resetting: %s", e)
+        return {}
+
+
+def _save_gap_metadata(wiki_dir: Path, meta: dict) -> None:
+    p = wiki_dir / _GAP_METADATA_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(meta, separators=(",", ":")), encoding="utf-8")
+
+
+def store_gap_metadata(
+    stem: str,
+    wiki_dir: Path,
+    resolution_question: str,
+    searched_sections: list[dict] | None = None,
+) -> None:
+    """
+    Store the query embedding and searched_sections for a gap at open time.
+    stem: gap file stem (e.g. 'furosemide').
+    searched_sections: list of {path, section, score} dicts retrieved during CDS Step 2.
+    """
+    meta = _load_gap_metadata(wiki_dir)
+    try:
+        q_emb = _embed(resolution_question) if resolution_question else []
+    except Exception as e:
+        log.warning("store_gap_metadata embed failed for %s: %s", stem, e)
+        q_emb = []
+
+    entry = meta.get(stem, {})
+    entry["resolution_question"] = resolution_question
+    if q_emb:
+        entry["query_embedding"] = q_emb
+    if searched_sections:
+        existing = entry.get("searched_sections", [])
+        # Merge: keep all unique path#section pairs, prefer higher score
+        seen: dict[str, dict] = {f"{s['path']}#{s['section']}": s for s in existing}
+        for s in searched_sections:
+            key = f"{s['path']}#{s['section']}"
+            if key not in seen or s["score"] > seen[key]["score"]:
+                seen[key] = s
+        entry["searched_sections"] = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+    meta[stem] = entry
+    _save_gap_metadata(wiki_dir, meta)
+
+
+def get_gap_metadata(stem: str, wiki_dir: Path) -> dict | None:
+    """Return the metadata sidecar entry for a gap stem, or None if not found."""
+    meta = _load_gap_metadata(wiki_dir)
+    return meta.get(stem)
+
+
+def find_duplicate_gap(
+    resolution_question: str,
+    wiki_dir: Path,
+    exclude_stem: str = "",
+) -> str | None:
+    """
+    Check if an existing open gap has a semantically similar resolution_question.
+    Returns the stem of the matching gap if found (above _DEDUP_THRESHOLD), else None.
+    Used to merge incoming gaps into existing ones rather than creating duplicates.
+    """
+    if not resolution_question:
+        return None
+    try:
+        q_emb = _embed(resolution_question)
+    except Exception as e:
+        log.warning("find_duplicate_gap embed failed: %s", e)
+        return None
+
+    meta = _load_gap_metadata(wiki_dir)
+    best_score = 0.0
+    best_stem: str | None = None
+    for stem, entry in meta.items():
+        if stem == exclude_stem:
+            continue
+        emb = entry.get("query_embedding")
+        if not emb:
+            continue
+        score = _cosine(q_emb, emb)
+        if score > best_score:
+            best_score = score
+            best_stem = stem
+
+    if best_score >= _DEDUP_THRESHOLD and best_stem:
+        log.info(
+            "find_duplicate_gap: %r matches existing gap %r (score=%.3f)",
+            resolution_question[:60], best_stem, best_score,
+        )
+        return best_stem
+    return None
+
+
+def search_resolved_index(
+    query: str,
+    wiki_dir: Path,
+    threshold: float = _RESOLVED_THRESHOLD,
+) -> dict | None:
+    """
+    Tier 1 retrieval: check if a semantically similar query was previously resolved.
+    Returns the matching index entry (with _match_score) if found, else None.
+    Works in embedding space — handles all query paraphrases automatically.
+    """
+    entries = _load_resolved_index(wiki_dir)
+    if not entries:
+        return None
+    try:
+        q_emb = _embed(query)
+    except Exception as e:
+        log.warning("search_resolved_index embed failed: %s", e)
+        return None
+
+    best_score = 0.0
+    best_entry: dict | None = None
+    for entry in entries:
+        emb = entry.get("query_embedding")
+        if not emb:
+            continue
+        score = _cosine(q_emb, emb)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+
+    if best_score >= threshold and best_entry:
+        log.info(
+            "Resolved index hit: score=%.3f → %s#%s (verified=%s)",
+            best_score, best_entry.get("filled_page"), best_entry.get("filled_section"),
+            best_entry.get("retrieval_verified"),
+        )
+        return {**best_entry, "_match_score": round(best_score, 3)}
+    return None
+
+
+def add_to_resolved_index(
+    wiki_dir: Path,
+    resolution_question: str,
+    filled_page: str,
+    filled_section: str,
+    retrieval_verified: bool,
+    verified_score: float,
+    retrieval_mismatch: bool = False,
+    searched_sections: list[dict] | None = None,
+) -> None:
+    """
+    Write a resolved gap entry to the index after fill_sections completes.
+    Embeds the resolution_question for future Tier 1 lookups.
+    """
+    from datetime import datetime, timezone
+    try:
+        q_emb = _embed(resolution_question)
+    except Exception as e:
+        log.warning("add_to_resolved_index embed failed: %s", e)
+        return
+
+    entries = _load_resolved_index(wiki_dir)
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Update existing entry for this page+section if it exists
+    for entry in entries:
+        if entry.get("filled_page") == filled_page and entry.get("filled_section") == filled_section:
+            entry.update({
+                "query_embedding": q_emb,
+                "resolution_question": resolution_question,
+                "retrieval_verified": retrieval_verified,
+                "verified_score": round(verified_score, 3),
+                "retrieval_mismatch": retrieval_mismatch,
+                "searched_sections": searched_sections or [],
+                "updated_at": now,
+            })
+            _save_resolved_index(wiki_dir, entries)
+            log.info("Resolved index updated: %s#%s verified=%s", filled_page, filled_section, retrieval_verified)
+            return
+
+    entries.append({
+        "query_embedding": q_emb,
+        "resolution_question": resolution_question,
+        "filled_page": filled_page,
+        "filled_section": filled_section,
+        "retrieval_verified": retrieval_verified,
+        "verified_score": round(verified_score, 3),
+        "retrieval_mismatch": retrieval_mismatch,
+        "searched_sections": searched_sections or [],
+        "shortcut_hits": 0,
+        "filled_at": now,
+        "updated_at": now,
+    })
+    _save_resolved_index(wiki_dir, entries)
+    log.info("Resolved index added: %s#%s verified=%s", filled_page, filled_section, retrieval_verified)
+
+
+def increment_shortcut_hits(wiki_dir: Path, filled_page: str, filled_section: str) -> None:
+    """Track how many times a resolved gap entry served as a Tier 1 retrieval shortcut."""
+    entries = _load_resolved_index(wiki_dir)
+    for entry in entries:
+        if entry.get("filled_page") == filled_page and entry.get("filled_section") == filled_section:
+            entry["shortcut_hits"] = entry.get("shortcut_hits", 0) + 1
+            _save_resolved_index(wiki_dir, entries)
+            return
+
+
+def invalidate_resolved_entries(page_path: str, wiki_dir: Path) -> None:
+    """
+    Re-run retrieval verification for all resolved index entries pointing to this page.
+    Called after a page's content changes so cached retrieval status stays accurate.
+    """
+    entries = _load_resolved_index(wiki_dir)
+    affected = [e for e in entries if e.get("filled_page") == page_path]
+    if not affected:
+        return
+    log.info("Invalidating %d resolved index entries for %s", len(affected), page_path)
+    for entry in affected:
+        try:
+            hits = search_sections(entry["resolution_question"], wiki_dir, top_k=5)
+            page_parts = page_path.replace("\\", "/").split("/")
+            page_rel = "/".join(page_parts[-2:]) if len(page_parts) >= 2 else page_path
+            matched = next((h for h in hits if h["path"] == page_rel), None)
+            if matched and matched["score"] >= 0.70:
+                entry["retrieval_verified"] = True
+                entry["verified_score"] = round(matched["score"], 3)
+            else:
+                entry["retrieval_verified"] = False
+                entry["verified_score"] = round(hits[0]["score"] if hits else 0.0, 3)
+        except Exception as exc:
+            log.debug("invalidate_resolved_entries: re-verify failed: %s", exc)
+    _save_resolved_index(wiki_dir, entries)
+
+
+def get_resolved_index_summary(wiki_dir: Path) -> list[dict]:
+    """
+    Return resolved index entries without embedding vectors (for API responses).
+    """
+    entries = _load_resolved_index(wiki_dir)
+    return [
+        {k: v for k, v in e.items() if k != "query_embedding"}
+        for e in entries
+    ]
+
+
 def rebuild_all(wiki_dir: Path) -> dict:
     """
     (Re)embed every .md page in entities/, concepts/, sources/, queries/.

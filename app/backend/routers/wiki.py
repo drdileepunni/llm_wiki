@@ -345,10 +345,51 @@ def get_gap_intelligence(kb: KBConfig = Depends(resolve_kb)):
                     "violations": violations,
                 })
 
+    # ── Enrich open gaps with searched_sections from metadata sidecar ───────
+    try:
+        from ..services import vector_store as _vs
+        gap_meta_all = _vs._load_gap_metadata(kb.wiki_dir)
+        for g in open_gaps:
+            entry = gap_meta_all.get(g["stem"], {})
+            g["searched_sections"] = entry.get("searched_sections", [])
+    except Exception:
+        pass
+
+    # ── Retrieval health: resolved gap index summary ─────────────────────────
+    retrieval_health = []
+    try:
+        from ..services import vector_store as _vs2
+        index_entries = _vs2._load_resolved_index(kb.wiki_dir)
+        retrieval_health = [
+            {
+                "resolution_question": e.get("resolution_question", ""),
+                "filled_page": e.get("filled_page", ""),
+                "filled_section": e.get("filled_section", ""),
+                "retrieval_verified": e.get("retrieval_verified", False),
+                "verified_score": e.get("verified_score", 0.0),
+                "retrieval_mismatch": e.get("retrieval_mismatch", False),
+                "shortcut_hits": e.get("shortcut_hits", 0),
+                "searched_sections": e.get("searched_sections", []),
+                "filled_at": e.get("filled_at", ""),
+            }
+            for e in index_entries
+        ]
+        # Enrich persistent_gaps with mismatch flag
+        mismatch_stems = {
+            Path(e.get("filled_page", "")).stem
+            for e in index_entries
+            if e.get("retrieval_mismatch")
+        }
+        for pg in persistent_gaps:
+            pg["retrieval_mismatch"] = pg["stem"] in mismatch_stems
+    except Exception:
+        pass
+
     return {
         "open_gaps": open_gaps,
         "persistent_gaps": persistent_gaps,
         "scope_contamination": scope_contamination,
+        "retrieval_health": retrieval_health,
     }
 
 

@@ -17,24 +17,27 @@ import {
   UserGroupIcon,
   StopCircleIcon,
   ServerIcon,
+  ShieldCheckIcon,
 } from '@heroicons/react/24/outline'
 import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM, getCPUVMStatus, startCPUVM, stopCPUVM, getActiveInstance, setActiveInstance } from '../api'
 import { useAppState } from '../AppStateContext'
 
 const primaryNav = [
-  { to: '/chat',   label: 'Chat',   icon: ChatBubbleLeftRightIcon },
-  { to: '/wiki',   label: 'Wiki',   icon: BookOpenIcon },
-  { to: '/learn',  label: 'Learn',  icon: AcademicCapIcon },
-  { to: '/viva',   label: 'Viva',   icon: UserGroupIcon },
+  { to: '/chat',       label: 'Chat',       icon: ChatBubbleLeftRightIcon },
+  { to: '/wiki',       label: 'Wiki',       icon: BookOpenIcon },
+  { to: '/viva',       label: 'Viva',       icon: UserGroupIcon },
+  { to: '/validation', label: 'Validation', icon: BeakerIcon },
 ]
 
 const toolsNav = [
   { to: '/ingest',           label: 'Ingest',   icon: ArrowUpTrayIcon },
-  { to: '/clinical-assess',  label: 'Clinical', icon: BeakerIcon },
+  { to: '/clinical-assess',  label: 'Clinical', icon: ClipboardDocumentCheckIcon },
   { to: '/order-generator',  label: 'Orders',   icon: ClipboardDocumentListIcon },
   { to: '/activity',         label: 'Activity', icon: BoltIcon },
   { to: '/gap-intelligence', label: 'Gaps',     icon: ExclamationTriangleIcon },
   { to: '/graph',            label: 'Graph',    icon: ShareIcon },
+  { to: '/learn',            label: 'Learn',    icon: AcademicCapIcon },
+  { to: '/clinical-rules',  label: 'Rules',    icon: ShieldCheckIcon },
 ]
 
 export default function Layout() {

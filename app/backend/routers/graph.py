@@ -66,6 +66,38 @@ def get_graph_data(kb: KBConfig = Depends(resolve_kb)):
         key = tuple(sorted([src, tgt]))
         if key not in seen:
             seen.add(key)
-            edges.append({"source": src, "target": tgt})
+            edges.append({"source": src, "target": tgt, "type": "link"})
 
-    return {"nodes": list(nodes.values()), "edges": edges}
+    # ── Enrich nodes + build mismatch edges from resolved gap index ──────────
+    mismatch_edges: list[dict] = []
+    try:
+        from ..services import vector_store as _vs
+        index_entries = _vs._load_resolved_index(wiki_dir)
+        # Build: filled_page → set of searched pages (where retrieval looked but didn't find)
+        for entry in index_entries:
+            filled_page = entry.get("filled_page", "")  # e.g. "entities/furosemide.md"
+            if not filled_page or filled_page not in nodes:
+                continue
+            if entry.get("retrieval_mismatch"):
+                nodes[filled_page]["retrieval_mismatch"] = True
+            if not entry.get("retrieval_verified"):
+                nodes[filled_page]["unverified_fill"] = True
+            # Build mismatch edges: searched page → filled page (dashed orange)
+            if entry.get("retrieval_mismatch"):
+                searched = entry.get("searched_sections", [])
+                searched_pages = {s.get("path", "").split("#")[0] for s in searched if isinstance(s, dict)}
+                for sp in searched_pages:
+                    if sp and sp != filled_page and sp in nodes:
+                        mismatch_key = tuple(sorted([sp, filled_page]))
+                        if mismatch_key not in seen:
+                            seen.add(mismatch_key)
+                            mismatch_edges.append({
+                                "source": sp,
+                                "target": filled_page,
+                                "type": "mismatch",
+                            })
+    except Exception:
+        pass
+
+    all_edges = edges + mismatch_edges
+    return {"nodes": list(nodes.values()), "edges": all_edges}

@@ -566,6 +566,46 @@ Instructions:
         target_page_path, new_content, gap_sections, missing_values, kb.wiki_dir,
     )
 
+    # ── Add to resolved gap index (Tier 1 shortcut for future queries) ────────
+    if sections_filled:
+        try:
+            gap_stem = Path(gap_file_path).stem
+            gap_meta = vs_mod.get_gap_metadata(gap_stem, kb.wiki_dir)
+            resolution_question = gap_meta.get("resolution_question", "") if gap_meta else ""
+            searched = gap_meta.get("searched_sections", []) if gap_meta else []
+            # Determine retrieval mismatch: were the filled sections among those searched?
+            searched_section_names = {s.get("section") for s in searched if isinstance(s, dict)}
+            filled_set = set(sections_filled)
+            retrieval_mismatch = bool(searched_section_names and filled_set and not filled_set & searched_section_names)
+            # Best verification result across all verifications
+            best_verif = max(
+                (v for v in verification if v.get("verified")),
+                key=lambda v: v.get("score", 0.0),
+                default=None,
+            ) if verification else None
+            verified_ok = best_verif is not None
+            verified_score = best_verif["score"] if best_verif else 0.0
+            # Add one index entry per filled section
+            for sec in sections_filled:
+                vs_mod.add_to_resolved_index(
+                    wiki_dir=kb.wiki_dir,
+                    resolution_question=resolution_question,
+                    filled_page=page_rel,
+                    filled_section=sec,
+                    retrieval_verified=verified_ok,
+                    verified_score=verified_score,
+                    retrieval_mismatch=retrieval_mismatch,
+                    searched_sections=searched,
+                )
+            # Invalidate any stale index entries pointing to the newly written page
+            vs_mod.invalidate_resolved_entries(page_rel, kb.wiki_dir)
+            log.info(
+                "Resolved gap index updated: stem=%s  sections=%s  mismatch=%s  verified=%s",
+                gap_stem, sections_filled, retrieval_mismatch, verified_ok,
+            )
+        except Exception as _rie:
+            log.debug("add_to_resolved_index failed (non-fatal): %s", _rie)
+
     # Create stub pages for any [[links]] that don't exist yet
     from ..services.ingest_pipeline import _create_missing_stubs
     _create_missing_stubs(new_content, kb)

@@ -44,6 +44,8 @@ def create_session(
         "next_scenario": first_scenario,
         "outcome": None,
         "total_cost_usd": 0.0,
+        "session_elapsed_minutes": 0,
+        "pending_lab_queue": [],
     }
     _save(session, kb)
     return session

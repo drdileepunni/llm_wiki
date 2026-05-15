@@ -19,6 +19,11 @@ from .patient import (
     update_vent_flags,
     update_patient_history,
     VIVA_DUMMY_CPMRN,
+    # A/B test patient (isolated from Viva)
+    AB_DUMMY_CPMRN,
+    upsert_ab_patient,
+    get_ab_patient,
+    reset_ab_patient_chart,
 )
 from .orderables import search_orderables, create_orderable
 
@@ -43,6 +48,11 @@ __all__ = [
     "update_vent_flags",
     "update_patient_history",
     "VIVA_DUMMY_CPMRN",
+    # A/B test patient
+    "AB_DUMMY_CPMRN",
+    "upsert_ab_patient",
+    "get_ab_patient",
+    "reset_ab_patient_chart",
     "search_orderables",
     "create_orderable",
 ]

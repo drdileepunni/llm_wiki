@@ -117,12 +117,14 @@ function WhyPanel({ order, orderRunId, onClose }) {
   // Match trace entries to this specific order by drug/orderable name
   const needle = (order.orderable_name || '').toLowerCase().split(' ')[0]
 
-  const matchedGroundings = (trace?.chat_trace?.step2?.retrievals || []).filter(r =>
+  const allGroundings = trace?.chat_trace?.step2?.retrievals || []
+  const filteredGroundings = allGroundings.filter(r =>
     needle && (
       r.parameter.toLowerCase().includes(needle) ||
       (r.search_query || '').toLowerCase().includes(needle)
     )
   )
+  const matchedGroundings = filteredGroundings.length ? filteredGroundings : allGroundings
 
   const matchedSearches = (trace?.order_trace?.phase1?.iterations || [])
     .flatMap(it => it.tool_calls || [])
@@ -132,6 +134,20 @@ function WhyPanel({ order, orderRunId, onClose }) {
 
   const weightRes = trace?.order_trace?.weight_resolution
   const clinicalDirection = trace?.chat_trace?.step1?.clinical_direction || []
+
+  const allStep1Queries = trace?.chat_trace?.step1?.specific_queries || []
+  const filteredStep1Queries = allStep1Queries.filter(sq =>
+    needle && (
+      (sq.parameter || '').toLowerCase().includes(needle) ||
+      (sq.search_query || '').toLowerCase().includes(needle)
+    )
+  )
+  const matchedStep1Queries = filteredStep1Queries.length ? filteredStep1Queries : allStep1Queries
+
+  const step4 = trace?.chat_trace?.step4
+
+  const action = (order.action || 'new').toLowerCase()
+  const ACTION_STYLE = { new: 'text-green-400 bg-green-400/10', edit: 'text-amber-400 bg-amber-400/10', stop: 'text-red-400 bg-red-400/10' }
 
   const CONF = { high: 'text-green-400', medium: 'text-amber-400', low: 'text-red-400' }
 
@@ -174,13 +190,54 @@ function WhyPanel({ order, orderRunId, onClose }) {
             <p className="text-muted italic">No trace available — run this session again to capture provenance.</p>
           )}
 
-          {/* 1 · Source recommendation */}
+          {/* 1 · Order intent */}
+          <section>
+            <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Order Intent</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded uppercase tracking-wider font-semibold ${ACTION_STYLE[action] || ACTION_STYLE.new}`}>
+                {action}
+              </span>
+              {(action === 'edit' || action === 'stop') && order.existing_order_no && (
+                <span className="text-[10px] text-muted font-mono">
+                  order <span className="text-white/70">#{order.existing_order_no}</span>
+                </span>
+              )}
+              {order.from_dose && order.to_dose && (
+                <span className="text-[10px] text-muted font-mono">
+                  <span className="text-white/50">{order.from_dose}</span>
+                  {' → '}
+                  <span className="text-accent">{order.to_dose}</span>
+                </span>
+              )}
+            </div>
+          </section>
+
+          {/* 2 · Source recommendation */}
           <section>
             <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Source Recommendation</p>
             <p className="text-white/80 italic leading-relaxed">{order.recommendation || '—'}</p>
           </section>
 
-          {/* 2 · Clinical direction from reasoning model */}
+          {/* 3 · Wiki parameters queried (Step 1) */}
+          {matchedStep1Queries.length > 0 && (
+            <section>
+              <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Wiki Parameters Queried</p>
+              <div className="space-y-1.5">
+                {matchedStep1Queries.map((sq, i) => (
+                  <div key={i} className="bg-ink-800 rounded-lg p-2.5 space-y-0.5">
+                    <p className="text-white/60">{sq.parameter}</p>
+                    {sq.search_query && sq.search_query !== sq.parameter && (
+                      <p className="text-[10px] text-muted font-mono">
+                        searched: <span className="text-white/50">{sq.search_query}</span>
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* 4 · Clinical direction from reasoning model */}
           {clinicalDirection.length > 0 && (
             <section>
               <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Clinical Direction (reasoning model)</p>
@@ -195,7 +252,7 @@ function WhyPanel({ order, orderRunId, onClose }) {
             </section>
           )}
 
-          {/* 3 · Wiki grounding */}
+          {/* 5 · Wiki grounding (Step 2) */}
           {matchedGroundings.length > 0 && (
             <section>
               <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Wiki Grounding</p>
@@ -204,21 +261,62 @@ function WhyPanel({ order, orderRunId, onClose }) {
                   <div key={i} className="bg-ink-800 rounded-lg p-2.5 space-y-1">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-white/60 truncate">{g.parameter}</span>
-                      <span className={`font-mono flex-shrink-0 ${g.grounded ? 'text-green-400' : 'text-red-400'}`}>
-                        {g.grounded ? '✓ grounded' : '✗ not found'}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        {g.tier === 1 && (
+                          <span className="text-[9px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded font-mono">T1</span>
+                        )}
+                        <span className={`font-mono ${g.grounded ? 'text-green-400' : 'text-red-400'}`}>
+                          {g.grounded ? '✓ grounded' : '✗ not found'}
+                        </span>
+                      </div>
                     </div>
                     {g.value && (
                       <p className="font-mono text-accent">{g.value}</p>
                     )}
                     {g.source && (
+                      <p className="text-[10px] text-muted font-mono">{g.source}</p>
+                    )}
+                    {g.search_query && (
                       <p className="text-[10px] text-muted font-mono">
-                        {g.source}
-                        {g.top_score != null && <span className="ml-1 opacity-60">(score {g.top_score.toFixed(2)})</span>}
+                        searched: <span className="text-white/50">{g.search_query}</span>
+                      </p>
+                    )}
+                    {/* Sections searched with score bars */}
+                    {g.sections_searched && g.sections_searched.length > 0 && (
+                      <div className="mt-1.5 space-y-0.5">
+                        <p className="text-[9px] uppercase tracking-widest text-muted/60 mb-1">Sections retrieved</p>
+                        {g.sections_searched.map((s, si) => (
+                          <div key={si} className="flex items-center gap-1.5">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[10px] text-white/40 truncate font-mono">{s.section || s.path}</p>
+                              <div className="relative h-1 bg-ink-700 rounded-full overflow-hidden mt-0.5">
+                                <div
+                                  className="absolute inset-y-0 left-0 rounded-full"
+                                  style={{
+                                    width: `${Math.min(100, (s.score || 0) * 100)}%`,
+                                    background: s.score >= 0.70 ? '#4ade80' : s.score >= 0.50 ? '#fbbf24' : '#f87171',
+                                  }}
+                                />
+                                {/* threshold line at 0.70 */}
+                                <div className="absolute inset-y-0 w-px bg-white/30" style={{ left: '70%' }} />
+                              </div>
+                            </div>
+                            <span className={`text-[9px] font-mono flex-shrink-0 ${s.score >= 0.70 ? 'text-green-400/70' : s.score >= 0.50 ? 'text-amber-400/70' : 'text-red-400/70'}`}>
+                              {(s.score || 0).toFixed(2)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {g.top_score != null && (!g.sections_searched || g.sections_searched.length === 0) && (
+                      <p className="text-[10px] font-mono">
+                        <span className={g.top_score >= 0.70 ? 'text-green-400/70' : g.top_score >= 0.50 ? 'text-amber-400/70' : 'text-red-400/70'}>
+                          score {g.top_score.toFixed(2)}
+                        </span>
                       </p>
                     )}
                     {!g.grounded && g.resolution_question && (
-                      <p className="text-[10px] text-amber-400/80 italic">{g.resolution_question}</p>
+                      <p className="text-[10px] text-amber-400/80 italic mt-1">{g.resolution_question}</p>
                     )}
                   </div>
                 ))}
@@ -226,7 +324,43 @@ function WhyPanel({ order, orderRunId, onClose }) {
             </section>
           )}
 
-          {/* 4 · Catalog search */}
+          {/* 6 · Gap resolution (Step 4) */}
+          {step4 && step4.markers_before > 0 && (
+            <section>
+              <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Gap Resolution</p>
+              <div className="bg-ink-800 rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-muted">{step4.markers_before} draft marker{step4.markers_before !== 1 ? 's' : ''}</span>
+                  <span>
+                    <span className="text-green-400">{step4.markers_resolved ?? (step4.markers_before - step4.markers_remaining)} resolved</span>
+                    {step4.markers_remaining > 0 && (
+                      <span className="text-amber-400 ml-2">{step4.markers_remaining} remaining</span>
+                    )}
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-ink-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-green-500 rounded-full"
+                    style={{ width: `${Math.round(((step4.markers_resolved ?? (step4.markers_before - step4.markers_remaining)) / step4.markers_before) * 100)}%` }}
+                  />
+                </div>
+                {allGroundings.filter(g => !g.grounded).map((g, i) => {
+                  const stillOpen = step4.markers_remaining > 0 && !!g.resolution_question
+                  return (
+                    <div key={i} className={`p-2 rounded border-l-2 bg-ink-700/50 ${stillOpen ? 'border-amber-400/60' : 'border-green-400/60'}`}>
+                      <p className="text-[10px] text-muted/80">{g.parameter}</p>
+                      {stillOpen
+                        ? <p className="text-[10px] text-amber-400/80 italic mt-0.5">{g.resolution_question}</p>
+                        : <p className="text-[10px] text-green-400/70 mt-0.5">resolved in step 4</p>
+                      }
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* 7 · Catalog search */}
           {matchedSearches.length > 0 && (
             <section>
               <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Catalog Search</p>
@@ -253,10 +387,10 @@ function WhyPanel({ order, orderRunId, onClose }) {
             </section>
           )}
 
-          {/* 5 · Weight resolution */}
+          {/* 8 · Weight resolution */}
           {weightRes && (
             <section>
-              <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Weight Used</p>
+              <p className="text-[9px] uppercase tracking-widest text-muted mb-1.5">Patient Weight</p>
               <div className="bg-ink-800 rounded-lg p-2.5 space-y-1">
                 <div className="flex items-center justify-between">
                   <span className="font-mono text-white">
@@ -585,6 +719,23 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy, onRerun
               +{turn.gaps_resolved} gap{turn.gaps_resolved !== 1 ? 's' : ''}
             </span>
           )}
+          {turn.turn_delta_minutes > 0 && (
+            <span
+              className="text-[9px] font-mono px-1.5 py-0.5 rounded border bg-ink-800 border-border text-muted"
+              title={turn.time_delta_rationale || `+${turn.turn_delta_minutes} min simulated`}
+            >
+              +{turn.turn_delta_minutes >= 60
+                ? `${Math.round(turn.turn_delta_minutes / 60)}h`
+                : `${turn.turn_delta_minutes}m`}
+            </span>
+          )}
+          {turn.session_elapsed_minutes > 0 && (
+            <span className="text-[9px] text-muted/50 font-mono">
+              T+{turn.session_elapsed_minutes >= 60
+                ? `${Math.round(turn.session_elapsed_minutes / 60)}h`
+                : `${turn.session_elapsed_minutes}m`}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {turn.rerun && (
@@ -655,6 +806,47 @@ function TurnCard({ turn, defaultOpen = false, onAllAcknowledged, onWhy, onRerun
               </div>
             )}
           </div>
+
+          {/* Vital timeline */}
+          {turn.vital_timeline?.length > 0 && (
+            <div className="px-4 py-3">
+              <details>
+                <summary className="text-[10px] uppercase tracking-widest text-muted cursor-pointer hover:text-white select-none">
+                  Vital Timeline ({turn.vital_timeline.length} snapshots)
+                </summary>
+                <div className="mt-2 overflow-x-auto">
+                  <table className="text-[11px] font-mono w-full">
+                    <thead>
+                      <tr className="text-muted/60 border-b border-border">
+                        <th className="text-left pr-3 py-1 font-normal">T+</th>
+                        <th className="text-left pr-3 py-1 font-normal">BP</th>
+                        <th className="text-left pr-3 py-1 font-normal">HR</th>
+                        <th className="text-left pr-3 py-1 font-normal">SpO2</th>
+                        <th className="text-left pr-3 py-1 font-normal">RR</th>
+                        <th className="text-left pr-3 py-1 font-normal">Temp</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {turn.vital_timeline.map((snap, i) => (
+                        <tr key={i} className="border-b border-border/20 hover:bg-ink-800">
+                          <td className="pr-3 py-0.5 text-muted/60">
+                            {snap.offset_minutes >= 60
+                              ? `${Math.round(snap.offset_minutes / 60)}h`
+                              : `${snap.offset_minutes}m`}
+                          </td>
+                          <td className="pr-3 py-0.5">{snap.vitals?.BP ?? '—'}</td>
+                          <td className="pr-3 py-0.5">{snap.vitals?.HR ?? '—'}</td>
+                          <td className="pr-3 py-0.5">{snap.vitals?.SpO2 != null ? `${snap.vitals.SpO2}%` : '—'}</td>
+                          <td className="pr-3 py-0.5">{snap.vitals?.RR ?? '—'}</td>
+                          <td className="pr-3 py-0.5">{snap.vitals?.Temperature != null ? `${snap.vitals.Temperature}°` : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </div>
+          )}
 
           {/* Reasoning */}
           {snap.pages_consulted?.length > 0 && (
@@ -910,7 +1102,7 @@ function HistoryTab({ history }) {
 
 // ── Patient chart panel (permanent right column) ───────────────────────────────
 
-const CHART_TABS = ['vitals', 'labs', 'io', 'orders', 'notes', 'hx']
+const CHART_TABS = ['vitals', 'hx', 'labs', 'io', 'orders', 'notes']
 
 function PatientChartPanel({ currentScenario, refreshTrigger }) {
   const [tab, setTab] = useState('vitals')
@@ -958,7 +1150,7 @@ function PatientChartPanel({ currentScenario, refreshTrigger }) {
         </button>
       </div>
 
-      {/* Current question — between header and tabs */}
+      {/* Current scenario — between header and tabs */}
       {currentScenario && (
         <div className="px-4 py-3 border-b border-border bg-ink-800/40 flex-shrink-0">
           <div className="flex items-center gap-1.5 mb-2">
@@ -969,16 +1161,35 @@ function PatientChartPanel({ currentScenario, refreshTrigger }) {
           {currentScenario.question && (
             <p className="mt-2 text-xs text-accent font-medium italic leading-relaxed">{currentScenario.question}</p>
           )}
+          {/* PMH summary strip — shown when history is loaded */}
+          {data?.history && (
+            (data.history.diagnoses?.length > 0 || data.history.allergies?.length > 0) && (
+              <div className="mt-2.5 pt-2 border-t border-border/60 space-y-1">
+                {data.history.diagnoses?.length > 0 && (
+                  <p className="text-[10px] text-muted leading-relaxed">
+                    <span className="text-muted/60 uppercase tracking-wider">PMHx </span>
+                    {data.history.diagnoses.join(' · ')}
+                  </p>
+                )}
+                {data.history.allergies?.length > 0 && (
+                  <p className="text-[10px] text-red-400/80 leading-relaxed">
+                    <span className="uppercase tracking-wider">Allergies </span>
+                    {data.history.allergies.join(', ')}
+                  </p>
+                )}
+              </div>
+            )
+          )}
         </div>
       )}
 
       {/* Tab bar */}
-      <div className="flex border-b border-border flex-shrink-0 bg-ink-800/50">
+      <div className="flex overflow-x-auto border-b border-border flex-shrink-0 bg-ink-800/50 scrollbar-none">
         {CHART_TABS.map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 text-[10px] uppercase tracking-wider py-2 transition-colors ${
+            className={`flex-shrink-0 px-3 text-[10px] uppercase tracking-wider py-2 transition-colors whitespace-nowrap ${
               tab === t
                 ? 'text-accent border-b-2 border-accent -mb-px'
                 : 'text-muted hover:text-white'
@@ -1002,11 +1213,11 @@ function PatientChartPanel({ currentScenario, refreshTrigger }) {
         ) : (
           <>
             {tab === 'vitals'  && <VitalsTab  vitals={data.vitals} historyCount={data.vitals_history_count} />}
+            {tab === 'hx'      && <HistoryTab history={data.history} />}
             {tab === 'labs'    && <LabsTab    labs={data.labs} />}
             {tab === 'io'      && <IOTab      io={data.io} />}
             {tab === 'orders'  && <OrdersTab  orders={data.orders} />}
             {tab === 'notes'   && <NotesTab   notes={data.notes} />}
-            {tab === 'hx'      && <HistoryTab history={data.history} />}
           </>
         )}
       </div>

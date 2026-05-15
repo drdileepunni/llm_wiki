@@ -50,6 +50,8 @@ Output ONLY valid JSON with these exact keys:
   "question": "Specific focused clinical question about the most appropriate next action",
   "phase": "EVOLVING",
   "difficulty": "MEDIUM",
+  "time_delta_minutes": <integer between 30 and 480 — minutes of simulated time to advance when student submits orders>,
+  "time_delta_rationale": "<one sentence explaining the checkpoint, e.g. 'Reassess after fluid bolus completes in 1 hour'>",
   "patient_state": {{ ... see schema below ... }}
 }}
 
@@ -75,8 +77,8 @@ patient_state schema — populate what is relevant to the scenario:
     }}
   ],
   "notes": [
-    {{"category": "event", "text": "<concise note, e.g. ECG: sinus tachycardia at 112 bpm, no ST changes>"}},
-    {{"category": "nursing", "text": "<nursing observation>"}}
+    {{"category": "event", "text": "<brief clinical finding ONLY — e.g. 'ECG: AF with RVR at 148 bpm, no ST changes'>"}},
+    {{"category": "nursing", "text": "<brief nursing observation — e.g. 'Patient diaphoretic and pale on arrival'>"}}
   ],
   "io": {{
     "urine_ml": <number>,
@@ -94,13 +96,20 @@ patient_state schema — populate what is relevant to the scenario:
 }}
 
 Rules:
-- Include vitals always — they are the core of the presentation
-- Include labs only if results are available at presentation (e.g. VBG, troponin already drawn)
-- Include notes for any significant event findings (ECG, imaging, nursing observations)
-- Include io only if relevant (e.g. oliguria is part of the presentation)
-- Include vent_flags only if patient is on respiratory support at presentation
-- Include home_medications, diagnoses, and allergies whenever the patient has a relevant medical history
-- Be physiologically consistent — values must match the clinical narrative
+- MANDATORY: vitals MUST always be included — no exceptions. Fill in physiologically appropriate values
+  that match the clinical narrative (e.g. tachycardia for AF, hypotension for shock).
+- MANDATORY: Include home_medications, diagnoses, and allergies whenever the patient has a relevant
+  medical history (chronic conditions, pre-existing diseases, regular medications).
+- Include labs only if results are already available at presentation (e.g. VBG, troponin drawn in ED).
+- Include notes ONLY for brief specific clinical findings — e.g. 'ECG: AF with RVR at 148 bpm',
+  'CXR: bilateral infiltrates', 'Nursing: patient diaphoretic and pale'. Do NOT write the clinical
+  presentation narrative in notes — clinical_context is for narrative prose; notes are for findings.
+- Include io only if relevant (e.g. oliguria is part of the presentation).
+- Include vent_flags only if patient is on respiratory support at presentation.
+- Be physiologically consistent — vital sign values must match the clinical narrative.
+- time_delta_minutes: integer between 30 and 480. Reflects the natural clinical checkpoint after
+  the expected interventions complete (e.g. 60 for fluid bolus reassessment, 240 for post-antibiotic
+  review, 1440 for next-morning ward round).
 """
 
 _NEXT_TURN_PROMPT = """\
@@ -128,6 +137,9 @@ Rules:
 - Use additional_notes ONLY for supplementary narrative events not captured by the simulator
   (e.g. consultant review, family discussion, imaging result, ward observation)
   Leave additional_notes as an empty list [] if nothing to add
+- time_delta_minutes: integer between 30 and 480. Reflects the natural clinical checkpoint after
+  the student's interventions complete (e.g. 60 for fluid bolus reassessment, 240 for post-treatment
+  review, 1440 for next-morning ward round)
 
 Output ONE of:
 
@@ -137,6 +149,8 @@ A) Next scenario JSON:
   "question": "Specific focused clinical question",
   "phase": "EVOLVING|ESCALATION|DETERIORATION|MANAGEMENT|LATE",
   "difficulty": "EASY|MEDIUM|HARD",
+  "time_delta_minutes": <integer between 30 and 480>,
+  "time_delta_rationale": "<one sentence explaining the checkpoint>",
   "additional_notes": [
     {{"category": "event", "text": "..."}}
   ]
@@ -192,6 +206,41 @@ def generate_first_scenario(topic: str, trajectory: str, model: str | None = Non
         log.warning("First scenario parse error: %s\n%s", exc, raw[:300])
         raise ValueError(f"Teacher returned invalid JSON for first scenario: {exc}") from exc
     log.info("Generated first scenario for topic=%r", topic)
+
+    # Ensure vitals are always present — retry once if the LLM omitted them
+    patient_state = data.get("patient_state") or {}
+    if not patient_state.get("vitals"):
+        log.warning("First scenario missing vitals — retrying with explicit reminder")
+        reminder = (
+            "\n\nIMPORTANT: Your previous response was missing patient_state.vitals. "
+            "Vitals are MANDATORY. Return the same JSON but with a complete vitals object "
+            "containing at minimum BP, HR, SpO2, RR, and Temperature."
+        )
+        response2 = llm.create_message(
+            messages=[
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": reminder},
+            ],
+            tools=[],
+            system=_TEACHER_SYSTEM,
+            max_tokens=2000,
+            force_tool=False,
+            thinking_budget=0,
+        )
+        raw2 = next((b.text for b in response2.content if hasattr(b, "text") and b.text), "")
+        raw2 = re.sub(r"^```(?:json)?\s*", "", raw2.strip())
+        raw2 = re.sub(r"\s*```$", "", raw2.strip())
+        try:
+            data2 = json.loads(raw2)
+            if (data2.get("patient_state") or {}).get("vitals"):
+                data = data2
+                log.info("Vitals retry succeeded for topic=%r", topic)
+            else:
+                log.warning("Vitals retry also missing vitals for topic=%r — continuing without", topic)
+        except json.JSONDecodeError:
+            log.warning("Vitals retry returned invalid JSON for topic=%r — keeping original", topic)
+
     return data
 
 

@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm, validation_runner, clinical_rules
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -24,6 +24,7 @@ _POLL_PREFIXES = (
     "/api/clinical-assess/jobs/",
     "/api/resolve/batch/",
     "/api/resolve/jobs/",
+    "/api/validation/",
     "/health",
 )
 
@@ -59,6 +60,8 @@ app.include_router(viva.router)
 app.include_router(logs.router)
 app.include_router(graph.router)
 app.include_router(vm.router)
+app.include_router(validation_runner.router)
+app.include_router(clinical_rules.router)
 
 @app.on_event("startup")
 def startup():

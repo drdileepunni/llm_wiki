@@ -7,6 +7,7 @@ from typing import Any
 from .db import get_db
 
 VIVA_DUMMY_CPMRN = "VIVA_DUMMY_001"
+AB_DUMMY_CPMRN   = "AB_DUMMY_001"
 
 
 def _find_patient(cpmrn: str) -> dict | None:
@@ -302,9 +303,9 @@ def get_dummy_patient() -> dict | None:
     }
 
 
-def place_viva_order(order: dict) -> dict:
+def place_viva_order(order: dict, cpmrn: str = VIVA_DUMMY_CPMRN) -> dict:
     """
-    Place, edit, or stop a single order on the dummy patient.
+    Place, edit, or stop a single order on a dummy patient.
 
     order fields:
       action          — "new" | "edit" | "stop"
@@ -315,9 +316,9 @@ def place_viva_order(order: dict) -> dict:
       recommendation  — original text (used as fallback name)
     """
     db = get_db()
-    p = db.patients.find_one({"CPMRN": VIVA_DUMMY_CPMRN})
+    p = db.patients.find_one({"CPMRN": cpmrn})
     if not p:
-        return {"error": "Dummy patient not found — create it first"}
+        return {"error": f"Dummy patient {cpmrn!r} not found — create it first"}
 
     active = dict((p.get("orders") or {}).get("active") or _empty_active_orders())
     for k in ("medications", "labs", "procedures", "diets", "vents", "bloods"):
@@ -389,7 +390,7 @@ def place_viva_order(order: dict) -> dict:
         elif action == "stop" and existing_no:
             active["vents"] = [v for v in active["vents"] if v.get("orderNo") != existing_no]
 
-    db.patients.update_one({"CPMRN": VIVA_DUMMY_CPMRN}, {"$set": {"orders.active": active}})
+    db.patients.update_one({"CPMRN": cpmrn}, {"$set": {"orders.active": active}})
     return {"order_no": order_no, "action": action, "placed": True}
 
 
@@ -492,10 +493,11 @@ def get_recent_notes_for_patient(cpmrn: str, category: str | None = None, limit:
 
 # ── Viva simulation write functions ───────────────────────────────────────────
 
-def push_vitals(cpmrn: str, vitals: dict) -> None:
+def push_vitals(cpmrn: str, vitals: dict, timestamp: str | None = None) -> None:
     """
     Push a new vitals snapshot onto the patient's vitals array.
     `vitals` keys use the friendly names from get_latest_vitals (BP, HR, SpO2, …).
+    Pass `timestamp` (ISO 8601) to backdate the snapshot for time-aware simulation.
     """
     _KEY_MAP = {
         "SpO2":         "daysSpO2",
@@ -514,7 +516,7 @@ def push_vitals(cpmrn: str, vitals: dict) -> None:
         "VentPIP":      "daysVentPip",
         "VentRRSet":    "daysVentRRset",
     }
-    snapshot: dict = {"timestamp": datetime.utcnow().isoformat(), "isVerified": True, "dataBy": "viva-sim"}
+    snapshot: dict = {"timestamp": timestamp or datetime.utcnow().isoformat(), "isVerified": True, "dataBy": "viva-sim"}
     for friendly, mongo_key in _KEY_MAP.items():
         if friendly in vitals:
             snapshot[mongo_key] = vitals[friendly]
@@ -556,10 +558,10 @@ def push_event_note(cpmrn: str, category: str, text: str) -> None:
     )
 
 
-def push_io_entry(cpmrn: str, urine_ml: float, intake_ml: float, period_mins: int = 60) -> None:
-    """Push an intake/output entry."""
+def push_io_entry(cpmrn: str, urine_ml: float, intake_ml: float, period_mins: int = 60, timestamp: str | None = None) -> None:
+    """Push an intake/output entry. Pass `timestamp` to backdate for time-aware simulation."""
     entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": timestamp or datetime.utcnow().isoformat(),
         "urine_ml": urine_ml,
         "intake_ml": intake_ml,
         "period_mins": period_mins,
@@ -622,3 +624,101 @@ def update_patient_history(
         updates["allergies"] = allergies
     if updates:
         get_db().patients.update_one({"CPMRN": cpmrn}, {"$set": updates})
+
+
+# ── A/B test dummy patient (isolated from Viva) ───────────────────────────────
+# Uses AB_DUMMY_CPMRN so A/B runs never corrupt the Viva patient chart and
+# vice-versa, even when both run concurrently on the same MongoDB instance.
+
+def upsert_ab_patient(details: dict) -> dict:
+    """Create or replace the A/B test dummy patient in MongoDB."""
+    db = get_db()
+    docs = []
+    if details.get("creatinine") or details.get("egfr"):
+        attrs: dict = {}
+        if details.get("creatinine"):
+            attrs["Creatinine"] = {
+                "name": "Creatinine",
+                "value": details["creatinine"],
+                "errorRange": {"min": 60, "max": 120},
+            }
+        if details.get("egfr"):
+            attrs["eGFR"] = {
+                "name": "eGFR",
+                "value": details["egfr"],
+                "errorRange": {"min": 60, "max": 120},
+            }
+        docs = [{"category": "labs", "name": "Renal Function",
+                 "reportedAt": datetime.utcnow().isoformat(), "attributes": attrs}]
+
+    patient_doc = {
+        "CPMRN": AB_DUMMY_CPMRN,
+        "name": details.get("name", "AB Test Patient"),
+        "age": {"year": details.get("age_years", 55), "month": 0},
+        "gender": details.get("gender", "male"),
+        "patientType": "adult",
+        "weightKg": details.get("weight_kg", 70),
+        "heightCm": details.get("height_cm", 170),
+        "allergies": details.get("allergies", []),
+        "chronic": details.get("diagnoses", []),
+        "home_medications": details.get("home_meds", []),
+        "hospitalName": "AB Test",
+        "unitName": "ICU",
+        "isCurrentlyAdmitted": True,
+        "orders": {"active": _empty_active_orders()},
+        "documents": docs,
+        "isIntubated": {"value": False},
+        "isNIV":       {"value": False},
+        "isHFNC":      {"value": False},
+    }
+    db.patients.replace_one({"CPMRN": AB_DUMMY_CPMRN}, patient_doc, upsert=True)
+    return get_ab_patient()
+
+
+def get_ab_patient() -> dict | None:
+    """Return the A/B dummy patient in a frontend-friendly shape, or None."""
+    db = get_db()
+    p = db.patients.find_one({"CPMRN": AB_DUMMY_CPMRN})
+    if not p:
+        return None
+    age_obj = p.get("age") or {}
+    labs: dict = {}
+    for doc in p.get("documents", []):
+        if doc.get("category") == "labs":
+            for attr_key, attr_val in (doc.get("attributes") or {}).items():
+                if isinstance(attr_val, dict):
+                    labs[attr_val.get("name", attr_key)] = attr_val.get("value")
+    return {
+        "cpmrn":      AB_DUMMY_CPMRN,
+        "name":       p.get("name"),
+        "age_years":  age_obj.get("year"),
+        "gender":     p.get("gender"),
+        "weight_kg":  p.get("weightKg"),
+        "height_cm":  p.get("heightCm"),
+        "allergies":  p.get("allergies", []),
+        "diagnoses":  p.get("chronic", []),
+        "home_meds":  p.get("home_medications", []),
+        "creatinine": labs.get("Creatinine"),
+        "egfr":       labs.get("eGFR"),
+    }
+
+
+def reset_ab_patient_chart() -> None:
+    """
+    Wipe all clinical chart data from the A/B dummy patient.
+    Called at the start of every A/B scenario so the teacher's
+    first scenario seeds a clean state.
+    """
+    db = get_db()
+    db.patients.update_one(
+        {"CPMRN": AB_DUMMY_CPMRN},
+        {"$set": {
+            "vitals":          [],
+            "io":              [],
+            "documents":       [],
+            "orders.active":   _empty_active_orders(),
+            "isNIV.value":       False,
+            "isHFNC.value":      False,
+            "isIntubated.value": False,
+        }},
+    )

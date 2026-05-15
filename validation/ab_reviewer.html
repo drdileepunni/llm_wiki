@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CDS Reviewer</title>
+<style>
+  :root {
+    --bg:       #0f172a;
+    --surface:  #1e293b;
+    --surface2: #273344;
+    --border:   #334155;
+    --text:     #f1f5f9;
+    --muted:    #94a3b8;
+    --blue:     #38bdf8;
+    --green:    #4ade80;
+    --amber:    #fbbf24;
+    --red:      #f87171;
+    --purple:   #a78bfa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; font-size: 14px;
+         color: var(--text); background: var(--bg); height: 100vh; overflow: hidden; }
+
+  /* ── Login ── */
+  .center-wrap { display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px; width: 420px; }
+  .card h2 { font-size: 20px; margin-bottom: 6px; }
+  .card p  { color: var(--muted); font-size: 13px; line-height: 1.55; margin-bottom: 22px; }
+  label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: .07em; color: var(--muted); margin-bottom: 5px; }
+  input[type=text], select {
+    width: 100%; padding: 10px 14px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: 14px; margin-bottom: 14px; }
+  input:focus, select:focus { outline: none; border-color: var(--blue); }
+  select option { background: var(--surface); }
+  .btn-primary { width: 100%; padding: 12px; background: var(--blue); color: #0f172a;
+                 border: none; border-radius: 8px; font-size: 14px; font-weight: 700;
+                 cursor: pointer; margin-top: 6px; }
+  .btn-primary:hover { background: #7dd3fc; }
+
+  /* ── Main layout ── */
+  #main { display: none; height: 100vh; grid-template-columns: 1fr 390px;
+          grid-template-rows: 46px 1fr; }
+  #main.show { display: grid; }
+
+  /* ── Topbar (spans both columns) ── */
+  #topbar { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 0 18px; display: flex; align-items: center; gap: 12px; }
+  .tb-id   { font-size: 11px; color: var(--muted); font-family: monospace; }
+  .tb-pill { font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 5px;
+             background: var(--surface2); color: var(--text); letter-spacing: .04em; }
+  .diff-easy   { background: #166534 !important; color: #bbf7d0 !important; }
+  .diff-medium { background: #92400e !important; color: #fde68a !important; }
+  .diff-hard   { background: #991b1b !important; color: #fecaca !important; }
+  #progress-area { flex: 1; }
+  #progress-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  #progress-track { height: 3px; background: var(--border); border-radius: 2px; }
+  #progress-fill  { height: 100%; background: var(--blue); border-radius: 2px; width: 0; transition: width .3s; }
+
+  /* ── Orders panel ── */
+  #orders-panel { display: flex; flex-direction: column; overflow: hidden; }
+
+  #orders-title { padding: 12px 18px 8px; font-size: 11px; font-weight: 800;
+                  text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+                  border-bottom: 1px solid var(--border); flex-shrink: 0; }
+
+  #orders-scroll { flex: 1; overflow-y: auto; padding: 10px 14px; }
+  #orders-scroll::-webkit-scrollbar { width: 4px; }
+  #orders-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .group-hdr { font-size: 10px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+               color: var(--muted); padding: 10px 2px 5px; }
+  .group-hdr:first-child { padding-top: 2px; }
+
+  /* ── Order card ── */
+  .ocard { background: var(--surface); border: 1px solid var(--border);
+           border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+  .ocard.already { opacity: .45; border-style: dashed; }
+
+  .ocard-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+               padding: 9px 13px; border-bottom: 1px solid var(--border); }
+  .type-badge { font-size: 9px; font-weight: 800; letter-spacing: .07em;
+                padding: 3px 7px; border-radius: 4px; flex-shrink: 0; }
+  .bmed  { background: #1e3a5f; color: #7dd3fc; }
+  .blab  { background: #14532d; color: #86efac; }
+  .bvent { background: #3b0764; color: #d8b4fe; }
+  .bproc { background: #431407; color: #fdba74; }
+  .bmon  { background: #1e1b4b; color: #a5b4fc; }
+  .bdiet { background: #064e3b; color: #6ee7b7; }
+  .bblod { background: #4a044e; color: #f5d0fe; }
+  .bother{ background: #1e293b; color: #94a3b8; }
+
+  .edit-badge { font-size: 9px; font-weight: 800; padding: 2px 5px; border-radius: 3px;
+                background: #78350f; color: #fde68a; flex-shrink: 0; }
+  .oname { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+  .conf-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; }
+  .chigh { background: #14532d; color: #86efac; }
+  .cmed  { background: #713f12; color: #fde68a; }
+  .clow  { background: #7f1d1d; color: #fca5a5; }
+
+  .ocard-body { padding: 8px 13px 6px; }
+  .o-dose { font-size: 12px; color: var(--blue); font-weight: 500; margin-bottom: 3px; }
+  .o-inst { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 3px; }
+  .o-calc { font-size: 11px; color: var(--muted); font-style: italic; }
+
+  .already-lbl { font-size: 11px; color: var(--green); padding: 7px 13px 9px;
+                 display: flex; align-items: center; gap: 5px; }
+
+  .rate-row { display: flex; gap: 5px; padding: 7px 13px 9px; border-top: 1px solid var(--border); }
+  .rbtn { flex: 1; padding: 6px 4px; border: 1px solid var(--border); border-radius: 7px;
+          font-size: 11px; font-weight: 600; cursor: pointer; background: transparent;
+          color: var(--muted); transition: all .1s; text-align: center; }
+  .rbtn:hover { border-color: var(--muted); color: var(--text); }
+  .rgood   { background: #14532d !important; border-color: #4ade80 !important; color: #bbf7d0 !important; }
+  .runsure { background: #713f12 !important; border-color: #fbbf24 !important; color: #fde68a !important; }
+  .rbad    { background: #7f1d1d !important; border-color: #f87171 !important; color: #fecaca !important; }
+
+  /* ── Footer ── */
+  #orders-footer { border-top: 1px solid var(--border); padding: 10px 14px;
+                   background: var(--surface); flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+  .footer-row { display: flex; align-items: center; gap: 8px; }
+  .overall-lbl { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .star { background: none; border: none; cursor: pointer; font-size: 20px;
+          color: var(--border); padding: 0 1px; transition: color .1s; line-height: 1; }
+  .star.on { color: var(--amber); }
+  #btn-next { padding: 9px 18px; background: var(--blue); color: #0f172a; border: none;
+              border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+  #btn-next:disabled { opacity: .35; cursor: default; }
+  #btn-next:not(:disabled):hover { background: #7dd3fc; }
+  #notes-inp { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+               color: var(--text); font-size: 12px; padding: 6px 10px;
+               resize: none; height: 44px; font-family: inherit; }
+  #notes-inp::placeholder { color: var(--muted); }
+
+  /* ── Chart panel ── */
+  #chart-panel { background: var(--surface); border-left: 1px solid var(--border);
+                 display: flex; flex-direction: column; overflow: hidden; }
+  #chart-hdr { padding: 10px 14px; border-bottom: 1px solid var(--border);
+               font-size: 11px; font-weight: 800; text-transform: uppercase;
+               letter-spacing: .07em; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  #question-box { padding: 10px 14px; font-size: 13px; color: var(--blue); font-style: italic;
+                  line-height: 1.55; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #chart-tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; }
+  #chart-tabs::-webkit-scrollbar { display: none; }
+  .ctab { flex-shrink: 0; padding: 8px 10px; text-align: center; font-size: 10px; font-weight: 800;
+          letter-spacing: .06em; text-transform: uppercase; cursor: pointer; white-space: nowrap;
+          color: var(--muted); border-bottom: 2px solid transparent; transition: all .12s; }
+  .ctab.on { color: var(--blue); border-bottom-color: var(--blue); }
+  /* hx tab */
+  .hx-section { margin-bottom: 14px; }
+  .hx-label { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em;
+              color: var(--muted); margin-bottom: 6px; }
+  .hx-item { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); color: var(--text); }
+  .hx-item:last-child { border-bottom: none; }
+  .hx-empty { font-size: 12px; color: var(--muted); font-style: italic; }
+  #chart-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  #chart-body::-webkit-scrollbar { width: 4px; }
+  #chart-body::-webkit-scrollbar-thumb { background: var(--border); }
+
+  /* vitals */
+  .vgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .vcell { background: var(--surface2); border-radius: 8px; padding: 10px 12px; }
+  .vlbl  { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 2px; }
+  .vval  { font-size: 20px; font-weight: 700; }
+  .vunit { font-size: 11px; color: var(--muted); margin-left: 3px; }
+  /* labs */
+  .ltable { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .ltable td { padding: 7px 2px; border-bottom: 1px solid var(--border); }
+  .ltable td:last-child { font-weight: 600; text-align: right; }
+  .ltable td:first-child { color: var(--muted); }
+  /* notes */
+  .ntext { font-size: 13px; line-height: 1.7; color: var(--muted); white-space: pre-wrap; }
+  /* active orders */
+  .ao-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
+             border-bottom: 1px solid var(--border); }
+  .ao-row:last-child { border-bottom: none; }
+  .ao-check { color: var(--green); flex-shrink: 0; margin-top: 2px; }
+  .ao-name { flex: 1; font-size: 13px; }
+  .ao-detail { font-size: 11px; color: var(--muted); }
+
+  /* ── Done ── */
+  #done-screen { display: none; height: 100vh; align-items: center; justify-content: center; }
+  #done-screen.show { display: flex; }
+  .done-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+               padding: 48px; text-align: center; max-width: 420px; }
+  .done-icon { font-size: 56px; margin-bottom: 20px; }
+  .done-card h2 { font-size: 22px; margin-bottom: 10px; }
+  .done-card p { color: var(--muted); line-height: 1.6; }
+
+  /* ── Why modal ── */
+  #why-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
+                 z-index: 200; align-items: center; justify-content: center; }
+  #why-overlay.show { display: flex; }
+  #why-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+               width: 520px; max-width: calc(100vw - 32px); max-height: 80vh;
+               display: flex; flex-direction: column; overflow: hidden; }
+  #why-modal-hdr { padding: 14px 18px; border-bottom: 1px solid var(--border);
+                   display: flex; align-items: center; gap: 8px; }
+  #why-modal-hdr h3 { font-size: 14px; font-weight: 700; flex: 1; }
+  #why-modal-hdr button { background: none; border: none; color: var(--muted); font-size: 18px;
+                          cursor: pointer; line-height: 1; padding: 2px 4px; }
+  #why-modal-hdr button:hover { color: var(--text); }
+  #why-modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+  #why-modal-body::-webkit-scrollbar { width: 4px; }
+  #why-modal-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .why-section { margin-bottom: 16px; }
+  .why-section-hdr { font-size: 10px; font-weight: 800; letter-spacing: .09em;
+                     text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+  .why-weight { background: var(--surface2); border-radius: 8px; padding: 9px 12px;
+                font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .why-weight .wval { font-size: 18px; font-weight: 700; color: var(--blue); margin-right: 4px; }
+
+  .why-search-row { background: var(--surface2); border-radius: 8px; padding: 9px 12px;
+                    margin-bottom: 6px; }
+  .why-query { font-size: 12px; color: var(--text); margin-bottom: 4px; }
+  .why-query code { background: rgba(56,189,248,.1); color: var(--blue);
+                    padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+  .why-results { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .why-result-pill { font-size: 10px; padding: 2px 7px; border-radius: 4px;
+                     background: #1e3a5f; color: #7dd3fc; }
+  .why-result-none { font-size: 11px; color: var(--red); font-style: italic; }
+  .why-rec { font-size: 12px; color: var(--muted); line-height: 1.6;
+             background: var(--surface2); border-radius: 8px; padding: 9px 12px; }
+  .why-btn { background: none; border: 1px solid var(--border); border-radius: 5px;
+             color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 6px;
+             cursor: pointer; flex-shrink: 0; letter-spacing: .04em; }
+  .why-btn:hover { border-color: var(--blue); color: var(--blue); }
+  .why-loading { color: var(--muted); font-size: 13px; font-style: italic; padding: 8px 0; }
+  .why-error { color: var(--red); font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-wrap" class="center-wrap">
+  <div class="card">
+    <h2>CDS Order Reviewer</h2>
+    <p>Review AI-generated clinical orders for ICU scenarios. Rate each order
+       and give an overall quality score per turn.</p>
+    <label>Your name</label>
+    <input type="text" id="inp-name" placeholder="e.g. Dr. Priya"/>
+    <label>Role</label>
+    <select id="inp-role">
+      <option value="">— select —</option>
+      <option value="intensivist">Intensivist</option>
+      <option value="senior_resident">Senior Resident</option>
+      <option value="resident">Resident</option>
+      <option value="nurse">Nurse / NP</option>
+      <option value="pharmacist">Pharmacist</option>
+      <option value="other">Other</option>
+    </select>
+    <p id="login-err" style="color:#f87171;margin-top:-6px;margin-bottom:10px;display:none">
+      Please fill in all fields.</p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;user-select:none">
+      <input type="checkbox" id="inp-audit" style="accent-color:#38bdf8;width:14px;height:14px" onchange="document.getElementById('audit-arm-row').style.display=this.checked?'flex':'none'">
+      <span style="font-size:12px;color:var(--muted)">Audit mode — browse without rating</span>
+    </label>
+    <div id="audit-arm-row" style="display:none;align-items:center;gap:8px;margin-bottom:12px;padding:8px 12px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.15);border-radius:8px">
+      <span style="font-size:11px;color:var(--muted)">Show arm:</span>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+        <input type="radio" name="audit-arm" value="" checked style="accent-color:#38bdf8"> As assigned
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:#38bdf8">
+        <input type="radio" name="audit-arm" value="arm_a" style="accent-color:#38bdf8"> Arm A · Wiki
+      </label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:#c084fc">
+        <input type="radio" name="audit-arm" value="arm_b" style="accent-color:#c084fc"> Arm B · MedGemma
+      </label>
+    </div>
+    <button class="btn-primary" onclick="startReview()">Start Review →</button>
+  </div>
+</div>
+
+<div id="loading-wrap" class="center-wrap" style="display:none">
+  <div class="card" style="text-align:center"><p>Loading scenarios…</p></div>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <div id="topbar">
+    <span id="tb-id" class="tb-id"></span>
+    <span id="tb-turn" class="tb-pill"></span>
+    <span id="tb-diff" class="tb-pill"></span>
+    <div id="progress-area">
+      <div id="progress-label"></div>
+      <div id="progress-track"><div id="progress-fill"></div></div>
+    </div>
+  </div>
+
+  <!-- Orders panel -->
+  <div id="orders-panel">
+    <div id="orders-title">🤖 AI Suggested Orders</div>
+    <div id="orders-scroll"></div>
+    <div id="orders-footer">
+      <div class="footer-row">
+        <span class="overall-lbl">Overall quality:</span>
+        <div id="stars">
+          <button class="star" data-s="1" onclick="setStar(1)">★</button>
+          <button class="star" data-s="2" onclick="setStar(2)">★</button>
+          <button class="star" data-s="3" onclick="setStar(3)">★</button>
+          <button class="star" data-s="4" onclick="setStar(4)">★</button>
+          <button class="star" data-s="5" onclick="setStar(5)">★</button>
+        </div>
+        <button id="btn-next" disabled onclick="nextTurn()">Next Turn →</button>
+      </div>
+      <div class="footer-row">
+        <textarea id="notes-inp" placeholder="Clinical notes (optional)…"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chart panel -->
+  <div id="chart-panel">
+    <div id="chart-hdr">📋 Patient Chart</div>
+    <div id="question-box">
+      <div id="question-context" style="font-size:12px;color:#cbd5e1;line-height:1.55;margin-bottom:6px;display:none"></div>
+      <div id="question-text" style="font-style:italic"></div>
+    </div>
+    <div id="chart-tabs">
+      <div class="ctab on" data-tab="vitals" onclick="showTab('vitals')">Vitals</div>
+      <div class="ctab" data-tab="hx"     onclick="showTab('hx')">HX</div>
+      <div class="ctab" data-tab="labs"   onclick="showTab('labs')">Labs</div>
+      <div class="ctab" data-tab="notes"  onclick="showTab('notes')">Notes</div>
+      <div class="ctab" data-tab="orders" onclick="showTab('orders')">Active Orders</div>
+    </div>
+    <div id="chart-body"></div>
+  </div>
+</div>
+
+<!-- Why / Provenance Modal -->
+<div id="why-overlay" onclick="if(event.target===this)closeWhyModal()">
+  <div id="why-modal">
+    <div id="why-modal-hdr">
+      <span>ⓘ</span>
+      <h3 id="why-modal-title">Order Provenance</h3>
+      <button onclick="closeWhyModal()">✕</button>
+    </div>
+    <div id="why-modal-body">
+      <p class="why-loading">Loading…</p>
+    </div>
+  </div>
+</div>
+
+<!-- Done -->
+<div id="done-screen">
+  <div class="done-card">
+    <div class="done-icon">✅</div>
+    <h2>Review Complete</h2>
+    <p id="done-msg"></p>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let reviewerName = "", reviewerRole = "";
+let auditMode = false;    // browse without rating — no submission
+let auditArm  = "";       // "" = as assigned | "arm_a" | "arm_b"
+let scenarios = [];       // [{scenario_id, arm_shown, turns:[caseObj,...]}]
+let scIdx = 0, tIdx = 0;
+let activeTab = "vitals";
+let activeStar = 0;
+let activeOrders = [];    // orders "approved" from previous turns in this scenario
+let ratings = {};         // ratings[scIdx][tIdx] = {order_ratings:{}, overall:0, notes:""}
+let curOrderRatings = {}; // reference into ratings[scIdx][tIdx].order_ratings
+let curRunId = null;      // order_gen_run_id for the current arm/turn
+let _traceCache = {};     // keyed by run_id — avoids duplicate fetches
+
+// ── Start ──────────────────────────────────────────────────────────────────
+async function startReview() {
+  auditMode    = document.getElementById("inp-audit").checked;
+  auditArm     = auditMode ? (document.querySelector('input[name="audit-arm"]:checked')?.value || "") : "";
+  reviewerName = (document.getElementById("inp-name").value || "").trim();
+  reviewerRole = document.getElementById("inp-role").value;
+  if (!auditMode && (!reviewerName || !reviewerRole)) {
+    document.getElementById("login-err").style.display = "block"; return;
+  }
+  if (auditMode && !reviewerName) reviewerName = "Auditor";
+  document.getElementById("login-wrap").style.display = "none";
+  document.getElementById("loading-wrap").style.display = "flex";
+
+  let allCases;
+  try {
+    const data = await fetch("/ab_data").then(r => r.json());
+    allCases = data.cases || [];
+  } catch(e) {
+    alert("Could not load cases.\nMake sure serve_ab.py is running.");
+    document.getElementById("login-wrap").style.display = "flex";
+    document.getElementById("loading-wrap").style.display = "none"; return;
+  }
+
+  // Group by scenario_id preserving order
+  const byId = {}, idOrder = [];
+  for (const c of allCases) {
+    if (!byId[c.scenario_id]) { byId[c.scenario_id] = []; idOrder.push(c.scenario_id); }
+    byId[c.scenario_id].push(c);
+  }
+
+  // Assign one arm per scenario (seeded by reviewer name)
+  const rng = seededRng(hashStr(reviewerName));
+  scenarios = idOrder.map(sid => {
+    const turns = byId[sid].sort((a,b) => a.turn_num - b.turn_num);
+    const preferred = rng() > 0.5 ? "arm_a" : "arm_b";
+    const other = preferred === "arm_a" ? "arm_b" : "arm_a";
+    // Fall back to the other arm if the preferred one has no data
+    const hasData = arm => turns.some(t => t[arm] && t[arm].ok !== false);
+    const arm_shown = hasData(preferred) ? preferred : (hasData(other) ? other : preferred);
+    return { scenario_id: sid, arm_shown, turns };
+  });
+
+  // Init ratings structure
+  scenarios.forEach((sc, si) => {
+    ratings[si] = {};
+    sc.turns.forEach((_, ti) => { ratings[si][ti] = { order_ratings:{}, overall:0, notes:"" }; });
+  });
+
+  document.getElementById("loading-wrap").style.display = "none";
+  document.getElementById("main").classList.add("show");
+  scIdx = 0; tIdx = 0; activeOrders = [];
+  renderTurn();
+}
+
+// ── Resolve which arm to display (respects auditArm override) ─────────────
+function effectiveArm(sc, c) {
+  if (auditArm) return auditArm;
+  return sc.arm_shown;
+}
+
+// ── Render current turn ────────────────────────────────────────────────────
+function renderTurn() {
+  const sc  = scenarios[scIdx];
+  const c   = sc.turns[tIdx];
+  const arm = c[effectiveArm(sc, c)] || {};
+
+  curOrderRatings = ratings[scIdx][tIdx].order_ratings;
+  activeStar = ratings[scIdx][tIdx].overall;
+
+  // Progress
+  const totalT = scenarios.reduce((s,sc)=>s+sc.turns.length, 0);
+  const doneT  = scenarios.slice(0,scIdx).reduce((s,sc)=>s+sc.turns.length, 0) + tIdx;
+  document.getElementById("progress-fill").style.width = (doneT/totalT*100)+"%";
+  document.getElementById("progress-label").textContent =
+    `Scenario ${scIdx+1} / ${scenarios.length}  ·  Turn ${tIdx+1} / ${sc.turns.length}`;
+
+  // Topbar
+  document.getElementById("tb-id").textContent   = sc.scenario_id;
+  document.getElementById("tb-turn").textContent = `Turn ${c.turn_num}`;
+  const diff = (c.difficulty||"").toLowerCase();
+  const tbd  = document.getElementById("tb-diff");
+  tbd.textContent = c.difficulty || "";
+  tbd.className   = "tb-pill" + (diff ? " diff-"+diff : "");
+
+  // Next button label
+  const isLast = tIdx+1>=sc.turns.length && scIdx+1>=scenarios.length;
+  document.getElementById("btn-next").textContent =
+    isLast ? (auditMode ? "Done ✓" : "Submit ✓")
+           : (tIdx+1>=sc.turns.length ? "Next Scenario →" : "Next Turn →");
+  document.getElementById("btn-next").disabled = auditMode ? false : (activeStar === 0);
+
+  // Audit mode: show which arm is visible in topbar
+  let armBadge = document.getElementById("tb-arm");
+  if (!armBadge) {
+    armBadge = document.createElement("span");
+    armBadge.id = "tb-arm";
+    armBadge.className = "tb-pill";
+    document.getElementById("topbar").insertBefore(armBadge, document.getElementById("progress-area"));
+  }
+  if (auditMode) {
+    const shown = effectiveArm(sc, c);
+    const isA = shown === "arm_a";
+    armBadge.textContent = (isA ? "Arm A · Wiki" : "Arm B · MedGemma") + "  ⇄";
+    armBadge.style.background = isA ? "rgba(56,189,248,.18)" : "rgba(192,132,252,.18)";
+    armBadge.style.color      = isA ? "#38bdf8" : "#c084fc";
+    armBadge.style.cursor     = "pointer";
+    armBadge.title            = "Click to switch arm";
+    armBadge.onclick = () => {
+      auditArm = (effectiveArm(sc, c) === "arm_a") ? "arm_b" : "arm_a";
+      renderTurn();
+    };
+    armBadge.style.display = "";
+  } else {
+    armBadge.style.display = "none";
+  }
+
+  // Audit mode: dim the rating controls but keep Next button clickable
+  document.getElementById("stars").style.opacity        = auditMode ? "0.3" : "1";
+  document.getElementById("stars").style.pointerEvents  = auditMode ? "none" : "";
+  document.getElementById("notes-inp").style.opacity    = auditMode ? "0.3" : "1";
+  document.getElementById("notes-inp").style.pointerEvents = auditMode ? "none" : "";
+
+  // Stars
+  renderStars();
+
+  // Notes
+  document.getElementById("notes-inp").value = ratings[scIdx][tIdx].notes;
+
+  // Question — show clinical context as narrative + display_question as italic prompt
+  const ctxEl = document.getElementById("question-context");
+  const qEl   = document.getElementById("question-text");
+  const ctx = (c.clinical_context || "").trim();
+  const q   = (c.display_question || c.question || "").trim();
+  if (ctx) {
+    ctxEl.textContent = ctx;
+    ctxEl.style.display = "block";
+    qEl.textContent = q !== ctx ? q : "";
+  } else {
+    ctxEl.style.display = "none";
+    qEl.textContent = q;
+  }
+
+  // Chart
+  showTab(activeTab, c);
+
+  // Orders
+  renderOrders(arm);
+}
+
+// ── Order type config ───────────────────────────────────────────────────────
+const TYPE_ORDER  = ["med","blood","lab","vents","procedure","monitoring","diet","comm"];
+const TYPE_LABEL  = {med:"Medications",blood:"Blood Products",lab:"Investigations",
+                     vents:"Ventilator",procedure:"Procedures",monitoring:"Monitoring",
+                     diet:"Diet & Nutrition",comm:"Communication"};
+const TYPE_BADGE  = {med:"bmed",lab:"blab",vents:"bvent",procedure:"bproc",
+                     monitoring:"bmon",diet:"bdiet",blood:"bblod"};
+const TYPE_SHORT  = {med:"MED",lab:"LAB",vents:"VENT",procedure:"PROC",
+                     monitoring:"MON",diet:"DIET",blood:"BLOOD",comm:"COMM"};
+
+function typeBadge(t) { return TYPE_BADGE[t] || "bother"; }
+function typeShort(t) { return TYPE_SHORT[t] || (t||"").toUpperCase(); }
+
+// ── Render orders ──────────────────────────────────────────────────────────
+function renderOrders(arm) {
+  curRunId = (arm && arm.order_gen_run_id) || null;
+  const el = document.getElementById("orders-scroll");
+  if (!arm || !arm.ok) {
+    el.innerHTML = `<p style="color:var(--muted);padding:20px;font-style:italic">
+      ⚠️ ${arm ? (arm.error||"arm failed") : "no data"}</p>`;
+    return;
+  }
+
+  const orders = arm.structured_orders;
+  if (!orders || !orders.length) {
+    // Fallback: raw text
+    el.innerHTML = (arm.immediate_next_steps||[]).map((s,i) => rawCard(s,i)).join("");
+    bindRating();
+    return;
+  }
+
+  // Names already active from prior turns
+  const activeNames = new Set(activeOrders.map(o=>(o.name||"").toLowerCase()));
+
+  // Group
+  const groups = {};
+  for (const o of orders) {
+    const t = o.order_type || "other";
+    (groups[t]||(groups[t]=[])).push(o);
+  }
+  const orderedTypes = [
+    ...TYPE_ORDER.filter(t=>groups[t]),
+    ...Object.keys(groups).filter(t=>!TYPE_ORDER.includes(t))
+  ];
+
+  let html = "";
+  orderedTypes.forEach(type => {
+    html += `<div class="group-hdr">${TYPE_LABEL[type]||type.toUpperCase()}</div>`;
+    groups[type].forEach(order => {
+      const idx = orders.indexOf(order);
+      html += structuredCard(order, idx, activeNames);
+    });
+  });
+
+  el.innerHTML = html;
+  bindRating();
+}
+
+function structuredCard(o, idx, activeNames) {
+  const isAlready = activeNames.has((o.orderable_name||"").toLowerCase());
+  const isEdit    = o.action==="edit" || o.action==="stop";
+  const conf      = o.confidence||"";
+  const confCls   = conf==="high"?"chigh":conf==="medium"?"cmed":conf?"clow":"";
+  const det       = o.order_details || {};
+
+  let dp = [];
+  if (det.quantity && det.unit) dp.push(`${det.quantity} ${det.unit}`);
+  if (det.route && det.route !== "N/A")  dp.push(det.route);
+  if (det.frequency) dp.push(det.frequency);
+  if (det.form)      dp.push(`(${det.form})`);
+  const doseLine = dp.join("  ·  ");
+
+  // Fall back to recommendation text when order_details is missing
+  const instructions = det.instructions || (!doseLine ? (o.recommendation || "") : "");
+
+  if (isAlready) {
+    return `<div class="ocard already">
+      <div class="ocard-top">
+        <span class="type-badge ${typeBadge(o.order_type)}">${typeShort(o.order_type)}</span>
+        ${isEdit?`<span class="edit-badge">EDIT</span>`:""}
+        <span class="oname">${esc(o.orderable_name||"")}</span>
+        ${conf?`<span class="conf-badge ${confCls}">${conf}</span>`:""}
+      </div>
+      <div class="already-lbl">✓ Active from previous turn</div>
+    </div>`;
+  }
+
+  const r = curOrderRatings[idx]||"";
+  const whyBtn = curRunId
+    ? `<button class="why-btn" data-run-id="${esc(curRunId)}" data-order-name="${esc(o.orderable_name||'')}" data-action="${esc(o.action||'new')}" data-existing-no="${esc(o.existing_order_no||'')}" data-from-dose="${esc(o.from_dose||'')}" data-to-dose="${esc(o.to_dose||'')}" onclick="showWhy(this.dataset.runId,this.dataset.orderName,this.dataset.action,this.dataset.existingNo,this.dataset.fromDose,this.dataset.toDose)">ⓘ Why</button>`
+    : "";
+  return `<div class="ocard">
+    <div class="ocard-top">
+      <span class="type-badge ${typeBadge(o.order_type)}">${typeShort(o.order_type)}</span>
+      ${isEdit?`<span class="edit-badge">EDIT</span>`:""}
+      <span class="oname">${esc(o.orderable_name||"")}</span>
+      ${conf?`<span class="conf-badge ${confCls}">${conf}</span>`:""}
+      ${whyBtn}
+    </div>
+    <div class="ocard-body">
+      ${doseLine?`<div class="o-dose">${esc(doseLine)}</div>`:""}
+      ${instructions?`<div class="o-inst">${esc(instructions)}</div>`:""}
+      ${o.dose_calculation?`<div class="o-calc">⚖ ${esc(o.dose_calculation)}</div>`:""}
+    </div>
+    <div class="rate-row">
+      <button class="rbtn ${r==='good'?'rgood':''}"   data-idx="${idx}" data-val="good">✓ Appropriate</button>
+      <button class="rbtn ${r==='unsure'?'runsure':''}" data-idx="${idx}" data-val="unsure">? Uncertain</button>
+      <button class="rbtn ${r==='bad'?'rbad':''}"     data-idx="${idx}" data-val="bad">✗ Inappropriate</button>
+    </div>
+  </div>`;
+}
+
+function rawCard(step, idx) {
+  const r = curOrderRatings[idx]||"";
+  return `<div class="ocard">
+    <div class="ocard-body" style="padding-top:10px">${esc(step)}</div>
+    <div class="rate-row">
+      <button class="rbtn ${r==='good'?'rgood':''}"   data-idx="${idx}" data-val="good">✓ Appropriate</button>
+      <button class="rbtn ${r==='unsure'?'runsure':''}" data-idx="${idx}" data-val="unsure">? Uncertain</button>
+      <button class="rbtn ${r==='bad'?'rbad':''}"     data-idx="${idx}" data-val="bad">✗ Inappropriate</button>
+    </div>
+  </div>`;
+}
+
+function bindRating() {
+  document.querySelectorAll(".rbtn").forEach(btn => {
+    btn.addEventListener("click", function() {
+      const idx = parseInt(this.dataset.idx), val = this.dataset.val;
+      curOrderRatings[idx] = val;
+      ratings[scIdx][tIdx].order_ratings = curOrderRatings;
+      document.querySelectorAll(`.rbtn[data-idx="${idx}"]`).forEach(b => {
+        b.className = "rbtn" + (b.dataset.val===val
+          ? (val==="good"?" rgood":val==="unsure"?" runsure":" rbad") : "");
+      });
+    });
+  });
+}
+
+// ── Stars ──────────────────────────────────────────────────────────────────
+function setStar(n) {
+  activeStar = n;
+  ratings[scIdx][tIdx].overall = n;
+  renderStars();
+  document.getElementById("btn-next").disabled = false;
+}
+function renderStars() {
+  document.querySelectorAll(".star").forEach(b =>
+    b.classList.toggle("on", parseInt(b.dataset.s) <= activeStar));
+}
+
+// ── Chart tabs ─────────────────────────────────────────────────────────────
+function showTab(tab, caseData) {
+  activeTab = tab;
+  document.querySelectorAll(".ctab").forEach(t =>
+    t.classList.toggle("on", t.dataset.tab === tab));
+  const c = caseData || scenarios[scIdx].turns[tIdx];
+  const el = document.getElementById("chart-body");
+  const raw = c.simulation_raw || {};
+
+  if (tab==="vitals") {
+    el.innerHTML = renderVitals(raw.vitals || {});
+  } else if (tab==="hx") {
+    el.innerHTML = renderHX(raw.history || {});
+  } else if (tab==="labs") {
+    el.innerHTML = renderLabsRaw(raw.labs || []);
+  } else if (tab==="notes") {
+    el.innerHTML = renderNotes(raw.notes || []);
+  } else if (tab==="orders") {
+    el.innerHTML = renderActiveOrders();
+  }
+}
+
+// ── Simulation summary parser ──────────────────────────────────────────────
+const VITAL_KEYS = new Set([
+  "BP","HR","SpO2","RR","Temp","Temperature","FiO2","PEEP","MAP",
+  "GCS","AVPU","TherapyDevice","Device","Mode","TV","Rate","PS","SBP","DBP"
+]);
+const VITAL_UNITS = {
+  BP:"mmHg",HR:"bpm",SpO2:"%",RR:"/min",Temp:"°C",Temperature:"°C",
+  MAP:"mmHg",PEEP:"cmH₂O",TV:"mL",Rate:"/min",FiO2:"",GCS:"",AVPU:""
+};
+
+function parseSimSummary(text) {
+  const vitals={}, labs={};
+  // Try to split on section headers
+  const vMatch = text.match(/Vitals?\s*:([\s\S]*?)(?=\n[A-Z][a-z]*\s*:|$)/i);
+  const lMatch = text.match(/Labs?\s*:([\s\S]*?)(?=\n[A-Z][a-z]*\s*:|$)/i);
+
+  if (vMatch) extractKV(vMatch[1], vitals, VITAL_KEYS);
+  if (lMatch) extractKV(lMatch[1], labs, null);
+
+  // If no sections found, try to parse the whole thing
+  if (!Object.keys(vitals).length) {
+    extractKV(text, vitals, VITAL_KEYS);
+    extractKV(text, labs, null, VITAL_KEYS);
+  }
+  return { vitals, labs };
+}
+
+function extractKV(text, out, includeKeys, excludeKeys) {
+  const re = /([A-Za-z][A-Za-z0-9_\s\/]{0,20}?)\s*:\s*([^\n]+?)(?=\s+[A-Za-z][A-Za-z0-9_\s\/]{0,20}?\s*:|$)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const k = m[1].trim(), v = m[2].trim();
+    if (!k || !v || v.length > 50) continue;
+    if (includeKeys && !includeKeys.has(k)) continue;
+    if (excludeKeys && excludeKeys.has(k)) continue;
+    out[k] = v;
+  }
+}
+
+function renderVitals(vitals) {
+  const entries = Object.entries(vitals);
+  if (!entries.length) return `<p class="ntext">No vitals data.</p>`;
+  return `<div class="vgrid">${entries.map(([k,v]) => `
+    <div class="vcell">
+      <div class="vlbl">${esc(k)}</div>
+      <div class="vval">${esc(v)}<span class="vunit">${VITAL_UNITS[k]||""}</span></div>
+    </div>`).join("")}</div>`;
+}
+
+function renderLabs(labs) {
+  const entries = Object.entries(labs);
+  if (!entries.length) return `<p class="ntext">No lab data.</p>`;
+  return `<table class="ltable">${entries.map(([k,v])=>
+    `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</table>`;
+}
+
+function renderLabsRaw(labs) {
+  if (!Array.isArray(labs) || !labs.length) return `<p class="ntext">No lab data.</p>`;
+  return labs.map(panel => {
+    const attrs = Object.values(panel.attributes || {});
+    const rows = attrs.map(a => {
+      const val = String(a.value ?? "");
+      const er  = a.errorRange || {};
+      const num = parseFloat(val);
+      const low = !isNaN(num) && er.min != null && num < er.min;
+      const high= !isNaN(num) && er.max != null && num > er.max;
+      const flag = low ? `<span style="color:#e53">▼</span>` : high ? `<span style="color:#e53">▲</span>` : "";
+      const range = (er.min != null && er.max != null) ? `<span style="color:#888;font-size:10px">(${er.min}–${er.max})</span>` : "";
+      return `<tr><td>${esc(a.name||"")}</td><td>${esc(val)} ${flag} ${range}</td></tr>`;
+    }).join("");
+    return `<div style="margin-bottom:10px">
+      <div style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#555;margin-bottom:4px">${esc(panel.name||"")}</div>
+      <table class="ltable">${rows}</table>
+    </div>`;
+  }).join("");
+}
+
+function renderActiveOrders() {
+  if (!activeOrders.length)
+    return `<p class="ntext" style="margin-top:4px">No orders placed yet.</p>`;
+  return activeOrders.map(o=>`
+    <div class="ao-row">
+      <span class="ao-check">✓</span>
+      <div style="flex:1">
+        <div class="ao-name">${esc(o.name)}</div>
+        ${o.dose?`<div class="ao-detail">${esc(o.dose)}</div>`:""}
+      </div>
+      <span class="type-badge ${o.cls}" style="font-size:9px">${esc(o.short)}</span>
+    </div>`).join("");
+}
+
+function renderHX(history) {
+  const meds  = history.home_medications || [];
+  const diags = history.diagnoses        || [];
+  const allgs = history.allergies        || [];
+  if (!meds.length && !diags.length && !allgs.length)
+    return `<p class="ntext">No history recorded for this scenario.</p>`;
+  const section = (label, items, color) => {
+    const rows = items.length
+      ? items.map(i => `<div class="hx-item" style="${color?`color:${color}`:''}">${esc(i)}</div>`).join("")
+      : `<div class="hx-empty">None recorded</div>`;
+    return `<div class="hx-section"><div class="hx-label">${label}</div>${rows}</div>`;
+  };
+  return section("Diagnoses / PMHx", diags, "") +
+         section("Home Medications", meds, "#6ee7b7") +
+         section("Allergies", allgs, "#f87171");
+}
+
+function renderNotes(notes) {
+  if (!Array.isArray(notes) || !notes.length)
+    return `<p class="ntext">No clinical notes on file.</p>`;
+  const CAT_COLOR = { event:"#fbbf24", nursing:"#7dd3fc", ecg:"#a78bfa", imaging:"#34d399" };
+  return notes.map(n => {
+    const col = CAT_COLOR[(n.category||"").toLowerCase()] || "#94a3b8";
+    return `<div style="background:var(--surface2);border-radius:8px;padding:9px 12px;margin-bottom:8px">
+      <div style="font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:${col};margin-bottom:5px">
+        ${esc(n.category||"note")}
+      </div>
+      <div style="font-size:12px;line-height:1.6;color:var(--text)">${esc(n.text||"")}</div>
+    </div>`;
+  }).join("");
+}
+
+// ── Next ───────────────────────────────────────────────────────────────────
+function nextTurn() {
+  ratings[scIdx][tIdx].notes = document.getElementById("notes-inp").value.trim();
+
+  // Carry "approved" orders forward into activeOrders
+  const sc  = scenarios[scIdx];
+  const arm = sc.turns[tIdx][sc.arm_shown] || {};
+  const ords = arm.structured_orders || [];
+  const tr   = ratings[scIdx][tIdx].order_ratings;
+
+  ords.forEach((o, idx) => {
+    if (tr[idx] === "good") {
+      const name = (o.orderable_name||"").toLowerCase();
+      if (!activeOrders.find(a=>a.name.toLowerCase()===name)) {
+        const det = o.order_details||{};
+        let dp=[];
+        if (det.quantity&&det.unit) dp.push(`${det.quantity} ${det.unit}`);
+        if (det.route)    dp.push(det.route);
+        if (det.frequency) dp.push(det.frequency);
+        activeOrders.push({
+          name: o.orderable_name||"",
+          dose: dp.join(" · "),
+          cls:  typeBadge(o.order_type),
+          short: typeShort(o.order_type),
+        });
+      }
+    }
+  });
+
+  // Advance
+  tIdx++;
+  if (tIdx >= sc.turns.length) {
+    scIdx++;
+    tIdx = 0;
+    activeOrders = [];   // reset between scenarios
+    if (scIdx >= scenarios.length) {
+      if (auditMode) { showAuditDone(); return; }
+      submitAll(); return;
+    }
+  }
+
+  curOrderRatings = ratings[scIdx][tIdx].order_ratings;
+  activeStar = ratings[scIdx][tIdx].overall;
+  renderTurn();
+  document.getElementById("orders-scroll").scrollTop = 0;
+  showTab("vitals");
+}
+
+// ── Audit done ─────────────────────────────────────────────────────────────
+function showAuditDone() {
+  document.getElementById("main").classList.remove("show");
+  const done = document.getElementById("done-screen");
+  done.classList.add("show");
+  done.querySelector("h2").textContent = "Audit Complete";
+  document.getElementById("done-msg").textContent =
+    `Browsed all ${scenarios.length} scenario(s). No ratings were saved.`;
+}
+
+// ── Submit ─────────────────────────────────────────────────────────────────
+async function submitAll() {
+  document.getElementById("main").classList.remove("show");
+  const done = document.getElementById("done-screen");
+  done.classList.add("show");
+
+  const payload = {
+    reviewer_name: reviewerName,
+    reviewer_role: reviewerRole,
+    submitted_at:  new Date().toISOString(),
+    n_scenarios:   scenarios.length,
+    scenarios: scenarios.map((sc,si) => ({
+      scenario_id: sc.scenario_id,
+      arm_shown:   sc.arm_shown,
+      turns: sc.turns.map((c,ti) => ({
+        turn_num:     c.turn_num,
+        order_ratings: ratings[si][ti].order_ratings,
+        overall:      ratings[si][ti].overall,
+        notes:        ratings[si][ti].notes,
+      })),
+    })),
+  };
+
+  try {
+    const res = await fetch("/submit_ab", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload),
+    });
+    document.getElementById("done-msg").textContent = res.ok
+      ? `Ratings saved. Thank you, ${reviewerName}!`
+      : `Server error ${res.status} — please screenshot this page.`;
+  } catch(e) {
+    document.getElementById("done-msg").innerHTML =
+      `<strong style="color:#f87171">Save failed — copy your data below:</strong><br>
+       <textarea style="width:100%;height:80px;font-size:10px;margin-top:8px;
+         background:#1e293b;color:#f1f5f9;border:1px solid #334155;border-radius:4px"
+         >${esc(JSON.stringify(payload,null,2))}</textarea>`;
+  }
+}
+
+// ── Why / Provenance modal ─────────────────────────────────────────────────
+async function showWhy(runId, orderName, action, existingNo, fromDose, toDose) {
+  const overlay = document.getElementById("why-overlay");
+  const body    = document.getElementById("why-modal-body");
+  document.getElementById("why-modal-title").textContent =
+    orderName ? `Why: ${orderName}` : "Order Provenance";
+  body.innerHTML = `<p class="why-loading">Loading provenance…</p>`;
+  overlay.classList.add("show");
+
+  // Fetch (or use cache)
+  let trace;
+  if (_traceCache[runId]) {
+    trace = _traceCache[runId];
+  } else {
+    try {
+      trace = await fetch(`/why?run_id=${encodeURIComponent(runId)}`).then(r=>r.json());
+      _traceCache[runId] = trace;
+    } catch(e) {
+      body.innerHTML = `<p class="why-error">⚠ Could not fetch provenance: ${esc(String(e))}</p>`;
+      return;
+    }
+  }
+
+  if (!trace.found) {
+    body.innerHTML = `<p class="why-error">No trace found for run_id:<br>
+      <code style="font-size:10px;color:var(--muted)">${esc(runId)}</code></p>`;
+    return;
+  }
+
+  const sections = [];
+  const needle = (orderName || "").toLowerCase().split(" ")[0];
+  const chat   = trace.chat_trace || {};
+  const step1  = chat.step1 || {};
+  const step2  = chat.step2 || {};
+  const step4  = chat.step4 || {};
+
+  // ── 1 · Order intent ────────────────────────────────────────────────────
+  const act = (action || "new").toLowerCase();
+  const actColor = { new: "var(--green)", edit: "#f59e0b", stop: "var(--red)" }[act] || "var(--green)";
+  let intentHtml = `<span style="font-size:11px;font-weight:700;color:${actColor};background:${actColor}22;padding:2px 8px;border-radius:4px;letter-spacing:.05em;text-transform:uppercase">${esc(act)}</span>`;
+  if ((act === "edit" || act === "stop") && existingNo)
+    intentHtml += `<span style="color:var(--muted);font-size:11px;margin-left:8px">order <span style="color:var(--text)">#${esc(existingNo)}</span></span>`;
+  if (fromDose && toDose)
+    intentHtml += `<span style="color:var(--muted);font-size:11px;margin-left:8px"><span style="opacity:.5">${esc(fromDose)}</span> → <span style="color:var(--blue)">${esc(toDose)}</span></span>`;
+  sections.push(`
+    <div class="why-section">
+      <div class="why-section-hdr">◉ Order Intent</div>
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:6px 0">${intentHtml}</div>
+    </div>`);
+
+  // ── 2 · Source recommendation ───────────────────────────────────────────
+  const recs = trace.recommendations || [];
+  const intents   = (trace.phase0 && trace.phase0.intents) || [];
+  const flatIntents = intents.flat();
+  const nameLower   = (orderName || "").toLowerCase();
+  let matched = flatIntents.filter(i => {
+    const q = (i.catalog_query || "").toLowerCase();
+    return nameLower && (q.includes(nameLower) || nameLower.includes(q));
+  });
+  const showAll = matched.length === 0;
+  const displayIntents = showAll ? flatIntents : matched;
+  const recIdxSet = new Set(displayIntents.map(i => i.index).filter(x => x != null));
+  const recTexts  = recs.filter((_, i) => showAll || recIdxSet.has(i));
+  if (recTexts.length)
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">📋 Source Recommendation</div>
+        ${recTexts.map(r => `<div class="why-rec">${esc(r)}</div>`).join("")}
+      </div>`);
+
+  // ── 3 · Wiki parameters queried (Step 1) ───────────────────────────────
+  const allSq1 = step1.specific_queries || [];
+  const filteredSq1 = allSq1.filter(sq =>
+    needle && ((sq.parameter||"").toLowerCase().includes(needle) ||
+               (sq.search_query||"").toLowerCase().includes(needle))
+  );
+  const sq1 = filteredSq1.length ? filteredSq1 : allSq1;
+  if (sq1.length) {
+    const rows = sq1.map(sq => `
+      <div class="why-search-row">
+        <div class="why-query" style="margin-bottom:2px">${esc(sq.parameter)}</div>
+        ${sq.search_query && sq.search_query !== sq.parameter
+          ? `<div style="font-size:10px;color:var(--muted)">searched: <span style="color:var(--text);opacity:.6">${esc(sq.search_query)}</span></div>`
+          : ""}
+      </div>`).join("");
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">🔎 Wiki Parameters Queried</div>
+        ${rows}
+      </div>`);
+  }
+
+  // ── 4 · Wiki grounding (Step 2) ────────────────────────────────────────
+  const allGroundings = step2.retrievals || [];
+  const filteredGroundings = allGroundings.filter(r =>
+    needle && ((r.parameter||"").toLowerCase().includes(needle) ||
+               (r.search_query||"").toLowerCase().includes(needle))
+  );
+  const groundings = filteredGroundings.length ? filteredGroundings : allGroundings;
+  if (groundings.length) {
+    const scoreColor = s => s >= 0.70 ? "#4ade80" : s >= 0.50 ? "#f59e0b" : "#f87171";
+    const rows = groundings.map(g => {
+      const groundedBadge = g.grounded
+        ? `<span style="color:#4ade80;font-size:10px;font-family:monospace">✓ grounded</span>`
+        : `<span style="color:#f87171;font-size:10px;font-family:monospace">✗ not found</span>`;
+      return `
+        <div class="why-search-row" style="padding:10px 12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">
+            <span style="color:var(--muted);font-size:11px">${esc(g.parameter)}</span>
+            ${groundedBadge}
+          </div>
+          ${g.value ? `<div style="font-family:monospace;color:var(--blue);font-size:12px;margin-bottom:3px">${esc(g.value)}</div>` : ""}
+          ${g.source ? `<div style="font-size:10px;color:var(--muted);font-family:monospace;margin-bottom:2px">${esc(g.source)}</div>` : ""}
+          ${g.search_query ? `<div style="font-size:10px;color:var(--muted)">searched: <span style="opacity:.6">${esc(g.search_query)}</span></div>` : ""}
+          ${g.top_score != null ? `<div style="font-size:10px;font-family:monospace;color:${scoreColor(g.top_score)}">score ${g.top_score.toFixed(2)}</div>` : ""}
+          ${!g.grounded && g.resolution_question ? `<div style="font-size:10px;color:#f59e0b;font-style:italic;margin-top:4px">${esc(g.resolution_question)}</div>` : ""}
+        </div>`;
+    }).join("");
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">📖 Wiki Grounding</div>
+        ${rows}
+      </div>`);
+  }
+
+  // ── 5 · Gap resolution (Step 4) ────────────────────────────────────────
+  if (step4.markers_before > 0) {
+    const resolved  = step4.markers_resolved ?? (step4.markers_before - step4.markers_remaining);
+    const remaining = step4.markers_remaining ?? 0;
+    const pct = Math.round((resolved / step4.markers_before) * 100);
+    const ungrounded = (step2.retrievals || []).filter(r => !r.grounded);
+    const allResolved = remaining === 0;
+    const gapRows = ungrounded.map(g => {
+      const stillOpen = !allResolved && !!g.resolution_question;
+      const borderColor = stillOpen ? '#f59e0b' : '#4ade80';
+      const detail = stillOpen
+        ? `<div style="font-size:10px;color:#f59e0b;font-style:italic">${esc(g.resolution_question)}</div>`
+        : `<div style="font-size:10px;color:#4ade80">resolved in step 4</div>`;
+      return `
+      <div style="margin-top:8px;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:6px;border-left:2px solid ${borderColor}">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:2px">${esc(g.parameter)}</div>
+        ${detail}
+      </div>`;
+    }).join("");
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">🔧 Gap Resolution</div>
+        <div class="why-weight" style="padding:10px 12px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;font-family:monospace;margin-bottom:8px">
+            <span style="color:var(--muted)">${step4.markers_before} draft marker${step4.markers_before!==1?"s":""}</span>
+            <span>
+              <span style="color:#4ade80">${resolved} resolved</span>
+              ${remaining > 0 ? `<span style="color:#f59e0b;margin-left:10px">${remaining} remaining</span>` : ""}
+            </span>
+          </div>
+          <div style="width:100%;height:5px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:#22c55e;border-radius:3px"></div>
+          </div>
+          ${gapRows}
+        </div>
+      </div>`);
+  }
+
+  // ── 6 · Catalog search ─────────────────────────────────────────────────
+  const iters   = (trace.phase1 && trace.phase1.iterations) || [];
+  const allCalls = iters.flatMap(it => it.tool_calls || []);
+  const searchRows = displayIntents.map(intent => {
+    const q  = intent.catalog_query || "";
+    const ot = intent.order_type    || "";
+    const calls = allCalls.filter(tc =>
+      tc.name === "search_orderables" &&
+      (tc.args && tc.args.query && tc.args.query.toLowerCase() === q.toLowerCase())
+    );
+    const results = calls.flatMap(tc => tc.result_summary || []);
+    const uniqueResults = [...new Set(results)];
+    const resultPills = uniqueResults.length
+      ? uniqueResults.map(r => `<span class="why-result-pill">${esc(r)}</span>`).join("")
+      : `<span class="why-result-none">no results found</span>`;
+    return `
+      <div class="why-search-row">
+        <div class="why-query">
+          <code>${esc(q)}</code>
+          ${ot ? `<span style="color:var(--muted);font-size:11px;margin-left:6px">[${esc(ot)}]</span>` : ""}
+        </div>
+        <div class="why-results">${resultPills}</div>
+      </div>`;
+  });
+  if (searchRows.length) {
+    const hdr = showAll ? "🔍 Catalog Searches (all intents)" : `🔍 Catalog Search${searchRows.length > 1 ? "es" : ""}`;
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">${hdr}</div>
+        ${searchRows.join("")}
+      </div>`);
+  }
+
+  // ── 7 · Patient weight ─────────────────────────────────────────────────
+  const wr = trace.weight_resolution;
+  if (wr) {
+    const wkg  = wr.weight_kg != null ? `${wr.weight_kg} kg` : "—";
+    const wSrc = wr.source || "";
+    const srcLabel = { actual_emr: "Actual (EMR)", estimated: "Estimated", default: "Default", fallback: "Fallback" }[wSrc] || wSrc;
+    sections.push(`
+      <div class="why-section">
+        <div class="why-section-hdr">⚖ Patient Weight</div>
+        <div class="why-weight">
+          <span class="wval">${esc(wkg)}</span>
+          <span style="color:var(--muted);font-size:12px">${esc(srcLabel)}${wr.note ? ` — ${esc(wr.note)}` : ""}</span>
+        </div>
+      </div>`);
+  }
+
+  if (!sections.length) {
+    body.innerHTML = `<p class="why-error">Trace found but no matching data for this order.</p>`;
+    return;
+  }
+
+  body.innerHTML = sections.join("");
+}
+
+function closeWhyModal() {
+  document.getElementById("why-overlay").classList.remove("show");
+}
+
+// Close on Escape key
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeWhyModal(); });
+
+// ── Utils ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function hashStr(s) {
+  let h=0; for(let i=0;i<s.length;i++) h=Math.imul(31,h)+s.charCodeAt(i)|0; return Math.abs(h);
+}
+function seededRng(seed) {
+  let s=seed>>>0;
+  return ()=>{ s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296; };
+}
+</script>
+</body>
+</html>
