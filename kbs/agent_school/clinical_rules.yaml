@@ -1,6 +1,13 @@
 - id: always-trial-fluid-resuscitation-30-cf9cbf
   enabled: true
   triggers: []
-  rule: Always trial fluid resuscitation (30 ml/kg bolus) BEFORE initiating vasopressors,
-    unless cardiogenic shock is confirmed or fluid-overloaded. Steps must reflect
-    this sequence — fluids first, pressors as second-line.
+  rule: In case of hypotension always trial fluid resuscitation BEFORE initiating
+    vasopressors, unless cardiogenic shock is confirmed or fluid-overloaded. Unless
+    you have specific reason not to give trial of fluid bolus, never start on vasopressors.
+    In such cases, give the specific reason (for not giving fluid bolus in your output)
+- id: if-there-is-slightest-suspicion-adebd5
+  enabled: true
+  triggers: []
+  rule: If there is slightest suspicion of sepsis, start fluids and antibiotics without
+    any delay. Always err on the side of caution when it comes to antibiotics and
+    fluids in cases of suspected sepsis.

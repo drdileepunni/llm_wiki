@@ -1,6 +1,7 @@
 import logging
 import json
 import re
+import threading
 import uuid
 import yaml
 from pathlib import Path
@@ -11,6 +12,7 @@ from .llm_client import get_llm_client
 from .ingest_pipeline import write_gap_files
 from . import vector_store as vs_mod
 from .provenance_logger import write_trace
+from .emr import get_latest_labs, get_patient_demographics
 
 # ── Retrieval helpers ─────────────────────────────────────────────────────────
 
@@ -108,12 +110,16 @@ _SCAN_GAPS_TOOL = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Specific data points missing, each including the clinical context. "
-                                "One item per distinct value. ALWAYS append 'for [clinical condition/scenario]' "
-                                "so the value is unambiguous when filed out of context. "
-                                "E.g. ['Initial IV furosemide bolus dose (mg) for acute decompensated heart failure', "
+                                "Specific data points missing, with only the pharmacologically or clinically "
+                                "relevant condition — NOT patient-specific details like vitals, vasopressors, "
+                                "oxygen requirements, or comorbid clinical states unrelated to the question. "
+                                "One item per distinct value. Append only the condition that determines which "
+                                "value is needed. "
+                                "GOOD: ['Initial IV furosemide bolus dose (mg) for acute decompensated heart failure', "
                                 "'Lactulose dose for hepatic encephalopathy', "
-                                "'IPAP/EPAP settings for acute hypercapnic respiratory failure']"
+                                "'Piperacillin-tazobactam dose adjustment for CrCl < 40 mL/min']. "
+                                "BAD: ['Pip-tazo dose for a patient with CrCl < 40, HR 88, BP 112/68, on noradrenaline...'] "
+                                "— strip the patient scenario, keep only what specifies the clinical question."
                             ),
                         },
                         "subtype": {
@@ -535,9 +541,10 @@ def scan_text_gaps(
         "For each missing value, call extract_gaps with one entry per distinct entity+value. "
         "Be specific: name the exact drug/device/parameter, the wiki section it belongs to, "
         "a precise question to resolve it, and the exact values needed. "
-        f"IMPORTANT: in missing_values, always include the clinical context from above "
-        f"('{clinical_context[:80]}...') — e.g. 'Lactulose dose for hepatic encephalopathy', "
-        f"not just 'Lactulose dose'."
+        f"IMPORTANT: in missing_values, include only the relevant condition or threshold "
+        f"(e.g. 'Lactulose dose for hepatic encephalopathy', 'Pip-tazo dose for CrCl < 40 mL/min'). "
+        f"Do NOT copy vitals, vasopressors, oxygen levels, or other patient-specific details "
+        f"from the clinical context — those are not part of the knowledge gap."
     )
 
     response = llm.create_message(
@@ -785,6 +792,111 @@ _CDS_REASON_TOOL = {
     },
 }
 
+# ── Split Step 1 tools (used when reasoning model is MedGemma/Ollama) ─────────
+# Step 1A: pure clinical judgment — no nested objects, MedGemma-friendly
+_CDS_REASON_CLINICAL_TOOL = {
+    "name": "clinical_assessment",
+    "description": "Provide clinical direction, reasoning, monitoring plan, and alternatives for the given patient.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "clinical_direction": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "High-level clinical actions from your medical training. ALWAYS populate — "
+                    "no wiki needed. State what to do and why at the level of clinical logic, "
+                    "e.g. 'Reduce noradrenaline — MAP 144 well above target range.' "
+                    "Use [[wiki links]] for drugs and conditions."
+                ),
+            },
+            "clinical_reasoning": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Key findings, physiological rationale, and priority explanation.",
+            },
+            "monitoring_followup": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Parameters to monitor and timeframes.",
+            },
+            "alternative_considerations": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Edge cases or alternatives.",
+            },
+        },
+        "required": ["clinical_direction", "clinical_reasoning", "monitoring_followup", "alternative_considerations"],
+    },
+}
+
+# Step 1B: mechanical extraction of wiki search queries and conditionals from 1A prose
+_CDS_QUERY_EXTRACT_TOOL = {
+    "name": "extract_queries_and_conditionals",
+    "description": "Extract specific wiki search queries and conditional orders from a clinical plan.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "specific_queries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "parameter": {
+                            "type": "string",
+                            "description": (
+                                "Name of the clinical parameter or protocol detail, e.g. "
+                                "'MAP target in vasopressor-dependent shock', "
+                                "'initial ventilator settings post-intubation acute hypoxic respiratory failure'."
+                            ),
+                        },
+                        "search_query": {
+                            "type": "string",
+                            "description": (
+                                "Short, focused query to search the medical wiki. "
+                                "Strip all patient-specific details — just the clinical concept. "
+                                "E.g. 'MAP target vasopressor septic shock', 'noradrenaline titration step ICU'."
+                            ),
+                        },
+                    },
+                    "required": ["parameter", "search_query"],
+                },
+                "description": (
+                    "One entry per drug dose, titration step, target range, or procedure parameter "
+                    "mentioned in the clinical direction. Generate ONE query per drug and ONE per "
+                    "procedure/device setting. Each drug and each setting gets its own entry."
+                ),
+            },
+            "conditional_orders": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "condition": {
+                            "type": "string",
+                            "description": "The clinical if-condition, specific and measurable.",
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": "The complete action to take if the condition is met.",
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Short label, e.g. 'Vasopressin if noradrenaline > 0.5 mcg/kg/min'.",
+                        },
+                    },
+                    "required": ["condition", "action", "summary"],
+                },
+                "description": (
+                    "If-then conditional sequences in the plan that should NOT be executed immediately. "
+                    "Leave empty [] if there are no if-then chains."
+                ),
+            },
+        },
+        "required": ["specific_queries", "conditional_orders"],
+    },
+}
+
 _CDS_GROUND_TOOL = {
     "name": "ground_parameters",
     "description": "For each parameter, state whether the provided wiki context confirms the value.",
@@ -859,6 +971,43 @@ _CDS_GROUND_TOOL = {
         "required": ["groundings"],
     },
 }
+
+# ── Step 2 lab-lookup tools (for agentic severity classification) ─────────────
+_CDS_S2_GET_LAB = {
+    "name": "get_latest_lab",
+    "description": (
+        "Fetch the most recent result for a specific lab test from the patient's chart. "
+        "Use this when the wiki context contains a severity or classification table "
+        "(e.g. mild/moderate/severe with numeric thresholds) so you can determine which "
+        "tier applies to this patient before grounding the parameter value."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "test_name": {
+                "type": "string",
+                "description": "Lab test name, e.g. 'Potassium', 'Sodium', 'Creatinine', 'Lactate'",
+            },
+        },
+        "required": ["test_name"],
+    },
+}
+
+_CDS_S2_GET_DEMOGRAPHICS = {
+    "name": "get_patient_demographics",
+    "description": (
+        "Fetch patient demographics including weight, diagnoses, and home medications. "
+        "Use when the wiki classification table requires patient-specific context "
+        "(e.g. weight-based thresholds, organ function staging)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+_CDS_S2_TOOLS = [_CDS_S2_GET_LAB, _CDS_S2_GET_DEMOGRAPHICS, _CDS_GROUND_TOOL]
 
 _CDS_SYNTHESIZE_TOOL = {
     "name": "synthesize_next_steps",
@@ -1006,6 +1155,11 @@ def _load_clinical_rules(kb: "KBConfig", question: str) -> list[str]:
     return matched
 
 
+def _is_ollama_model(model: str) -> bool:
+    """Return True for MedGemma / Ollama-hosted models that don't support native tool use."""
+    return model.startswith("medgemma") or ("/" not in model and model.startswith("ollama"))
+
+
 def run_chat(
     question: str,
     kb: "KBConfig | None" = None,
@@ -1017,6 +1171,7 @@ def run_chat(
     reasoning_model: str | None = None,
     grounding_mode: str = "wiki",   # "wiki" | "medgemma"
     pending_conditionals: list[dict] | None = None,
+    cpmrn: str | None = None,       # patient ID for Step 2 agentic lab lookups
 ) -> dict:
     """
     mode="qna"  — prose markdown answer with wiki citations (default)
@@ -1059,12 +1214,20 @@ def run_chat(
             "tokens": {},
         }
         # Call 1: reason from clinical training, no wiki — identify direction + what to look up
-        log.info("CDS Step 1: reasoning (no wiki)  model=%s", resolved_reasoning_model)
+        # When reasoning model is MedGemma/Ollama (no native tool use), split into:
+        #   Step 1A — clinical judgment only (simple string arrays, MedGemma-friendly)
+        #   Step 1B — mechanical extraction of specific_queries + conditional_orders (main llm)
+        _split_step1 = _is_ollama_model(resolved_reasoning_model)
+        log.info("CDS Step 1: reasoning (no wiki)  model=%s  split=%s", resolved_reasoning_model, _split_step1)
+
         reason_prompt = f"""You are a senior ICU clinician. Reason through this clinical question using your medical training.
 
 {question}
 
-Provide your clinical direction, reasoning, and monitoring plan.
+Provide your clinical direction, reasoning, and monitoring plan."""
+
+        if not _split_step1:
+            reason_prompt += """
 Also list specific clinical parameters where precise values matter (drug doses, titration steps, target ranges, protocol thresholds).
 These will be looked up in the medical wiki separately.
 
@@ -1102,38 +1265,112 @@ QUERY RULES — read carefully:
                 for img in images
             ] + [{"type": "text", "text": reason_prompt}]
 
-        step1 = reasoning_llm.create_message(
-            messages=[{"role": "user", "content": reason_msg}],
-            tools=[_CDS_REASON_TOOL],
-            system=system_prompt,
-            max_tokens=4000,
-            force_tool=True,
-            thinking_budget=4000,
-        )
-        total_input  += step1.usage.input_tokens
-        total_output += step1.usage.output_tokens
-        log.info("CDS Step 1 done: stop=%s  in=%d  out=%d", step1.stop_reason, step1.usage.input_tokens, step1.usage.output_tokens)
+        if _split_step1:
+            # ── Step 1A: MedGemma clinical judgment (simple arrays, no nested objects) ──
+            step1a = reasoning_llm.create_message(
+                messages=[{"role": "user", "content": reason_msg}],
+                tools=[_CDS_REASON_CLINICAL_TOOL],
+                system=system_prompt,
+                max_tokens=3000,
+                force_tool=True,
+                thinking_budget=0,
+            )
+            total_input  += step1a.usage.input_tokens
+            total_output += step1a.usage.output_tokens
+            log.info("CDS Step 1A done (MedGemma): stop=%s  in=%d  out=%d",
+                     step1a.stop_reason, step1a.usage.input_tokens, step1a.usage.output_tokens)
 
-        reason_block = next((b for b in step1.content if b.type == "tool_use"), None)
-        inp1 = reason_block.input if reason_block else {}
-        clinical_direction         = inp1.get("clinical_direction", [])
-        clinical_reasoning         = inp1.get("clinical_reasoning", [])
-        monitoring_followup        = inp1.get("monitoring_followup", [])
-        alternative_considerations = inp1.get("alternative_considerations", [])
-        specific_queries           = inp1.get("specific_queries", [])
-        conditional_orders         = inp1.get("conditional_orders", [])
-        log.info("CDS Step 1: direction=%d  reasoning=%d  queries=%d  conditionals=%d",
-                 len(clinical_direction), len(clinical_reasoning), len(specific_queries), len(conditional_orders))
-        chat_trace["step1"] = {
-            "clinical_direction": clinical_direction,
-            "clinical_reasoning": clinical_reasoning,
-            "monitoring_followup": monitoring_followup,
-            "alternative_considerations": alternative_considerations,
-            "specific_queries": specific_queries,
-            "conditional_orders": conditional_orders,
-            "input_tokens": step1.usage.input_tokens,
-            "output_tokens": step1.usage.output_tokens,
-        }
+            reason_block_1a = next((b for b in step1a.content if b.type == "tool_use"), None)
+            inp1a = reason_block_1a.input if reason_block_1a else {}
+            clinical_direction         = inp1a.get("clinical_direction", [])
+            clinical_reasoning         = inp1a.get("clinical_reasoning", [])
+            monitoring_followup        = inp1a.get("monitoring_followup", [])
+            alternative_considerations = inp1a.get("alternative_considerations", [])
+
+            # ── Step 1B: extract specific_queries + conditional_orders (main llm) ──
+            direction_text = "\n".join(f"- {d}" for d in clinical_direction) or "(none)"
+            extract_prompt = (
+                f"Clinical question:\n{question}\n\n"
+                f"A senior ICU clinician has assessed this case and produced the following clinical direction:\n"
+                f"{direction_text}\n\n"
+                "Extract all specific wiki search queries and any conditional orders from this plan.\n\n"
+                "QUERY RULES:\n"
+                "- ONE entry per drug: dose, route, rate, and renal/hepatic adjustments each get their own entry.\n"
+                "- ONE entry per procedure/device setting (e.g. TV, PEEP, FiO2 for ventilation each separate).\n"
+                "- Keep search_query short, clinical-concept only — no patient-specific details.\n"
+                "- Conditional orders: only if-then chains that should NOT be acted on immediately."
+            )
+            log.info("CDS Step 1B: query extraction  model=%s", resolved_model)
+            step1b = llm.create_message(
+                messages=[{"role": "user", "content": extract_prompt}],
+                tools=[_CDS_QUERY_EXTRACT_TOOL],
+                system=system_prompt,
+                max_tokens=2000,
+                force_tool=True,
+                thinking_budget=0,
+            )
+            total_input  += step1b.usage.input_tokens
+            total_output += step1b.usage.output_tokens
+            log.info("CDS Step 1B done: stop=%s  in=%d  out=%d",
+                     step1b.stop_reason, step1b.usage.input_tokens, step1b.usage.output_tokens)
+
+            reason_block_1b = next((b for b in step1b.content if b.type == "tool_use"), None)
+            inp1b = reason_block_1b.input if reason_block_1b else {}
+            specific_queries   = inp1b.get("specific_queries", [])
+            conditional_orders = inp1b.get("conditional_orders", [])
+
+            log.info("CDS Step 1 (split): direction=%d  reasoning=%d  queries=%d  conditionals=%d",
+                     len(clinical_direction), len(clinical_reasoning), len(specific_queries), len(conditional_orders))
+            chat_trace["step1"] = {
+                "split": True,
+                "step1a_model": resolved_reasoning_model,
+                "step1b_model": resolved_model,
+                "clinical_direction": clinical_direction,
+                "clinical_reasoning": clinical_reasoning,
+                "monitoring_followup": monitoring_followup,
+                "alternative_considerations": alternative_considerations,
+                "specific_queries": specific_queries,
+                "conditional_orders": conditional_orders,
+                "input_tokens": step1a.usage.input_tokens + step1b.usage.input_tokens,
+                "output_tokens": step1a.usage.output_tokens + step1b.usage.output_tokens,
+            }
+
+        else:
+            # ── Original single-call Step 1 ────────────────────────────────────────
+            step1 = reasoning_llm.create_message(
+                messages=[{"role": "user", "content": reason_msg}],
+                tools=[_CDS_REASON_TOOL],
+                system=system_prompt,
+                max_tokens=4000,
+                force_tool=True,
+                thinking_budget=4000,
+            )
+            total_input  += step1.usage.input_tokens
+            total_output += step1.usage.output_tokens
+            log.info("CDS Step 1 done: stop=%s  in=%d  out=%d",
+                     step1.stop_reason, step1.usage.input_tokens, step1.usage.output_tokens)
+
+            reason_block = next((b for b in step1.content if b.type == "tool_use"), None)
+            inp1 = reason_block.input if reason_block else {}
+            clinical_direction         = inp1.get("clinical_direction", [])
+            clinical_reasoning         = inp1.get("clinical_reasoning", [])
+            monitoring_followup        = inp1.get("monitoring_followup", [])
+            alternative_considerations = inp1.get("alternative_considerations", [])
+            specific_queries           = inp1.get("specific_queries", [])
+            conditional_orders         = inp1.get("conditional_orders", [])
+            log.info("CDS Step 1: direction=%d  reasoning=%d  queries=%d  conditionals=%d",
+                     len(clinical_direction), len(clinical_reasoning), len(specific_queries), len(conditional_orders))
+            chat_trace["step1"] = {
+                "split": False,
+                "clinical_direction": clinical_direction,
+                "clinical_reasoning": clinical_reasoning,
+                "monitoring_followup": monitoring_followup,
+                "alternative_considerations": alternative_considerations,
+                "specific_queries": specific_queries,
+                "conditional_orders": conditional_orders,
+                "input_tokens": step1.usage.input_tokens,
+                "output_tokens": step1.usage.output_tokens,
+            }
 
         # Call 2: targeted retrieval + grounding (wiki) OR direct MedGemma query (medgemma)
         pages_consulted: set = set()
@@ -1312,7 +1549,18 @@ QUERY RULES — read carefully:
                 "✗ NOT GROUNDED — wiki has standard morphine dose but patient has eGFR 15: "
                 "renal failure changes the dose — context matters clinically.\n"
                 "✗ NOT GROUNDED — wiki mentions IPAP/EPAP exist but gives no numeric starting "
-                "values: the number is absent, not just the setting label.\n"
+                "values: the number is absent, not just the setting label.\n\n"
+                "SEVERITY CLASSIFICATION RULE:\n"
+                "If the wiki context for ANY parameter contains a severity or risk classification "
+                "table (e.g. mild/moderate/severe with numeric lab thresholds, AKI staging, "
+                "Glasgow-Blatchford score tiers, hyperkalemia grades), you MUST call "
+                "get_latest_lab for the relevant lab value BEFORE calling ground_parameters. "
+                "Use the result to identify which severity tier applies to this patient, then "
+                "ground exclusively to the values for that tier — not the full protocol. "
+                "Only call get_patient_demographics if the classification requires weight, "
+                "diagnosis, or organ function context not available from a single lab. "
+                "If no patient ID is available or the lab has not been ordered yet, proceed "
+                "without a lookup and note the uncertainty in resolution_question.\n"
             ]
             for pc in param_contexts:
                 score_note = f"  [retrieval score: {pc['top_score']:.2f}]" if pc.get("top_score") else ""
@@ -1320,19 +1568,75 @@ QUERY RULES — read carefully:
                     f"PARAMETER: {pc['parameter']}{score_note}\nWIKI CONTEXT:\n{pc['context']}\n"
                 )
 
-            log.info("CDS Step 2: grounding %d parameters", len(param_contexts))
-            step2 = llm.create_message(
-                messages=[{"role": "user", "content": "\n\n".join(grounding_parts)}],
-                tools=[_CDS_GROUND_TOOL],
-                system=system_prompt,
-                max_tokens=2000,
-                force_tool=True,
-            )
-            total_input  += step2.usage.input_tokens
-            total_output += step2.usage.output_tokens
-            log.info("CDS Step 2 done: stop=%s  in=%d  out=%d", step2.stop_reason, step2.usage.input_tokens, step2.usage.output_tokens)
+            log.info("CDS Step 2: grounding %d parameters (cpmrn=%s)", len(param_contexts), cpmrn)
+            _s2_messages = [{"role": "user", "content": "\n\n".join(grounding_parts)}]
+            ground_block = None
+            _s2_resp = None
 
-            ground_block = next((b for b in step2.content if b.type == "tool_use"), None)
+            for _s2_iter in range(4):  # max 3 lab lookups before forced ground_parameters
+                _use_tools = _CDS_S2_TOOLS if cpmrn else [_CDS_GROUND_TOOL]
+                _s2_resp = llm.create_message(
+                    messages=_s2_messages,
+                    tools=_use_tools,
+                    system=system_prompt,
+                    max_tokens=2500,
+                    force_tool=(_s2_iter == 3),  # force ground_parameters on final iteration
+                )
+                total_input  += _s2_resp.usage.input_tokens
+                total_output += _s2_resp.usage.output_tokens
+
+                # Check for terminal ground_parameters call
+                ground_block = next(
+                    (b for b in _s2_resp.content if b.type == "tool_use" and b.name == "ground_parameters"),
+                    None,
+                )
+                if ground_block:
+                    log.info("CDS Step 2 done after %d iteration(s): in=%d out=%d",
+                             _s2_iter + 1, _s2_resp.usage.input_tokens, _s2_resp.usage.output_tokens)
+                    break
+
+                # Handle lab / demographics tool calls
+                tool_calls = [b for b in _s2_resp.content if b.type == "tool_use"]
+                if not tool_calls:
+                    log.info("CDS Step 2: no tool call on iter %d — stopping", _s2_iter)
+                    break
+
+                # Build assistant turn — preserve thought_signature so Gemini can echo it back
+                asst_content = []
+                for b in _s2_resp.content:
+                    if b.type == "text":
+                        asst_content.append({"type": "text", "text": b.text})
+                    elif b.type == "tool_use":
+                        tc_dict: dict = {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
+                        if getattr(b, "thought_signature", None):
+                            tc_dict["thought_signature"] = b.thought_signature
+                        asst_content.append(tc_dict)
+                _s2_messages.append({"role": "assistant", "content": asst_content})
+
+                # Execute each tool call
+                tool_results = []
+                for tc in tool_calls:
+                    try:
+                        if tc.name == "get_latest_lab":
+                            test = tc.input.get("test_name", "")
+                            raw = get_latest_labs(cpmrn, tests=[test])
+                            result_data = raw.get("labs", {}) or {"message": f"No result for {test}"}
+                            log.info("CDS Step 2 agentic: get_latest_lab(%r) → %s", test, str(result_data)[:120])
+                        elif tc.name == "get_patient_demographics":
+                            result_data = get_patient_demographics(cpmrn)
+                            log.info("CDS Step 2 agentic: get_patient_demographics → weight=%s",
+                                     result_data.get("weightKg"))
+                        else:
+                            result_data = {"error": f"Unknown tool: {tc.name}"}
+                    except Exception as _te:
+                        result_data = {"error": str(_te)}
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": json.dumps(result_data, default=str),
+                    })
+                _s2_messages.append({"role": "user", "content": tool_results})
+
             if ground_block:
                 specific_parameters = ground_block.input.get("groundings", [])
 
@@ -1355,8 +1659,8 @@ QUERY RULES — read carefully:
                 })
             chat_trace["step2"] = {
                 "retrievals": step2_retrievals,
-                "input_tokens": step2.usage.input_tokens,
-                "output_tokens": step2.usage.output_tokens,
+                "input_tokens": _s2_resp.usage.input_tokens if _s2_resp else 0,
+                "output_tokens": _s2_resp.usage.output_tokens if _s2_resp else 0,
             }
             pages = list(pages_consulted)
 
@@ -1444,15 +1748,11 @@ QUERY RULES — read carefully:
                 "output_tokens": step3.usage.output_tokens,
             }
 
-        # Step 4: rewrite any remaining markers
-        _step4_failed_texts: set[str] = set()
+        # Step 4: MedGemma marker fill (Arm B only — wiki rewrite step removed)
         _markers_resolved_by_medgemma = 0
-        if immediate_next_steps:
-            steps_before_rewrite = list(immediate_next_steps)
-            markers_before = sum(1 for s in steps_before_rewrite if _NOT_IN_WIKI_PATTERN.search(s))
-
-            if grounding_mode == "medgemma":
-                # Arm B: MedGemma resolves any remaining markers
+        if immediate_next_steps and grounding_mode == "medgemma":
+            markers_before = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
+            if markers_before > 0:
                 _mg_llm4 = get_llm_client(model=_MEDGEMMA_MODEL)
                 immediate_next_steps, _s4_in, _s4_out, _markers_resolved_by_medgemma = \
                     _cds_step4_medgemma(immediate_next_steps, _mg_llm4)
@@ -1467,94 +1767,63 @@ QUERY RULES — read carefully:
                     "input_tokens": _s4_in,
                     "output_tokens": _s4_out,
                 }
-            else:
-                # Arm A: wiki-based marker rewrite
-                immediate_next_steps, rewrite_tokens, failed_idx = _rewrite_grounded_steps(
-                    immediate_next_steps, kb, llm
-                )
-                total_input  += rewrite_tokens[0]
-                total_output += rewrite_tokens[1]
-                _step4_failed_texts = {steps_before_rewrite[i] for i in failed_idx if i < len(steps_before_rewrite)}
-                markers_after = sum(1 for s in immediate_next_steps if _NOT_IN_WIKI_PATTERN.search(s))
-                chat_trace["step4"] = {
-                    "mode": "wiki",
-                    "markers_before": markers_before,
-                    "markers_resolved": markers_before - markers_after,
-                    "markers_remaining": markers_after,
-                    "failed_step_indices": sorted(failed_idx),
-                    "input_tokens": rewrite_tokens[0],
-                    "output_tokens": rewrite_tokens[1],
-                }
+                log.info("CDS Step 4 (MedGemma): %d→%d markers  resolved=%d",
+                         markers_before, markers_after, _markers_resolved_by_medgemma)
 
-        # Register gap files for ungrounded parameters.
-        # Pre-write vector check is only run when Step 2 retrieval score was LOW (<0.60)
-        # meaning the wiki page wasn't found. If score ≥ 0.60 and still grounded=false,
-        # the page exists but specific values are missing — that's a definite gap.
-        # placement confidence: score ≥ 0.70 → confirmed; below → approximate.
-        # Approximate gaps are valid knowledge gaps but the section assignment may be
-        # imprecise — defrag will correct placement after a scope-contamination scan.
-        _LOW_RETRIEVAL    = 0.60
+        # Gap registration: dispatch async — does not block the clinical response.
+        _LOW_RETRIEVAL     = 0.60
         _CONFIRM_RETRIEVAL = 0.70
-        gap_entity = ""
-        gap_sections: list = []
-        gap_written = None
         ungrounded = [p for p in specific_parameters if not p.get("grounded", True)]
-        # Build lookup: parameter name → param_context (for sections_searched)
         pc_by_param = {pc["parameter"]: pc for pc in param_contexts}
+
         if ungrounded and grounding_mode == "wiki":
-            gap_entries: list = []
-            from .canonical_registry import resolve as _resolve_canonical
-            for param in ungrounded:
-                concept = param.get("entity") or param["parameter"]
-                section = param.get("section_heading") or "Dosing"
-                retrieval_score = score_by_param.get(param["parameter"], 0.0)
-                # Only run pre-write check when Step 2 retrieval was weak (page may have been missed)
-                if retrieval_score < _LOW_RETRIEVAL:
-                    if _gap_already_covered(concept, section, kb.wiki_dir):
-                        log.info(
-                            "  Skipping gap '%s / %s' — pre-write check: already covered (retrieval_score=%.2f)",
-                            concept, section, retrieval_score,
-                        )
-                        continue
-                else:
-                    log.info(
-                        "  Gap '%s / %s' confirmed — page found (score=%.2f) but values missing",
-                        concept, section, retrieval_score,
-                    )
-                placement = "confirmed" if retrieval_score >= _CONFIRM_RETRIEVAL else "approximate"
-                if placement == "approximate":
-                    log.info(
-                        "  Gap '%s / %s' flagged approximate (score=%.2f) — section may be imprecise",
-                        concept, section, retrieval_score,
-                    )
-                entry = {
-                    "page": _resolve_canonical(concept, kb.wiki_dir, llm),
-                    "missing_sections": [section],
-                    "placement": placement,
-                    "_param": param["parameter"],  # keep for metadata after write
-                }
-                if param.get("resolution_question"):
-                    entry["resolution_question"] = param["resolution_question"]
-                if param.get("missing_values"):
-                    entry["missing_values"] = param["missing_values"]
-                if param.get("subtype"):
-                    entry["subtype"] = param["subtype"]
-                # Attach the sections that were searched so write_gap_files can persist them
-                pc = pc_by_param.get(param["parameter"], {})
-                searched = pc.get("sections_searched", [])
-                if searched:
-                    entry["searched_sections"] = searched
-                gap_entries.append(entry)
-            if gap_entries:
+            def _register_gaps(_ungrounded=list(ungrounded),
+                                _score_by_param=dict(score_by_param),
+                                _pc_by_param=dict(pc_by_param),
+                                _kb=kb, _question=question, _llm=llm):
                 try:
-                    written = write_gap_files(gap_entries, kb, source_name=f"ungrounded cds params: {question[:80]}")
-                    gap_written = written[0] if written else None
-                    # Report only what was actually filed
-                    gap_entity   = gap_entries[0]["_param"] if gap_entries else ""
-                    gap_sections = [e["_param"] for e in gap_entries]
-                    log.info("CDS gaps registered (%d): %s", len(gap_entries), written)
+                    from .canonical_registry import resolve as _resolve_canonical
+                    gap_entries: list = []
+                    for param in _ungrounded:
+                        concept = param.get("entity") or param["parameter"]
+                        section = param.get("section_heading") or "Dosing"
+                        retrieval_score = _score_by_param.get(param["parameter"], 0.0)
+                        if retrieval_score < _LOW_RETRIEVAL:
+                            if _gap_already_covered(concept, section, _kb.wiki_dir):
+                                log.info("  [async] Skipping gap '%s / %s' — already covered", concept, section)
+                                continue
+                        else:
+                            log.info("  [async] Gap '%s / %s' confirmed (score=%.2f)", concept, section, retrieval_score)
+                        placement = "confirmed" if retrieval_score >= _CONFIRM_RETRIEVAL else "approximate"
+                        entry = {
+                            "page": _resolve_canonical(concept, _kb.wiki_dir, _llm),
+                            "missing_sections": [section],
+                            "placement": placement,
+                            "_param": param["parameter"],
+                        }
+                        if param.get("resolution_question"):
+                            entry["resolution_question"] = param["resolution_question"]
+                        if param.get("missing_values"):
+                            entry["missing_values"] = param["missing_values"]
+                        if param.get("subtype"):
+                            entry["subtype"] = param["subtype"]
+                        pc = _pc_by_param.get(param["parameter"], {})
+                        if pc.get("sections_searched"):
+                            entry["searched_sections"] = pc["sections_searched"]
+                        gap_entries.append(entry)
+                    if gap_entries:
+                        written = write_gap_files(gap_entries, _kb, source_name=f"ungrounded cds params: {_question[:80]}")
+                        log.info("[async] CDS gaps registered (%d): %s", len(gap_entries), written)
                 except Exception as exc:
-                    log.warning("Failed to write CDS gaps: %s", exc)
+                    log.warning("[async] Gap registration failed: %s", exc)
+
+            threading.Thread(target=_register_gaps, daemon=True).start()
+            log.info("CDS gap registration dispatched async (%d ungrounded param(s))", len(ungrounded))
+
+        # gap_written / gap_entity / gap_sections are no longer populated synchronously
+        gap_written  = None
+        gap_entity   = ""
+        gap_sections: list = []
 
 
         all_text = " ".join(
@@ -1608,7 +1877,6 @@ QUERY RULES — read carefully:
             "monitoring_followup": monitoring_followup,
             "alternative_considerations": alternative_considerations,
             "pages_consulted": pages,
-            "_step4_failed_texts": _step4_failed_texts,
             "wiki_links": list(set(wiki_links)),
             "input_tokens": total_input,
             "output_tokens": total_output,

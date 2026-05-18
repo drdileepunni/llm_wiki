@@ -18,6 +18,7 @@ import {
   StopCircleIcon,
   ServerIcon,
   ShieldCheckIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline'
 import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM, getCPUVMStatus, startCPUVM, stopCPUVM, getActiveInstance, setActiveInstance } from '../api'
 import { useAppState } from '../AppStateContext'
@@ -38,6 +39,8 @@ const toolsNav = [
   { to: '/graph',            label: 'Graph',    icon: ShareIcon },
   { to: '/learn',            label: 'Learn',    icon: AcademicCapIcon },
   { to: '/clinical-rules',  label: 'Rules',    icon: ShieldCheckIcon },
+  { to: '/mopup',           label: 'Mop-up',   icon: SparklesIcon },
+  { to: '/docs',            label: 'Docs',     icon: BookOpenIcon },
 ]
 
 export default function Layout() {

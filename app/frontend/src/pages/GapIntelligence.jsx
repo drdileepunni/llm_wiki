@@ -12,7 +12,6 @@ import { useAppState } from '../AppStateContext'
 const TABS = [
   { id: 'persistent', label: 'Persistent KGs' },
   { id: 'open',       label: 'Open Gaps' },
-  { id: 'scope',      label: 'Scope Contamination' },
   { id: 'health',     label: 'Retrieval Health' },
 ]
 
@@ -220,37 +219,6 @@ function RetrievalHealthCard({ entry }) {
   )
 }
 
-function ScopeCard({ item }) {
-  return (
-    <div className="rounded-lg border border-orange-700/40 bg-orange-950/10 p-4 space-y-2">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-white">{item.title}</p>
-          <p className="text-[10px] text-muted font-mono mt-0.5">{item.path}</p>
-        </div>
-        <Badge cls="bg-orange-500/10 border-orange-500/40 text-orange-400">
-          {item.violations.length} violation{item.violations.length !== 1 ? 's' : ''}
-        </Badge>
-      </div>
-      <div className="space-y-1.5">
-        {item.violations.map((v, i) => (
-          <div key={i} className="rounded bg-ink-800 px-3 py-1.5 space-y-0.5">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-orange-400 font-medium">§ {v.section}</span>
-              {v.belongs_on && (
-                <span className="text-[10px] text-muted">→ belongs on <span className="text-white/70">{v.belongs_on}</span></span>
-              )}
-            </div>
-            {v.excerpt && (
-              <p className="text-[10px] text-white/50 italic truncate">"{v.excerpt}"</p>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 export default function GapIntelligence() {
   const { activeKB } = useAppState()
   const [tab, setTab] = useState('persistent')
@@ -304,7 +272,6 @@ export default function GapIntelligence() {
 
   const openCount       = data?.open_gaps?.length ?? 0
   const persistentCount = data?.persistent_gaps?.length ?? 0
-  const scopeCount      = data?.scope_contamination?.length ?? 0
   const healthCount     = data?.retrieval_health?.length ?? 0
 
   return (
@@ -314,7 +281,7 @@ export default function GapIntelligence() {
         <div>
           <h1 className="text-lg font-semibold text-white">Gap Intelligence</h1>
           <p className="text-xs text-muted mt-0.5">
-            {openCount} open · {persistentCount} persistent · {scopeCount} scope issues · {healthCount} indexed
+            {openCount} open · {persistentCount} persistent · {healthCount} indexed
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -352,8 +319,7 @@ export default function GapIntelligence() {
         {TABS.map(t => {
           const count = t.id === 'persistent' ? persistentCount
                       : t.id === 'open'       ? openCount
-                      : t.id === 'health'     ? healthCount
-                      : scopeCount
+                      : healthCount
           return (
             <button
               key={t.id}
@@ -467,26 +433,6 @@ export default function GapIntelligence() {
               </div>
             )}
 
-            {tab === 'scope' && (
-              <div className="space-y-3 max-w-3xl">
-                {data?.scope_contamination?.length === 0 ? (
-                  <div className="text-center py-16 text-muted text-sm">
-                    <CheckCircleIcon className="w-8 h-8 mx-auto mb-3 opacity-40" />
-                    No scope contamination detected.
-                  </div>
-                ) : (
-                  <>
-                    <p className="text-xs text-muted mb-4">
-                      Wiki pages containing content that belongs on a different page.
-                      Run the defrag pipeline to automatically relocate these sections.
-                    </p>
-                    {data.scope_contamination.map(item => (
-                      <ScopeCard key={item.path} item={item} />
-                    ))}
-                  </>
-                )}
-              </div>
-            )}
           </>
         )}
       </div>

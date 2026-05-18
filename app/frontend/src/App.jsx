@@ -16,6 +16,8 @@ import VivaSession from './pages/VivaSession'
 import Graph from './pages/Graph'
 import Validation from './pages/Validation'
 import ClinicalRules from './pages/ClinicalRules'
+import PipelineDocs from './pages/PipelineDocs'
+import Mopup from './pages/Mopup'
 
 export default function App() {
   return (
@@ -39,6 +41,8 @@ export default function App() {
             <Route path="graph" element={<Graph />} />
             <Route path="validation" element={<Validation />} />
             <Route path="clinical-rules" element={<ClinicalRules />} />
+            <Route path="mopup" element={<Mopup />} />
+            <Route path="docs" element={<PipelineDocs />} />
           </Route>
         </Routes>
       </BrowserRouter>

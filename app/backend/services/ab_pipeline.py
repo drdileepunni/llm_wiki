@@ -32,7 +32,7 @@ from .emr import (
 )
 from .order_gen_pipeline import run_order_generation
 from .scenario_catalog import DIAGNOSIS_GROUPS, ScenarioEntry, sample_scenarios
-from .viva_simulator import simulate_and_write, write_patient_state
+from .viva_simulator import simulate_and_write, write_patient_state, get_result_delay
 from .viva_teacher import generate_first_scenario, generate_next_turn, generate_trajectory
 
 log = logging.getLogger("wiki.ab_pipeline")
@@ -144,6 +144,7 @@ def _run_arm(
             difficulty=scenario.get("difficulty", "MEDIUM"),
             kb=kb,
             grounding_mode=grounding_mode,
+            cpmrn=AB_DUMMY_CPMRN,
         )
         steps = snap.get("immediate_next_steps", [])
 
@@ -284,6 +285,10 @@ def _run_scenario(
         "history": patient_history,
     } if patient_state else {}
 
+    # Time tracking state
+    session_elapsed_minutes: int = 0
+    pending_lab_queue: list[dict] = []
+
     for turn_num in range(1, max_turns + 1):
         log.info("  ─── Turn %d (phase=%s, diff=%s) ───",
                  turn_num,
@@ -330,25 +335,32 @@ def _run_scenario(
                      arm_b.get("markers_resolved_by_medgemma", 0),
                      arm_b.get("elapsed_s", 0))
 
+        # ── Time delta for this turn ─────────────────────────────────────────
+        turn_time_delta: int = current_scenario.get("time_delta_minutes", 60)
+        turn_end_minutes: int = session_elapsed_minutes + turn_time_delta
+
         # Record case ──────────────────────────────────────────────────────────
         case = {
-            "scenario_id":        scenario_id,
-            "turn_num":           turn_num,
-            "phase":              current_scenario.get("phase", ""),
-            "difficulty":         current_scenario.get("difficulty", ""),
-            "topic":              entry.topic_string,
-            "diagnosis":          entry.diagnosis_label,
-            "complication":       entry.complication_label,
-            "question":           display_question,
-            "display_question":   current_scenario.get("question", "") or current_scenario.get("clinical_context", ""),
-            "clinical_context":   current_scenario.get("clinical_context", ""),
-            "simulation_summary": sim_summary,
-            "simulation_raw":     sim_raw,
-            "patient_brief":      brief_text,
-            "phase1_cost_usd":    brief_cost,
-            "reference_orders":   [],
-            "arm_a":              arm_a,
-            "arm_b":              arm_b,
+            "scenario_id":              scenario_id,
+            "turn_num":                 turn_num,
+            "phase":                    current_scenario.get("phase", ""),
+            "difficulty":               current_scenario.get("difficulty", ""),
+            "topic":                    entry.topic_string,
+            "diagnosis":                entry.diagnosis_label,
+            "complication":             entry.complication_label,
+            "question":                 display_question,
+            "display_question":         current_scenario.get("question", "") or current_scenario.get("clinical_context", ""),
+            "clinical_context":         current_scenario.get("clinical_context", ""),
+            "simulation_summary":       sim_summary,
+            "simulation_raw":           sim_raw,
+            "patient_brief":            brief_text,
+            "phase1_cost_usd":          brief_cost,
+            "reference_orders":         [],
+            "arm_a":                    arm_a,
+            "arm_b":                    arm_b,
+            "turn_delta_minutes":       turn_time_delta,
+            "session_elapsed_minutes":  turn_end_minutes,
+            "vital_timeline":           [],   # filled in after simulation below
         }
         cases.append(case)
 
@@ -375,6 +387,28 @@ def _run_scenario(
                     log.warning("    Auto-place order failed (non-fatal): %s", oe)
             log.info("    Auto-placed %d order(s) to AB chart", len(orders_for_sim))
 
+        # Build lab queue context for simulator
+        available_labs = [e["name"] for e in pending_lab_queue if e["available_at_minutes"] <= turn_end_minutes]
+        still_pending  = [e["name"] for e in pending_lab_queue if e["available_at_minutes"] > turn_end_minutes]
+        new_queue_entries: list[dict] = []
+        for o in orders_for_sim:
+            if o.get("order_type") in ("lab", "procedure"):
+                name = o.get("orderable_name", "")
+                if name:
+                    delay = get_result_delay(name)
+                    new_queue_entries.append({
+                        "name": name,
+                        "ordered_at_minutes": turn_end_minutes,
+                        "available_at_minutes": turn_end_minutes + delay,
+                        "ordered_turn": turn_num,
+                    })
+        pending_lab_queue = (
+            [e for e in pending_lab_queue if e["available_at_minutes"] > turn_end_minutes]
+            + new_queue_entries
+        )
+        log.info("    time_delta=%dm  elapsed=%dm  available_labs=%s  pending=%s",
+                 turn_time_delta, turn_end_minutes, available_labs, still_pending)
+
         try:
             sim_result = simulate_and_write(
                 trajectory=trajectory,
@@ -384,15 +418,22 @@ def _run_scenario(
                 turn_num=turn_num,
                 max_turns=max_turns,
                 model=model,
+                time_delta_minutes=turn_time_delta,
+                available_labs=available_labs or None,
+                pending_labs=still_pending or None,
             )
             sim_summary = sim_result.get("summary", "")
             sim_raw     = sim_result.get("raw", {})
             sim_raw["history"] = patient_history   # carry PMH through every turn
+            # Backfill vital_timeline into the case that was already appended
+            cases[-1]["vital_timeline"] = sim_result.get("vital_timeline", [])
             log.info("    Simulator: %s", sim_summary[:100])
         except Exception as e:
             log.warning("    Simulation failed (non-fatal): %s", e)
             sim_summary = ""
             sim_raw     = {}
+
+        session_elapsed_minutes = turn_end_minutes
 
         # Advance teacher ──────────────────────────────────────────────────────
         student_answer_text = _orders_placed_text(orders_for_sim)

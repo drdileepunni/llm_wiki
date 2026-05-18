@@ -31,6 +31,7 @@ from .emr import (
     complete_lab_orders,
     update_vent_flags,
     update_patient_history,
+    place_home_meds_as_active_orders,
 )
 
 log = logging.getLogger("wiki.viva_sim")
@@ -231,6 +232,11 @@ def write_patient_state(state: dict, cpmrn: str) -> str:
         )
         if home_medications:
             summary_parts.append(f"Home meds: {', '.join(home_medications)}")
+            # Place each home med as an active order so the LLM can reference them
+            # by orderNo and properly stop/hold them without re-suggesting each turn.
+            placed = place_home_meds_as_active_orders(home_medications, cpmrn)
+            if placed:
+                summary_parts.append(f"Placed {placed} home med(s) as active orders")
 
     return "\n".join(summary_parts) if summary_parts else "(no state data)"
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -356,12 +357,15 @@ def run_cds_from_brief(
     model: str | None = None,
     grounding_mode: str = "wiki",
     pending_conditionals: list[dict] | None = None,
+    cpmrn: str | None = None,
 ) -> dict:
     """
     Run Phase 2 only: wiki-grounded CDS synthesis from a pre-computed data brief.
     Returns the same snap dict as run_viva_student_turn (minus loop token fields).
 
     Use alongside collect_patient_brief() when multiple arms should share Phase 1.
+    cpmrn — when provided, Step 2 grounding can call get_latest_lab to classify
+            severity tiers (e.g. mild/moderate/severe hyperkalemia) before grounding.
     """
     assembled_question = (
         f"{data_brief}\n\n"
@@ -369,8 +373,8 @@ def run_cds_from_brief(
         f"Question: {question}"
     )
 
-    log.info("run_cds_from_brief: CDS synthesis  grounding_mode=%s  pending_conditionals=%d",
-             grounding_mode, len(pending_conditionals) if pending_conditionals else 0)
+    log.info("run_cds_from_brief: CDS synthesis  grounding_mode=%s  pending_conditionals=%d  cpmrn=%s",
+             grounding_mode, len(pending_conditionals) if pending_conditionals else 0, cpmrn)
     result = run_chat(
         question=assembled_question,
         kb=kb,
@@ -378,20 +382,26 @@ def run_cds_from_brief(
         mode="cds",
         grounding_mode=grounding_mode,
         pending_conditionals=pending_conditionals,
+        cpmrn=cpmrn,
     )
 
-    text_gaps = scan_text_gaps(
-        steps=result.get("immediate_next_steps", []),
-        clinical_context=clinical_context,
-        kb=kb,
-        model=model,
-        source_name=f"ab-cds: {grounding_mode}",
-        force_gap_step_texts=result.get("_step4_failed_texts"),
-    )
+    _steps_for_gaps = result.get("immediate_next_steps", [])
+    def _bg_scan_gaps(_steps=list(_steps_for_gaps), _ctx=clinical_context,
+                      _kb=kb, _model=model, _mode=grounding_mode):
+        try:
+            scan_text_gaps(
+                steps=_steps,
+                clinical_context=_ctx,
+                kb=_kb,
+                model=_model,
+                source_name=f"ab-cds: {_mode}",
+            )
+        except Exception as exc:
+            log.warning("scan_text_gaps async failed: %s", exc)
+
+    threading.Thread(target=_bg_scan_gaps, daemon=True).start()
 
     gap_sections = list(result.get("gap_sections") or [])
-    if text_gaps:
-        gap_sections += [g.split("/")[-1].replace(".md", "") for g in text_gaps]
 
     return {
         "snapshot_num":          1,
@@ -468,6 +478,7 @@ def run_viva_student_turn(
         model=model,
         grounding_mode=grounding_mode,
         pending_conditionals=pending_conditionals,
+        cpmrn=cpmrn,
     )
     snap["snapshot_dir"] = "viva"
     snap["chat_run_id"]  = snap.get("chat_run_id") or chat_run_id

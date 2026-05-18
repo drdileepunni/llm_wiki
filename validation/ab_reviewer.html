@@ -40,7 +40,7 @@
   .btn-primary:hover { background: #7dd3fc; }
 
   /* ── Main layout ── */
-  #main { display: none; height: 100vh; grid-template-columns: 1fr 390px;
+  #main { display: none; height: 100vh; grid-template-columns: 1fr 1fr 1fr;
           grid-template-rows: 46px 1fr; }
   #main.show { display: grid; }
 
@@ -50,6 +50,9 @@
   .tb-id   { font-size: 11px; color: var(--muted); font-family: monospace; }
   .tb-pill { font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 5px;
              background: var(--surface2); color: var(--text); letter-spacing: .04em; }
+  #tb-time { font-size: 13px; font-weight: 900; padding: 4px 14px; border-radius: 6px;
+             border: 1px solid rgba(56,189,248,.4); background: rgba(56,189,248,.1);
+             color: #38bdf8; font-family: monospace; letter-spacing: .06em; }
   .diff-easy   { background: #166534 !important; color: #bbf7d0 !important; }
   .diff-medium { background: #92400e !important; color: #fde68a !important; }
   .diff-hard   { background: #991b1b !important; color: #fecaca !important; }
@@ -132,6 +135,40 @@
                color: var(--text); font-size: 12px; padding: 6px 10px;
                resize: none; height: 44px; font-family: inherit; }
   #notes-inp::placeholder { color: var(--muted); }
+
+  /* ── Middle panel (active + completed orders) ── */
+  #middle-panel { display: flex; flex-direction: column; overflow: hidden;
+                  border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  #active-section   { flex: 1; display: flex; flex-direction: column; overflow: hidden;
+                      border-bottom: 1px solid var(--border); }
+  #completed-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .mid-section-hdr  { padding: 10px 14px 8px; font-size: 10px; font-weight: 800;
+                      text-transform: uppercase; letter-spacing: .09em; color: var(--muted);
+                      border-bottom: 1px solid var(--border); flex-shrink: 0;
+                      display: flex; align-items: center; gap: 6px; }
+  .mid-section-scroll { flex: 1; overflow-y: auto; padding: 8px 12px; }
+  .mid-section-scroll::-webkit-scrollbar { width: 4px; }
+  .mid-section-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .mid-empty { font-size: 12px; color: var(--muted); font-style: italic; padding: 6px 0; }
+  .mid-order-row { display: flex; align-items: flex-start; gap: 7px; padding: 7px 0;
+                   border-bottom: 1px solid var(--border); }
+  .mid-order-row:last-child { border-bottom: none; }
+  .mid-order-name { flex: 1; font-size: 12px; min-width: 0; line-height: 1.35; }
+  .mid-order-detail { font-size: 10px; color: var(--muted); }
+  .instr-tip { position: relative; display: inline-flex; align-items: center; }
+  .instr-tip .instr-icon { font-size: 9px; color: #a78bfa; cursor: default; padding: 1px 3px;
+    border: 1px solid #4c3d8a; border-radius: 3px; background: #1e1a2e; user-select: none; }
+  .instr-tip .instr-bubble { display: none; position: absolute; bottom: calc(100% + 5px); right: 0;
+    width: 220px; background: #1e1e2e; border: 1px solid #4c3d8a; border-radius: 6px;
+    padding: 8px 10px; font-size: 11px; color: #c4b5fd; line-height: 1.5;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 200; white-space: normal; }
+  .instr-tip:hover .instr-bubble { display: block; }
+  .mid-dot-active { color: #4ade80; flex-shrink: 0; margin-top: 3px; font-size: 10px; }
+  .mid-dot-done   { color: var(--muted); flex-shrink: 0; margin-top: 3px; font-size: 10px; }
+  .status-pill { font-size: 8px; font-weight: 800; padding: 2px 5px; border-radius: 3px; white-space: nowrap; }
+  .sp-resulted { background: #14532d; color: #86efac; }
+  .sp-pending  { background: #78350f; color: #fde68a; }
+  .sp-sent     { background: #1e293b; color: #94a3b8; }
 
   /* ── Chart panel ── */
   #chart-panel { background: var(--surface); border-left: 1px solid var(--border);
@@ -283,6 +320,7 @@
     <span id="tb-id" class="tb-id"></span>
     <span id="tb-turn" class="tb-pill"></span>
     <span id="tb-diff" class="tb-pill"></span>
+    <span id="tb-time" style="display:none"></span>
     <div id="progress-area">
       <div id="progress-label"></div>
       <div id="progress-track"><div id="progress-fill"></div></div>
@@ -303,11 +341,30 @@
           <button class="star" data-s="4" onclick="setStar(4)">★</button>
           <button class="star" data-s="5" onclick="setStar(5)">★</button>
         </div>
+        <button id="btn-back" disabled onclick="prevTurn()" style="padding:9px 14px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0">← Back</button>
         <button id="btn-next" disabled onclick="nextTurn()">Next Turn →</button>
       </div>
       <div class="footer-row">
         <textarea id="notes-inp" placeholder="Clinical notes (optional)…"></textarea>
       </div>
+    </div>
+  </div>
+
+  <!-- Middle panel: active + completed orders -->
+  <div id="middle-panel">
+    <div id="active-section">
+      <div class="mid-section-hdr">
+        <span style="color:#4ade80">●</span> Active Orders
+        <span id="active-count" style="font-size:9px;color:var(--muted);font-weight:600;margin-left:auto"></span>
+      </div>
+      <div id="active-scroll" class="mid-section-scroll"></div>
+    </div>
+    <div id="completed-section">
+      <div class="mid-section-hdr">
+        <span style="color:var(--muted)">○</span> Completed / Pending
+        <span id="completed-count" style="font-size:9px;color:var(--muted);font-weight:600;margin-left:auto"></span>
+      </div>
+      <div id="completed-scroll" class="mid-section-scroll"></div>
     </div>
   </div>
 
@@ -319,11 +376,11 @@
       <div id="question-text" style="font-style:italic"></div>
     </div>
     <div id="chart-tabs">
-      <div class="ctab on" data-tab="vitals" onclick="showTab('vitals')">Vitals</div>
-      <div class="ctab" data-tab="hx"     onclick="showTab('hx')">HX</div>
-      <div class="ctab" data-tab="labs"   onclick="showTab('labs')">Labs</div>
-      <div class="ctab" data-tab="notes"  onclick="showTab('notes')">Notes</div>
-      <div class="ctab" data-tab="orders" onclick="showTab('orders')">Active Orders</div>
+      <div class="ctab on" data-tab="vitals"   onclick="showTab('vitals')">Vitals</div>
+      <div class="ctab" data-tab="hx"          onclick="showTab('hx')">HX</div>
+      <div class="ctab" data-tab="labs"        onclick="showTab('labs')">Labs</div>
+      <div class="ctab" data-tab="notes"       onclick="showTab('notes')">Notes</div>
+      <div class="ctab" data-tab="timeline"    onclick="showTab('timeline')">Timeline</div>
     </div>
     <div id="chart-body"></div>
   </div>
@@ -361,7 +418,10 @@ let scenarios = [];       // [{scenario_id, arm_shown, turns:[caseObj,...]}]
 let scIdx = 0, tIdx = 0;
 let activeTab = "vitals";
 let activeStar = 0;
-let activeOrders = [];    // orders "approved" from previous turns in this scenario
+let activeOrders = [];    // recurring/continuous orders carried forward
+let completedOrders = []; // one-shot orders (labs, procedures, once-frequency meds)
+let resultedLabNames = new Set(); // lab names that have received results so far in this scenario
+let turnHistory = [];     // snapshots for back navigation: [{scIdx,tIdx,activeOrders,completedOrders,resultedLabNames}]
 let ratings = {};         // ratings[scIdx][tIdx] = {order_ratings:{}, overall:0, notes:""}
 let curOrderRatings = {}; // reference into ratings[scIdx][tIdx].order_ratings
 let curRunId = null;      // order_gen_run_id for the current arm/turn
@@ -417,7 +477,8 @@ async function startReview() {
 
   document.getElementById("loading-wrap").style.display = "none";
   document.getElementById("main").classList.add("show");
-  scIdx = 0; tIdx = 0; activeOrders = [];
+  scIdx = 0; tIdx = 0; activeOrders = []; completedOrders = []; resultedLabNames = new Set(); turnHistory = [];
+  _seedHomeMeds();
   renderTurn();
 }
 
@@ -451,12 +512,31 @@ function renderTurn() {
   tbd.textContent = c.difficulty || "";
   tbd.className   = "tb-pill" + (diff ? " diff-"+diff : "");
 
-  // Next button label
+  // Time badge
+  const tbTime = document.getElementById("tb-time");
+  if (c.turn_delta_minutes > 0) {
+    const delta = c.turn_delta_minutes >= 60
+      ? `+${Math.round(c.turn_delta_minutes/60)}h`
+      : `+${c.turn_delta_minutes}m`;
+    const elapsed = c.session_elapsed_minutes >= 60
+      ? `T+${Math.round(c.session_elapsed_minutes/60)}h`
+      : `T+${c.session_elapsed_minutes}m`;
+    tbTime.textContent = `${delta}  ${elapsed}`;
+    tbTime.style.display = "";
+  } else {
+    tbTime.style.display = "none";
+  }
+
+  // Next / Back button state
   const isLast = tIdx+1>=sc.turns.length && scIdx+1>=scenarios.length;
   document.getElementById("btn-next").textContent =
     isLast ? (auditMode ? "Done ✓" : "Submit ✓")
            : (tIdx+1>=sc.turns.length ? "Next Scenario →" : "Next Turn →");
   document.getElementById("btn-next").disabled = auditMode ? false : (activeStar === 0);
+  const backBtn = document.getElementById("btn-back");
+  backBtn.disabled = turnHistory.length === 0;
+  backBtn.style.opacity = turnHistory.length ? "1" : "0.35";
+  backBtn.style.cursor  = turnHistory.length ? "pointer" : "default";
 
   // Audit mode: show which arm is visible in topbar
   let armBadge = document.getElementById("tb-arm");
@@ -514,6 +594,101 @@ function renderTurn() {
 
   // Orders
   renderOrders(arm);
+
+  // Middle panel
+  renderMiddlePanels();
+}
+
+// ── Seed home meds into activeOrders at scenario start ────────────────────
+function _seedHomeMeds() {
+  // Pull home meds from the first turn's simulation history (seeded by teacher)
+  const firstTurn = scenarios[scIdx]?.turns[0];
+  const homeMeds = firstTurn?.simulation_raw?.history?.home_medications || [];
+  homeMeds.forEach(medStr => {
+    if (!activeOrders.find(a => a.name.toLowerCase() === medStr.toLowerCase())) {
+      activeOrders.push({
+        name:      medStr,
+        dose:      "",
+        cls:       "bmed",
+        short:     "MED",
+        type:      "med",
+        isHomeMed: true,
+        stopped:   false,
+      });
+    }
+  });
+}
+
+// ── Middle panel rendering ─────────────────────────────────────────────────
+function isOnceFrequency(freq) {
+  if (!freq) return false;
+  const f = freq.toLowerCase().trim();
+  return f === "once" || f === "stat" || f === "one time" || f === "single dose" || f === "prn (once)";
+}
+
+function renderMiddlePanels() {
+  const c = scenarios[scIdx].turns[tIdx];
+
+  // Active panel
+  const activeEl = document.getElementById("active-scroll");
+  document.getElementById("active-count").textContent = activeOrders.length ? `${activeOrders.length}` : "";
+  if (!activeOrders.length) {
+    activeEl.innerHTML = `<p class="mid-empty">No active orders yet.</p>`;
+  } else {
+    activeEl.innerHTML = activeOrders.map(o => {
+      const dot = o.stopped
+        ? `<span style="color:var(--red);flex-shrink:0;margin-top:3px;font-size:10px">✕</span>`
+        : `<span class="mid-dot-active">●</span>`;
+      const nameStyle = o.stopped ? "text-decoration:line-through;color:var(--muted)" : "";
+      const stoppedBadge = o.stopped
+        ? `<span class="status-pill" style="background:#7f1d1d;color:#fecaca">STOPPED</span>` : "";
+      const homeBadge = o.isHomeMed && !o.stopped
+        ? `<span class="status-pill" style="background:#1e3a5f;color:#7dd3fc">HOME MED</span>` : "";
+      return `
+        <div class="mid-order-row" style="${o.stopped ? 'opacity:0.5' : ''}">
+          ${dot}
+          <div style="flex:1;min-width:0">
+            <div class="mid-order-name" style="${nameStyle}">${esc(o.name)}</div>
+            ${o.dose ? `<div class="mid-order-detail">${esc(o.dose)}</div>` : ""}
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0">
+            ${stoppedBadge}${homeBadge}
+            <span class="type-badge ${o.cls}" style="font-size:8px">${esc(o.short)}</span>
+            ${o.instructions ? `<span class="instr-tip"><span class="instr-icon">ⓘ</span><span class="instr-bubble">${esc(o.instructions)}</span></span>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+  }
+
+  // Completed panel
+  const completedEl = document.getElementById("completed-scroll");
+  document.getElementById("completed-count").textContent = completedOrders.length ? `${completedOrders.length}` : "";
+  if (!completedOrders.length) {
+    completedEl.innerHTML = `<p class="mid-empty">No completed orders yet.</p>`;
+  } else {
+    completedEl.innerHTML = completedOrders.map(o => {
+      const isLab = o.type === "lab";
+      const isResulted = isLab && resultedLabNames.has(o.name.toLowerCase());
+      const statusPill = isResulted
+        ? `<span class="status-pill sp-resulted">RESULTED</span>`
+        : isLab
+          ? `<span class="status-pill sp-pending">PENDING</span>`
+          : `<span class="status-pill sp-sent">SENT</span>`;
+      return `
+        <div class="mid-order-row" style="opacity:${isResulted ? 1 : 0.72}">
+          <span class="mid-dot-done">○</span>
+          <div style="flex:1;min-width:0">
+            <div class="mid-order-name">${esc(o.name)}</div>
+            ${o.dose ? `<div class="mid-order-detail">${esc(o.dose)}</div>` : ""}
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0">
+            ${statusPill}
+            <span class="type-badge ${o.cls}" style="font-size:8px">${esc(o.short)}</span>
+            ${o.instructions ? `<span class="instr-tip"><span class="instr-icon">ⓘ</span><span class="instr-bubble">${esc(o.instructions)}</span></span>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+  }
 }
 
 // ── Order type config ───────────────────────────────────────────────────────
@@ -683,8 +858,8 @@ function showTab(tab, caseData) {
     el.innerHTML = renderLabsRaw(raw.labs || []);
   } else if (tab==="notes") {
     el.innerHTML = renderNotes(raw.notes || []);
-  } else if (tab==="orders") {
-    el.innerHTML = renderActiveOrders();
+  } else if (tab==="timeline") {
+    el.innerHTML = renderVitalTimeline(c.vital_timeline || []);
   }
 }
 
@@ -735,6 +910,40 @@ function renderVitals(vitals) {
       <div class="vlbl">${esc(k)}</div>
       <div class="vval">${esc(v)}<span class="vunit">${VITAL_UNITS[k]||""}</span></div>
     </div>`).join("")}</div>`;
+}
+
+function renderVitalTimeline(timeline) {
+  if (!Array.isArray(timeline) || !timeline.length)
+    return `<p class="ntext">No timeline data — start a new session to generate hourly snapshots.</p>`;
+
+  const rows = timeline.map(snap => {
+    const v = snap.vitals || {};
+    const offset = snap.offset_minutes >= 60
+      ? `${Math.round(snap.offset_minutes/60)}h`
+      : `${snap.offset_minutes}m`;
+    return `<tr>
+      <td style="color:var(--muted);font-size:10px;white-space:nowrap">T+${esc(offset)}</td>
+      <td>${esc(v.BP||'—')}</td>
+      <td>${esc(v.HR!=null?String(v.HR):'—')}</td>
+      <td>${esc(v.SpO2!=null?v.SpO2+'%':'—')}</td>
+      <td>${esc(v.RR!=null?String(v.RR):'—')}</td>
+      <td>${esc(v.Temperature!=null?v.Temperature+'°':'—')}</td>
+    </tr>`;
+  }).join('');
+
+  return `<table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
+    <thead>
+      <tr style="color:var(--muted);border-bottom:1px solid var(--border)">
+        <th style="text-align:left;padding:3px 6px 3px 0;font-weight:normal">T+</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:normal">BP</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:normal">HR</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:normal">SpO2</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:normal">RR</th>
+        <th style="text-align:left;padding:3px 6px;font-weight:normal">Temp</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
 function renderLabs(labs) {
@@ -811,33 +1020,89 @@ function renderNotes(notes) {
   }).join("");
 }
 
-// ── Next ───────────────────────────────────────────────────────────────────
+// ── Back / Next ────────────────────────────────────────────────────────────
+function snapshotState() {
+  return {
+    scIdx, tIdx,
+    activeOrders:    activeOrders.map(o => ({...o})),
+    completedOrders: completedOrders.map(o => ({...o})),
+    resultedLabNames: new Set(resultedLabNames),
+  };
+}
+
+function prevTurn() {
+  if (!turnHistory.length) return;
+  const snap = turnHistory.pop();
+  scIdx            = snap.scIdx;
+  tIdx             = snap.tIdx;
+  activeOrders     = snap.activeOrders;
+  completedOrders  = snap.completedOrders;
+  resultedLabNames = snap.resultedLabNames;
+  curOrderRatings  = ratings[scIdx][tIdx].order_ratings;
+  activeStar       = ratings[scIdx][tIdx].overall;
+  renderTurn();
+  document.getElementById("orders-scroll").scrollTop = 0;
+  showTab(activeTab);
+}
+
 function nextTurn() {
+  turnHistory.push(snapshotState());
   ratings[scIdx][tIdx].notes = document.getElementById("notes-inp").value.trim();
 
-  // Carry "approved" orders forward into activeOrders
+  // Carry orders forward — recurring/continuous → activeOrders, one-shot → completedOrders.
   const sc  = scenarios[scIdx];
-  const arm = sc.turns[tIdx][sc.arm_shown] || {};
+  const c   = sc.turns[tIdx];
+  const arm = c[sc.arm_shown] || {};
   const ords = arm.structured_orders || [];
-  const tr   = ratings[scIdx][tIdx].order_ratings;
+  const ONE_TIME = new Set(["lab", "procedure", "blood"]);
 
-  ords.forEach((o, idx) => {
-    if (tr[idx] === "good") {
-      const name = (o.orderable_name||"").toLowerCase();
-      if (!activeOrders.find(a=>a.name.toLowerCase()===name)) {
-        const det = o.order_details||{};
-        let dp=[];
-        if (det.quantity&&det.unit) dp.push(`${det.quantity} ${det.unit}`);
-        if (det.route)    dp.push(det.route);
-        if (det.frequency) dp.push(det.frequency);
+  // Mark labs that have resulted this turn (before advancing)
+  (c.available_labs_this_turn || []).forEach(name => resultedLabNames.add(name.toLowerCase()));
+
+  ords.forEach(o => {
+    const name = (o.orderable_name || "").toLowerCase();
+    if (!name) return;
+    if (o.action === "stop") {
+      // Soft-mark as stopped. Home meds are stored as "Metformin 500mg BD" but the
+      // stop order arrives as "Metformin" from the catalog — use prefix/substring matching.
+      let matched = false;
+      activeOrders = activeOrders.map(a => {
+        const aName = a.name.toLowerCase();
+        const hit = !a.stopped && (aName === name || aName.startsWith(name) || name.startsWith(aName.split(" ")[0]));
+        if (hit) { matched = true; return {...a, stopped: true}; }
+        return a;
+      });
+      // Only add a new stopped entry if nothing matched (truly novel order being stopped)
+      if (!matched) {
         activeOrders.push({
-          name: o.orderable_name||"",
-          dose: dp.join(" · "),
-          cls:  typeBadge(o.order_type),
-          short: typeShort(o.order_type),
+          name: o.orderable_name || "",
+          dose: "", cls: typeBadge(o.order_type), short: typeShort(o.order_type),
+          type: o.order_type || "", isHomeMed: false, stopped: true,
         });
       }
+      return;
     }
+    const det = o.order_details || {};
+    let dp = [];
+    if (det.quantity && det.unit) dp.push(`${det.quantity} ${det.unit}`);
+    if (det.route)     dp.push(det.route);
+    if (det.frequency) dp.push(det.frequency);
+    const orderEntry = {
+      name:         o.orderable_name || "",
+      dose:         dp.join(" · "),
+      cls:          typeBadge(o.order_type),
+      short:        typeShort(o.order_type),
+      type:         o.order_type || "",
+      instructions: det.instructions || "",
+    };
+
+    if (ONE_TIME.has(o.order_type || "") || isOnceFrequency(det.frequency)) {
+      if (!completedOrders.find(a => a.name.toLowerCase() === name))
+        completedOrders.push(orderEntry);
+      return;
+    }
+    if (activeOrders.find(a => a.name.toLowerCase() === name)) return;
+    activeOrders.push(orderEntry);
   });
 
   // Advance
@@ -845,11 +1110,14 @@ function nextTurn() {
   if (tIdx >= sc.turns.length) {
     scIdx++;
     tIdx = 0;
-    activeOrders = [];   // reset between scenarios
+    activeOrders = [];      // reset between scenarios
+    completedOrders = [];
+    resultedLabNames = new Set();
     if (scIdx >= scenarios.length) {
       if (auditMode) { showAuditDone(); return; }
       submitAll(); return;
     }
+    _seedHomeMeds();  // pre-populate new scenario's home meds
   }
 
   curOrderRatings = ratings[scIdx][tIdx].order_ratings;

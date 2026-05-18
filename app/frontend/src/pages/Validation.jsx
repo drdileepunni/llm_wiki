@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getValidationCatalog,
   getValidationResults,
@@ -52,7 +52,7 @@ function ArmCard({ label, stats, color }) {
   )
 }
 
-function ResultRow({ r, onServe, onRefresh }) {
+function ResultRow({ r, onServe, onRefresh, draggable, onDragStart }) {
   const [editing, setEditing]     = useState(false)
   const [labelVal, setLabelVal]   = useState(r.label || '')
   const [saving, setSaving]       = useState(false)
@@ -101,7 +101,11 @@ function ResultRow({ r, onServe, onRefresh }) {
     : ''
 
   return (
-    <div className="bg-ink-800 border border-border rounded px-4 py-3 space-y-1">
+    <div
+      className={`bg-ink-800 border border-border rounded px-4 py-3 space-y-1 ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      draggable={!!draggable}
+      onDragStart={onDragStart}
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
           {/* Label row — click to edit */}
@@ -277,6 +281,241 @@ function DiagnosisSelect({ groups, selected, onChange }) {
             )
           })}
         </div>
+      )}
+    </div>
+  )
+}
+
+const STORAGE_KEY = 'validation_result_groups'
+
+// groups: { id: string, name: string, filenames: string[] }[]
+function useResultGroups() {
+  const [groups, setGroups] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [] } catch { return [] }
+  })
+
+  function persist(updater) {
+    setGroups(prev => {
+      const next = updater(prev)
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
+  const createGroup = useCallback(name => {
+    persist(prev => [...prev, { id: crypto.randomUUID(), name, filenames: [] }])
+  }, [])
+
+  const renameGroup = useCallback((id, name) => {
+    persist(prev => prev.map(g => g.id === id ? { ...g, name } : g))
+  }, [])
+
+  const deleteGroup = useCallback(id => {
+    persist(prev => prev.filter(g => g.id !== id))
+  }, [])
+
+  const moveToGroup = useCallback((filename, groupId) => {
+    persist(prev => prev.map(g => ({
+      ...g,
+      filenames: g.id === groupId
+        ? g.filenames.includes(filename) ? g.filenames : [...g.filenames, filename]
+        : g.filenames.filter(f => f !== filename),
+    })))
+  }, [])
+
+  const removeFromGroup = useCallback((filename, groupId) => {
+    persist(prev => prev.map(g => g.id === groupId
+      ? { ...g, filenames: g.filenames.filter(f => f !== filename) }
+      : g))
+  }, [])
+
+  return { groups, createGroup, renameGroup, deleteGroup, moveToGroup, removeFromGroup }
+}
+
+function DropZone({ onDrop, active, children, className = '' }) {
+  const [over, setOver] = useState(false)
+  return (
+    <div
+      className={`transition-colors rounded ${over && active ? 'ring-1 ring-accent/60 bg-accent/5' : ''} ${className}`}
+      onDragOver={e => { if (active) { e.preventDefault(); setOver(true) } }}
+      onDragLeave={() => setOver(false)}
+      onDrop={e => { e.preventDefault(); setOver(false); onDrop(e) }}
+    >
+      {children}
+    </div>
+  )
+}
+
+function GroupPanel({ group, results, onServe, onRefresh, onRename, onDelete, onDrop, onRemove, draggingFile, makeDragStart }) {
+  const [editing, setEditing] = useState(false)
+  const [nameVal, setNameVal] = useState(group.name)
+  const [collapsed, setCollapsed] = useState(false)
+  const inputRef = useRef(null)
+
+  useEffect(() => { if (editing && inputRef.current) inputRef.current.focus() }, [editing])
+
+  function commitRename() {
+    if (nameVal.trim()) onRename(group.id, nameVal.trim())
+    setEditing(false)
+  }
+
+  const items = results.filter(r => group.filenames.includes(r.filename))
+
+  return (
+    <DropZone active={!!draggingFile} onDrop={() => draggingFile && onDrop(draggingFile, group.id)} className="border border-border rounded-lg overflow-hidden">
+      {/* Group header */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-ink-800">
+        <button type="button" onClick={() => setCollapsed(v => !v)} className="text-muted hover:text-white transition-colors">
+          <ChevronDownIcon className={`w-3.5 h-3.5 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+        </button>
+
+        {editing ? (
+          <input
+            ref={inputRef}
+            value={nameVal}
+            onChange={e => setNameVal(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setNameVal(group.name); setEditing(false) } }}
+            onBlur={commitRename}
+            className="flex-1 bg-ink-700 border border-accent/40 rounded px-2 py-0.5 text-sm text-white focus:outline-none"
+          />
+        ) : (
+          <button type="button" onClick={() => setEditing(true)} className="flex-1 text-left text-sm font-semibold text-white hover:text-accent transition-colors truncate">
+            {group.name}
+          </button>
+        )}
+
+        <span className="text-xs text-muted flex-shrink-0">{items.length}</span>
+        <button
+          type="button"
+          onClick={() => { if (window.confirm(`Delete group "${group.name}"? Results will become ungrouped.`)) onDelete(group.id) }}
+          className="text-muted/40 hover:text-red-400 transition-colors text-xs flex-shrink-0"
+          title="Delete group"
+        >✕</button>
+      </div>
+
+      {/* Group body */}
+      {!collapsed && (
+        <div className="p-2 space-y-2 min-h-[40px]">
+          {items.length === 0 ? (
+            <p className="text-xs text-muted/50 text-center py-2">Drop results here</p>
+          ) : (
+            items.map(r => (
+              <div key={r.filename} className="relative group/row">
+                <ResultRow r={r} onServe={onServe} onRefresh={onRefresh} draggable
+                  onDragStart={makeDragStart(r.filename)}
+                />
+                <button
+                  type="button"
+                  onClick={() => onRemove(r.filename, group.id)}
+                  className="absolute -right-1 -top-1 hidden group-hover/row:flex w-4 h-4 items-center justify-center bg-ink-700 border border-border rounded-full text-[9px] text-muted hover:text-white z-10"
+                  title="Remove from group"
+                >✕</button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </DropZone>
+  )
+}
+
+function GroupedResults({ results, onServe, onRefresh }) {
+  const { groups, createGroup, renameGroup, deleteGroup, moveToGroup, removeFromGroup } = useResultGroups()
+  const [draggingFile, setDraggingFile] = useState(null)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [creatingGroup, setCreatingGroup] = useState(false)
+  const newGroupRef = useRef(null)
+
+  useEffect(() => { if (creatingGroup && newGroupRef.current) newGroupRef.current.focus() }, [creatingGroup])
+
+  const groupedFilenames = new Set(groups.flatMap(g => g.filenames))
+  const ungrouped = results.filter(r => !groupedFilenames.has(r.filename))
+
+  function handleCreateGroup() {
+    const name = newGroupName.trim()
+    if (!name) return
+    createGroup(name)
+    setNewGroupName('')
+    setCreatingGroup(false)
+  }
+
+  function makeDragStart(filename) {
+    return e => {
+      e.dataTransfer.setData('text/plain', filename)
+      e.dataTransfer.effectAllowed = 'move'
+      setDraggingFile(filename)
+    }
+  }
+
+  return (
+    <div className="space-y-3" onDragEnd={() => setDraggingFile(null)}>
+      {/* Named groups */}
+      {groups.map(g => (
+        <GroupPanel
+          key={g.id}
+          group={g}
+          results={results}
+          onServe={onServe}
+          onRefresh={onRefresh}
+          makeDragStart={makeDragStart}
+          onRename={renameGroup}
+          onDelete={deleteGroup}
+          onDrop={moveToGroup}
+          onRemove={removeFromGroup}
+          draggingFile={draggingFile}
+        />
+      ))}
+
+      {/* Create group row */}
+      <div className="flex items-center gap-2">
+        {creatingGroup ? (
+          <>
+            <input
+              ref={newGroupRef}
+              value={newGroupName}
+              onChange={e => setNewGroupName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreateGroup(); if (e.key === 'Escape') { setCreatingGroup(false); setNewGroupName('') } }}
+              placeholder="Group name…"
+              className="flex-1 bg-ink-800 border border-accent/40 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent"
+            />
+            <button onClick={handleCreateGroup} className="text-xs text-accent font-mono hover:text-white px-2">Create</button>
+            <button onClick={() => { setCreatingGroup(false); setNewGroupName('') }} className="text-xs text-muted hover:text-white font-mono px-1">✕</button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCreatingGroup(true)}
+            className="text-xs text-muted hover:text-accent transition-colors font-mono"
+          >
+            + New group
+          </button>
+        )}
+      </div>
+
+      {/* Ungrouped */}
+      {ungrouped.length > 0 && (
+        <DropZone
+          active={!!draggingFile}
+          onDrop={() => draggingFile && groups.length > 0 && null}
+          className="border border-border/50 rounded-lg overflow-hidden"
+        >
+          <div className="px-3 py-2 bg-ink-800/50 flex items-center justify-between">
+            <span className="text-xs text-muted font-semibold uppercase tracking-wider">Ungrouped</span>
+            <span className="text-xs text-muted">{ungrouped.length}</span>
+          </div>
+          <div className="p-2 space-y-2">
+            {ungrouped.map(r => (
+              <ResultRow
+                key={r.filename}
+                r={r}
+                onServe={onServe}
+                onRefresh={onRefresh}
+                draggable
+                onDragStart={makeDragStart(r.filename)}
+              />
+            ))}
+          </div>
+        </DropZone>
       )}
     </div>
   )
@@ -637,16 +876,7 @@ export default function Validation() {
           {results.length === 0 ? (
             <p className="text-sm text-muted">No result files found yet.</p>
           ) : (
-            <div className="space-y-2">
-              {results.map(r => (
-                <ResultRow
-                  key={r.filename}
-                  r={r}
-                  onServe={handleServe}
-                  onRefresh={fetchResults}
-                />
-              ))}
-            </div>
+            <GroupedResults results={results} onServe={handleServe} onRefresh={fetchResults} />
           )}
 
           <p className="text-xs text-muted">Results list refreshes every 10 s.</p>

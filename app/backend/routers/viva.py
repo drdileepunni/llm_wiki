@@ -88,7 +88,8 @@ def _dedup_orders(raw_orders: list[dict]) -> list[dict]:
 
 
 def _flatten_active_orders(active_orders: dict | None) -> list[dict]:
-    """Convert MongoDB active_orders dict into a flat list for the simulator."""
+    """Convert MongoDB active_orders dict into a flat list for the simulator.
+    Stopped/held orders are excluded — they represent decisions already made."""
     if not active_orders:
         return []
     result = []
@@ -97,6 +98,8 @@ def _flatten_active_orders(active_orders: dict | None) -> list[dict]:
         ("vents", "vents"), ("diets", "diet"), ("bloods", "blood"),
     ]:
         for item in active_orders.get(cat_key, []):
+            if item.get("orderStatus") in ("stopped", "held"):
+                continue
             result.append({
                 "order_type": type_label,
                 "orderable_name": (
@@ -108,6 +111,7 @@ def _flatten_active_orders(active_orders: dict | None) -> list[dict]:
                 },
                 "notes": item.get("notes", ""),
                 "confidence": "high",
+                "is_home_med": bool(item.get("isHomeMed")),
             })
     return result
 

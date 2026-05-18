@@ -15,6 +15,21 @@ def _find_patient(cpmrn: str) -> dict | None:
     return db.patients.find_one({"CPMRN": cpmrn})
 
 
+def _active_home_meds(p: dict) -> list[str]:
+    """Return home_medications minus any that have been stopped as active orders.
+    Prevents the LLM from re-suggesting stopping a med it already stopped last turn."""
+    all_home_meds: list[str] = p.get("home_medications", [])
+    active_meds = (p.get("orders") or {}).get("active", {}).get("medications", [])
+    stopped_names = {
+        (m.get("name") or "").lower()
+        for m in active_meds
+        if m.get("isHomeMed") and m.get("orderStatus") == "stopped"
+    }
+    if not stopped_names:
+        return all_home_meds
+    return [m for m in all_home_meds if m.lower() not in stopped_names]
+
+
 def get_patient_demographics(cpmrn: str) -> dict[str, Any]:
     """
     Return core demographics needed for order calculations:
@@ -44,7 +59,7 @@ def get_patient_demographics(cpmrn: str) -> dict[str, Any]:
         "bloodGroup": p.get("bloodGroup"),
         "allergies": p.get("allergies", []),
         "chronic": p.get("chronic", []),
-        "home_medications": p.get("home_medications", []),
+        "home_medications": _active_home_meds(p),
         "hospitalName": p.get("hospitalName"),
         "unitName": p.get("unitName"),
         "bedNo": p.get("bedNo"),
@@ -184,8 +199,11 @@ def get_active_orders(cpmrn: str) -> dict[str, Any]:
 
     active = (p.get("orders") or {}).get("active") or {}
 
+    def _is_active(item: dict) -> bool:
+        return item.get("orderStatus") not in ("stopped", "held")
+
     def _slim_med(m: dict) -> dict:
-        return {
+        d = {
             "name": m.get("name"),
             "quantity": m.get("quantity"),
             "unit": m.get("unit"),
@@ -195,6 +213,9 @@ def get_active_orders(cpmrn: str) -> dict[str, Any]:
             "orderNo": m.get("orderNo"),
             "startTime": m.get("startTime"),
         }
+        if m.get("isHomeMed"):
+            d["isHomeMed"] = True
+        return d
 
     def _slim_lab(l: dict) -> dict:
         return {
@@ -215,12 +236,12 @@ def get_active_orders(cpmrn: str) -> dict[str, Any]:
     return {
         "cpmrn": cpmrn,
         "active_orders": {
-            "medications": [_slim_med(m) for m in active.get("medications", [])],
-            "labs": [_slim_lab(l) for l in active.get("labs", [])],
-            "procedures": [_slim_procedure(pr) for pr in active.get("procedures", [])],
-            "diets": active.get("diets", []),
-            "vents": active.get("vents", []),
-            "bloods": active.get("bloods", []),
+            "medications": [_slim_med(m) for m in active.get("medications", []) if _is_active(m)],
+            "labs": [_slim_lab(l) for l in active.get("labs", []) if _is_active(l)],
+            "procedures": [_slim_procedure(pr) for pr in active.get("procedures", []) if _is_active(pr)],
+            "diets": [d for d in active.get("diets", []) if _is_active(d)],
+            "vents": [v for v in active.get("vents", []) if _is_active(v)],
+            "bloods": [b for b in active.get("bloods", []) if _is_active(b)],
         },
     }
 
@@ -350,8 +371,36 @@ def place_viva_order(order: dict, cpmrn: str = VIVA_DUMMY_CPMRN) -> dict:
                 for m in active["medications"]
             ]
             order_no = existing_no  # keep same number for edits
-        elif action == "stop" and existing_no:
-            active["medications"] = [m for m in active["medications"] if m.get("orderNo") != existing_no]
+        elif action == "stop":
+            # Soft-delete: mark stopped rather than remove — preserves audit trail and
+            # lets the UI show "STOPPED" while preventing the LLM from seeing it as active.
+            # Match by orderNo if provided; fall back to name match (covers home meds without an orderNo reference).
+            matched = False
+            if existing_no:
+                active["medications"] = [
+                    {**m, "orderStatus": "stopped"} if m.get("orderNo") == existing_no else m
+                    for m in active["medications"]
+                ]
+                matched = any(m.get("orderNo") == existing_no for m in active["medications"])
+            if not matched:
+                # Name-based fallback: stop first active med whose name matches.
+                # Home meds are stored as "Metformin 500mg BD" but the catalog name
+                # arriving here may be just "Metformin" — use prefix matching.
+                target_name = (med_doc["name"] or "").lower()
+                updated = []
+                for m in active["medications"]:
+                    stored = (m.get("name") or "").lower()
+                    name_hit = (
+                        stored == target_name
+                        or stored.startswith(target_name)
+                        or target_name.startswith(stored.split(" ")[0] if stored else "")
+                    )
+                    if m.get("orderStatus") != "stopped" and name_hit:
+                        updated.append({**m, "orderStatus": "stopped"})
+                        matched = True
+                    else:
+                        updated.append(m)
+                active["medications"] = updated
 
     elif order_type == "lab":
         lab_doc = {
@@ -362,8 +411,14 @@ def place_viva_order(order: dict, cpmrn: str = VIVA_DUMMY_CPMRN) -> dict:
         }
         if action == "new":
             active["labs"].append(lab_doc)
-        elif action == "stop" and existing_no:
-            active["labs"] = [l for l in active["labs"] if l.get("orderNo") != existing_no]
+        elif action == "stop":
+            active["labs"] = [
+                {**l, "orderStatus": "stopped"} if (
+                    (existing_no and l.get("orderNo") == existing_no) or
+                    (not existing_no and l.get("investigation", "").lower() == lab_doc["investigation"].lower())
+                ) else l
+                for l in active["labs"]
+            ]
 
     elif order_type in ("procedure", "comm", "monitoring"):
         proc_doc = {
@@ -375,8 +430,14 @@ def place_viva_order(order: dict, cpmrn: str = VIVA_DUMMY_CPMRN) -> dict:
         }
         if action == "new":
             active["procedures"].append(proc_doc)
-        elif action == "stop" and existing_no:
-            active["procedures"] = [pr for pr in active["procedures"] if pr.get("orderNo") != existing_no]
+        elif action == "stop":
+            active["procedures"] = [
+                {**pr, "orderStatus": "stopped"} if (
+                    (existing_no and pr.get("orderNo") == existing_no) or
+                    (not existing_no and pr.get("name", "").lower() == proc_doc["name"].lower())
+                ) else pr
+                for pr in active["procedures"]
+            ]
 
     elif order_type == "vents":
         vent_doc = {
@@ -387,11 +448,53 @@ def place_viva_order(order: dict, cpmrn: str = VIVA_DUMMY_CPMRN) -> dict:
         }
         if action == "new":
             active["vents"].append(vent_doc)
-        elif action == "stop" and existing_no:
-            active["vents"] = [v for v in active["vents"] if v.get("orderNo") != existing_no]
+        elif action == "stop":
+            active["vents"] = [
+                {**v, "orderStatus": "stopped"} if (
+                    (existing_no and v.get("orderNo") == existing_no) or
+                    (not existing_no and v.get("name", "").lower() == vent_doc["name"].lower())
+                ) else v
+                for v in active["vents"]
+            ]
 
     db.patients.update_one({"CPMRN": cpmrn}, {"$set": {"orders.active": active}})
     return {"order_no": order_no, "action": action, "placed": True}
+
+
+def place_home_meds_as_active_orders(home_meds: list[str], cpmrn: str = VIVA_DUMMY_CPMRN) -> int:
+    """
+    Place each home medication as an active order with isHomeMed=True.
+    Called once at viva session start so the LLM can reference them by orderNo
+    and properly stop/hold them. Returns count of orders placed.
+    """
+    if not home_meds:
+        return 0
+    db = get_db()
+    p = db.patients.find_one({"CPMRN": cpmrn})
+    if not p:
+        return 0
+
+    active = dict((p.get("orders") or {}).get("active") or _empty_active_orders())
+    active.setdefault("medications", [])
+    # Remove previous home-med orders before re-placing (idempotent on restart)
+    active["medications"] = [m for m in active["medications"] if not m.get("isHomeMed")]
+
+    for med_str in home_meds:
+        active["medications"].append({
+            "name": med_str,
+            "quantity": "",
+            "unit": "",
+            "route": "",
+            "form": "",
+            "frequency": "",
+            "instructions": "",
+            "orderNo": f"ORD{uuid.uuid4().hex[:6].upper()}",
+            "startTime": datetime.utcnow().isoformat(),
+            "isHomeMed": True,
+        })
+
+    db.patients.update_one({"CPMRN": cpmrn}, {"$set": {"orders.active": active}})
+    return len(home_meds)
 
 
 def reset_dummy_patient_orders() -> None:

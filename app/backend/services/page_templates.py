@@ -11,11 +11,21 @@ TEMPLATES: dict[str, list[str]] = {
         "Mechanism of Action",
         "Indications",
         "Dosing",
-        "Renal / Hepatic Dose Adjustment",
+        "Renal Dose Adjustment",
+        "Hepatic Dose Adjustment",
+        "Pediatric Dosing",
+        "Drug Interactions",
         "Monitoring Parameters",
         "Adverse Effects",
         "Contraindications",
-        "Drug Interactions",
+        "ICU Considerations",
+    ],
+    "parameter": [
+        "Definition",
+        "Normal Ranges",
+        "Clinical Significance",
+        "Measurement",
+        "ICU Considerations",
     ],
     "investigation": [
         "Reference Range",
@@ -32,14 +42,10 @@ TEMPLATES: dict[str, list[str]] = {
         "Post-procedure Monitoring",
     ],
     "condition": [
-        "Definition and Diagnostic Criteria",
-        "Aetiology",
-        "Clinical Features",
-        "Investigations",
+        "Pathophysiology",
+        "Diagnosis",
         "Management",
-        "Monitoring",
-        "Complications",
-        "Prognosis",
+        "ICU Considerations",
     ],
     "default": [
         "Definition",
@@ -49,11 +55,12 @@ TEMPLATES: dict[str, list[str]] = {
     ],
 }
 
-SUBTYPE_ENUM = ["medication", "investigation", "procedure", "condition", "default"]
+SUBTYPE_ENUM = ["medication", "parameter", "investigation", "procedure", "condition", "default"]
 
 SUBTYPE_DESCRIPTION = (
     "Page structural type. "
     "medication = drugs, biologics, infusions; "
+    "parameter = ventilator/haemodynamic/lab parameters (PEEP, SpO2, MAP, eGFR, PaCO2); "
     "investigation = labs, imaging, ECG, cultures; "
     "procedure = bedside procedures, interventions; "
     "condition = clinical syndromes, diseases, physiological states; "

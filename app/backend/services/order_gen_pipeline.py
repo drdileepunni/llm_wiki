@@ -132,6 +132,19 @@ For each recommendation:
 5. Map the recommendation to an order with specific quantity, unit, route, frequency
 6. For ventilator orders: put mode/TV/RR/PEEP/FiO2 into the instructions field
 
+CKD / RENAL DOSING RULE (mandatory — apply before finalising any medication order):
+- After get_patient_demographics, check chronic/diagnoses for CKD or chronic kidney disease.
+- If CKD is present: call get_latest_lab for creatinine (or eGFR) before finalising any medication.
+- If the lab returns no result / empty: impute a conservative CrCl using the stage lower bound —
+    Stage 1 → 90 mL/min | Stage 2 → 60 | Stage 3 (unspecified or 3b) → 30 | Stage 3a → 45 | Stage 4 → 15 | Stage 5 → 10
+- Use this imputed CrCl for dose selection for ALL renally-cleared drugs (DOACs, antibiotics, contrast, etc.).
+- For every medication whose dose was adjusted for renal function:
+    • dose_calculation must include: "CKD Stage X — no Cr in chart, using CrCl Y mL/min (provisional)"
+    • notes must include: "Provisional dose — recalculate once RFT result available"
+    • set confidence to "medium" (imputed, not measured)
+- Also add a STAT lab order: Renal Function Test (creatinine + eGFR).
+- Never assume normal renal function when CKD is in the PMH and no creatinine is in the chart.
+
 ACTIVE ORDERS COMPARISON:
 - If active_orders are provided, compare every recommendation against them before generating
 - If the same drug/item is already active: set action="edit", existing_order_no=<the orderNo>, \
@@ -551,6 +564,86 @@ def _resolve_dosing_weight(
     return None, "No weight or height in EMR; wiki has no default weight yet (knowledge gap registered)", gap_registered
 
 
+# ── Renal function helpers ─────────────────────────────────────────────────────
+# Lower bound of each CKD stage (mL/min) — used as a conservative imputed CrCl
+# when no creatinine is recorded in the chart.
+_CKD_STAGE_CRCL: dict[str, int] = {
+    "1": 90, "2": 60, "3": 30, "3a": 45, "3b": 30, "4": 15, "5": 10,
+}
+
+
+def _detect_ckd_stage(diagnoses: list) -> str | None:
+    """Return CKD stage string ('1','2','3','3a','3b','4','5') from a diagnoses list, or None."""
+    for d in diagnoses:
+        m = re.search(r'\bCKD\b.*?stage\s*([1-5][ab]?)', str(d), re.IGNORECASE)
+        if not m:
+            m = re.search(r'\bstage\s*([1-5][ab]?)\b.*\bCKD\b', str(d), re.IGNORECASE)
+        if not m:
+            m = re.search(r'\bchronic kidney disease\b.*?stage\s*([1-5][ab]?)', str(d), re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+        if re.search(r'\bCKD\b|\bchronic kidney disease\b', str(d), re.IGNORECASE):
+            return "3"  # unspecified CKD → assume Stage 3 (conservative)
+    return None
+
+
+def _resolve_renal_context(
+    messages: list[dict],
+) -> tuple[str | None, int | None, bool]:
+    """
+    Scan Phase 1 tool results to determine whether renal function context is needed.
+
+    Returns (ckd_stage, conservative_crcl_ml_min, needs_rft) where:
+      - ckd_stage       — e.g. "3", "3b", or None
+      - conservative_crcl — lower bound of that stage in mL/min, or None
+      - needs_rft       — True if CKD found in PMH but no creatinine measured in chart
+    """
+    demo_diagnoses: list = []
+    creatinine_in_chart = False
+
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") != "tool_result":
+                continue
+            try:
+                result = json.loads(block.get("content", "{}"))
+            except Exception:
+                continue
+
+            name = block.get("name", "")
+            if name == "get_patient_demographics":
+                chronic = result.get("chronic") or result.get("diagnoses") or []
+                if isinstance(chronic, list):
+                    demo_diagnoses.extend(chronic)
+                elif chronic:
+                    demo_diagnoses.append(str(chronic))
+
+            elif name == "get_latest_lab":
+                if result and not result.get("error") and "No result" not in str(result.get("message", "")):
+                    # Presence of any creatinine / renal key with a value counts
+                    for k in result:
+                        if any(x in k.lower() for x in ("creatinine", "egfr", "gfr", "rft", "bun", "urea", "cr")):
+                            creatinine_in_chart = True
+
+    if not demo_diagnoses:
+        return None, None, False
+
+    stage = _detect_ckd_stage(demo_diagnoses)
+    if not stage:
+        return None, None, False
+
+    if creatinine_in_chart:
+        return stage, None, False  # real Cr in chart — LLM can calculate CrCl directly
+
+    crcl = _CKD_STAGE_CRCL.get(stage, _CKD_STAGE_CRCL.get(stage[0], 30))
+    return stage, crcl, True
+
+
 def run_order_generation(
     recommendations: list[str],
     cpmrn: str | None = None,
@@ -808,6 +901,23 @@ def run_order_generation(
                     f"For weight-based orders, set confidence to low."
                 })
             break
+
+    # ── Renal function context (trace only) ───────────────────────────────────
+    # The CKD dosing rule in _SYSTEM already instructs Phase 1 LLM to handle this.
+    # We scan Phase 1 results here purely to record what happened in the trace
+    # (surfaced in the Why modal).
+    ckd_stage, conservative_crcl, needs_rft = _resolve_renal_context(messages)
+    if needs_rft and conservative_crcl is not None:
+        stage_label = f"Stage {ckd_stage.upper()}" if ckd_stage else "unspecified"
+        log.info(
+            "Renal trace: CKD %s in PMH, no Cr in chart — CrCl %d mL/min imputed by Phase 1.",
+            stage_label, conservative_crcl,
+        )
+        trace.setdefault("renal_context", {}).update({
+            "ckd_stage": ckd_stage,
+            "conservative_crcl_ml_min": conservative_crcl,
+            "needs_rft": True,
+        })
 
     # ── Phase 2: force submit_orders ──────────────────────────────────────────
     # Build explicit catalog reminder so the model doesn't forget orderable names

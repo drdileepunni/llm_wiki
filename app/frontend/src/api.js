@@ -886,3 +886,56 @@ export async function deleteClinicalRule(ruleId, kbName) {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+
+// ── Mopup ─────────────────────────────────────────────────────────────────────
+
+export async function getMopupQueue(kbName, { scoreThreshold, wordThreshold, maxStubs } = {}) {
+  const params = new URLSearchParams()
+  if (scoreThreshold !== undefined) params.set('score_threshold', scoreThreshold)
+  if (wordThreshold  !== undefined) params.set('word_threshold',  wordThreshold)
+  if (maxStubs       !== undefined) params.set('max_stubs',       maxStubs)
+  const res = await fetch(`${BASE}/mopup/queue?${params}`, { headers: kbHeaders(kbName) })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function startMopup(kbName, { scoreThreshold, wordThreshold, maxStubs, runDefrag } = {}) {
+  const res = await fetch(`${BASE}/mopup/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({
+      score_threshold: scoreThreshold,
+      word_threshold:  wordThreshold,
+      max_stubs:       maxStubs,
+      run_defrag:      runDefrag,
+    }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getMopupJobStatus(jobId, kbName) {
+  const res = await fetch(`${BASE}/mopup/jobs/${jobId}`, { headers: kbHeaders(kbName) })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function setPageSubtype(kbName, page, subtype) {
+  const res = await fetch(`${BASE}/mopup/page/subtype`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ page, subtype }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function inferPageSubtype(kbName, page) {
+  const res = await fetch(`${BASE}/mopup/page/infer-subtype`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...kbHeaders(kbName) },
+    body: JSON.stringify({ page, subtype: '' }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
