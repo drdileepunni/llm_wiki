@@ -18,4 +18,9 @@ dependencies = [
     "stagehand>=3.0.0",
     "playwright>=1.40.0",
     "pymongo>=4.6.0",
+    "pandas>=3.0.3",
+    "faiss-cpu>=1.13.2",
+    "tiktoken>=0.13.0",
+    "google-generativeai>=0.8.6",
+    "google-auth>=2.49.1",
 ]

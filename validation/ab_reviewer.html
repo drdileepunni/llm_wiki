@@ -276,8 +276,17 @@
     <h2>CDS Order Reviewer</h2>
     <p>Review AI-generated clinical orders for ICU scenarios. Rate each order
        and give an overall quality score per turn.</p>
+
+    <!-- Resume banner — shown if a draft exists -->
+    <div id="resume-banner" style="display:none;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.25);border-radius:10px;padding:12px 14px;margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#38bdf8;margin-bottom:4px">⟳ Session in progress</div>
+      <div id="resume-info" style="font-size:12px;color:var(--muted);margin-bottom:10px"></div>
+      <button class="btn-primary" style="margin-top:0;background:#38bdf8" onclick="resumeDraft()">Resume where I left off →</button>
+      <button onclick="clearDraftAndHideBanner()" style="display:block;margin-top:8px;background:none;border:none;font-size:11px;color:var(--muted);cursor:pointer;text-align:left;padding:0">Discard saved session and start fresh</button>
+    </div>
+
     <label>Your name</label>
-    <input type="text" id="inp-name" placeholder="e.g. Dr. Priya"/>
+    <input type="text" id="inp-name" placeholder="e.g. Dr. Priya" oninput="checkDraftForName()"/>
     <label>Role</label>
     <select id="inp-role">
       <option value="">— select —</option>
@@ -325,6 +334,14 @@
       <div id="progress-label"></div>
       <div id="progress-track"><div id="progress-fill"></div></div>
     </div>
+    <button id="btn-save-exit" onclick="saveAndExit()"
+      style="flex-shrink:0;padding:5px 12px;background:transparent;color:var(--muted);
+             border:1px solid var(--border);border-radius:6px;font-size:11px;font-weight:700;
+             cursor:pointer;white-space:nowrap;transition:all .1s"
+      onmouseover="this.style.borderColor='#38bdf8';this.style.color='#38bdf8'"
+      onmouseout="this.style.borderColor='';this.style.color=''">
+      Save &amp; Exit
+    </button>
   </div>
 
   <!-- Orders panel -->
@@ -409,6 +426,16 @@
   </div>
 </div>
 
+<!-- Saved / paused screen -->
+<div id="saved-screen" style="display:none;height:100vh;align-items:center;justify-content:center">
+  <div class="done-card">
+    <div class="done-icon">💾</div>
+    <h2>Progress Saved</h2>
+    <p id="saved-msg" style="color:var(--muted);line-height:1.6;margin-bottom:20px"></p>
+    <button class="btn-primary" style="margin-top:0" onclick="location.reload()">Back to Reviewer</button>
+  </div>
+</div>
+
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let reviewerName = "", reviewerRole = "";
@@ -426,6 +453,139 @@ let ratings = {};         // ratings[scIdx][tIdx] = {order_ratings:{}, overall:0
 let curOrderRatings = {}; // reference into ratings[scIdx][tIdx].order_ratings
 let curRunId = null;      // order_gen_run_id for the current arm/turn
 let _traceCache = {};     // keyed by run_id — avoids duplicate fetches
+
+// ── Draft save / restore ───────────────────────────────────────────────────
+const DRAFT_KEY = 'ab_review_draft';
+
+function saveDraft() {
+  try {
+    const draft = {
+      reviewerName, reviewerRole, auditMode, auditArm,
+      scenarioIds: scenarios.map(s => s.scenario_id),
+      armAssignments: scenarios.map(s => s.arm_shown),
+      scIdx, tIdx,
+      ratings,
+      activeOrders,
+      completedOrders,
+      resultedLabNames: [...resultedLabNames],
+      turnHistory: turnHistory.map(s => ({
+        ...s, resultedLabNames: [...s.resultedLabNames],
+      })),
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch(e) { console.warn('Draft save failed', e); }
+}
+
+function clearDraft() { localStorage.removeItem(DRAFT_KEY); }
+
+function loadDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch { return null; }
+}
+
+function clearDraftAndHideBanner() {
+  clearDraft();
+  document.getElementById('resume-banner').style.display = 'none';
+}
+
+// On page load: show resume banner if draft exists
+(function checkDraftOnLoad() {
+  const draft = loadDraft();
+  if (!draft) return;
+  const banner = document.getElementById('resume-banner');
+  const info   = document.getElementById('resume-info');
+  const total  = draft.scenarioIds ? draft.scenarioIds.length : '?';
+  const saved  = draft.savedAt ? new Date(draft.savedAt).toLocaleString() : '';
+  info.textContent = `${draft.reviewerName} · Scenario ${draft.scIdx + 1} / ${total}  (saved ${saved})`;
+  // Pre-fill name/role
+  document.getElementById('inp-name').value = draft.reviewerName || '';
+  const roleEl = document.getElementById('inp-role');
+  if (draft.reviewerRole) roleEl.value = draft.reviewerRole;
+  banner.style.display = 'block';
+})();
+
+// Update banner visibility when name is typed (only show for matching reviewer)
+function checkDraftForName() {
+  const draft = loadDraft();
+  if (!draft) return;
+  const typed = document.getElementById('inp-name').value.trim().toLowerCase();
+  const banner = document.getElementById('resume-banner');
+  banner.style.display = (!typed || typed === draft.reviewerName.toLowerCase()) ? 'block' : 'none';
+}
+
+// Resume from saved draft
+async function resumeDraft() {
+  const draft = loadDraft();
+  if (!draft) return;
+  reviewerName = draft.reviewerName;
+  reviewerRole = draft.reviewerRole;
+  auditMode    = draft.auditMode || false;
+  auditArm     = draft.auditArm  || '';
+
+  document.getElementById('login-wrap').style.display = 'none';
+  document.getElementById('loading-wrap').style.display = 'flex';
+
+  let allCases;
+  try {
+    const data = await fetch('/ab_data').then(r => r.json());
+    allCases = data.cases || [];
+  } catch(e) {
+    alert('Could not load cases. Make sure serve_ab.py is running.');
+    document.getElementById('login-wrap').style.display = 'flex';
+    document.getElementById('loading-wrap').style.display = 'none';
+    return;
+  }
+
+  // Rebuild scenarios in same order with saved arm assignments
+  const byId = {}, idOrder = [];
+  for (const c of allCases) {
+    if (!byId[c.scenario_id]) { byId[c.scenario_id] = []; idOrder.push(c.scenario_id); }
+    byId[c.scenario_id].push(c);
+  }
+  scenarios = idOrder.map((sid, i) => ({
+    scenario_id: sid,
+    arm_shown:   draft.armAssignments[i] || 'arm_a',
+    turns:       byId[sid].sort((a,b) => a.turn_num - b.turn_num),
+  }));
+
+  // Restore ratings (must re-init any missing slots)
+  ratings = draft.ratings || {};
+  scenarios.forEach((sc, si) => {
+    if (!ratings[si]) ratings[si] = {};
+    sc.turns.forEach((_, ti) => {
+      if (!ratings[si][ti]) ratings[si][ti] = { order_ratings:{}, overall:0, notes:'' };
+    });
+  });
+
+  // Restore position and order state
+  scIdx            = draft.scIdx || 0;
+  tIdx             = draft.tIdx  || 0;
+  activeOrders     = draft.activeOrders     || [];
+  completedOrders  = draft.completedOrders  || [];
+  resultedLabNames = new Set(draft.resultedLabNames || []);
+  turnHistory      = (draft.turnHistory || []).map(s => ({
+    ...s, resultedLabNames: new Set(s.resultedLabNames || []),
+  }));
+
+  document.getElementById('loading-wrap').style.display = 'none';
+  document.getElementById('main').classList.add('show');
+  curOrderRatings = ratings[scIdx][tIdx].order_ratings;
+  activeStar      = ratings[scIdx][tIdx].overall;
+  renderTurn();
+}
+
+// Save & Exit — save draft then show the paused screen
+function saveAndExit() {
+  ratings[scIdx][tIdx].notes = document.getElementById('notes-inp').value.trim();
+  saveDraft();
+  document.getElementById('main').classList.remove('show');
+  const saved = document.getElementById('saved-screen');
+  saved.style.display = 'flex';
+  const total = scenarios.length;
+  document.getElementById('saved-msg').textContent =
+    `Scenario ${scIdx + 1} of ${total} — Turn ${tIdx + 1}. ` +
+    `Open this page again to resume right where you left off.`;
+}
 
 // ── Start ──────────────────────────────────────────────────────────────────
 async function startReview() {
@@ -1122,6 +1282,7 @@ function nextTurn() {
 
   curOrderRatings = ratings[scIdx][tIdx].order_ratings;
   activeStar = ratings[scIdx][tIdx].overall;
+  saveDraft();
   renderTurn();
   document.getElementById("orders-scroll").scrollTop = 0;
   showTab("vitals");
@@ -1129,6 +1290,7 @@ function nextTurn() {
 
 // ── Audit done ─────────────────────────────────────────────────────────────
 function showAuditDone() {
+  clearDraft();
   document.getElementById("main").classList.remove("show");
   const done = document.getElementById("done-screen");
   done.classList.add("show");
@@ -1160,6 +1322,7 @@ async function submitAll() {
     })),
   };
 
+  clearDraft();
   try {
     const res = await fetch("/submit_ab", {
       method:"POST", headers:{"Content-Type":"application/json"},
