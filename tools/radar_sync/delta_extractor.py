@@ -12,6 +12,7 @@ def _parse_ts(ts_val: Any) -> datetime | None:
     if ts_val is None:
         return None
     if isinstance(ts_val, datetime):
+        # MongoDB returns naive datetimes which are always UTC
         return ts_val.replace(tzinfo=timezone.utc) if ts_val.tzinfo is None else ts_val
     try:
         import pandas as pd
@@ -46,6 +47,7 @@ def extract_delta(chart: dict, last_snapshot_at: datetime | None) -> dict:
 
 
 def _new_vitals(chart: dict, cutoff: datetime | None) -> list[dict]:
+    # Vitals are pre-filtered at ingestion time (chart_puller._filter_vitals)
     vitals = chart.get("vitals") or []
     if not cutoff:
         return vitals[:6]  # first run: newest 6 (array is newest-first)

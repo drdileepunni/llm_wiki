@@ -111,7 +111,14 @@ Home medications: {', '.join(chart.get('home_medications') or []) or 'None'}
 Given this patient's current status, what are the immediate next steps?"""
 
 
-def run_cds(cpmrn: str, encounter: int, running_summary: str, chart: dict, io_summary: dict) -> dict:
+def run_cds(
+    cpmrn: str,
+    encounter: int,
+    running_summary: str,
+    chart: dict,
+    io_summary: dict,
+    pending_conditionals: "list[dict] | None" = None,
+) -> dict:
     """
     Call the wiki-grounded CDS pipeline for this patient.
     Returns the full run_chat result dict.
@@ -123,7 +130,8 @@ def run_cds(cpmrn: str, encounter: int, running_summary: str, chart: dict, io_su
     from backend.services.chat_pipeline import run_chat
 
     question = _build_question(running_summary, chart, io_summary)
-    logger.info("run_cds: calling CDS for CPMRN=%s enc=%s", cpmrn, encounter)
+    logger.info("run_cds: calling CDS for CPMRN=%s enc=%s  pending_conditionals=%d",
+                cpmrn, encounter, len(pending_conditionals) if pending_conditionals else 0)
 
     result = run_chat(
         question=question,
@@ -131,5 +139,6 @@ def run_cds(cpmrn: str, encounter: int, running_summary: str, chart: dict, io_su
         mode="cds",
         include_patient_context=False,
         cpmrn=cpmrn,
+        pending_conditionals=pending_conditionals or None,
     )
     return result

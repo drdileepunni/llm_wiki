@@ -19,6 +19,8 @@ import {
   ServerIcon,
   ShieldCheckIcon,
   SparklesIcon,
+  FilmIcon,
+  BellAlertIcon,
 } from '@heroicons/react/24/outline'
 import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM, getCPUVMStatus, startCPUVM, stopCPUVM, getActiveInstance, setActiveInstance } from '../api'
 import { useAppState } from '../AppStateContext'
@@ -28,6 +30,7 @@ const primaryNav = [
   { to: '/wiki',       label: 'Wiki',       icon: BookOpenIcon },
   { to: '/viva',       label: 'Viva',       icon: UserGroupIcon },
   { to: '/validation', label: 'Validation', icon: BeakerIcon },
+  { to: '/cds-replay', label: 'CDS Replay', icon: FilmIcon },
 ]
 
 const toolsNav = [
@@ -41,6 +44,7 @@ const toolsNav = [
   { to: '/clinical-rules',  label: 'Rules',    icon: ShieldCheckIcon },
   { to: '/mopup',           label: 'Mop-up',   icon: SparklesIcon },
   { to: '/docs',            label: 'Docs',     icon: BookOpenIcon },
+  { to: '/settings',        label: 'Alerts',   icon: BellAlertIcon },
 ]
 
 export default function Layout() {

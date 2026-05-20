@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm, validation_runner, clinical_rules, mopup
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm, validation_runner, clinical_rules, mopup, radar_replay, snapshot_router, settings_router
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -63,12 +63,17 @@ app.include_router(vm.router)
 app.include_router(validation_runner.router)
 app.include_router(clinical_rules.router)
 app.include_router(mopup.router)
+app.include_router(radar_replay.router)
+app.include_router(snapshot_router.router)
+app.include_router(settings_router.router)
 
 @app.on_event("startup")
 def startup():
     init_db()
     _seed_canonical_registries()
     _attach_log_capture()
+    from .scheduler import start_scheduler
+    start_scheduler()
 
 def _attach_log_capture():
     from .services.log_capture import capture_handler
@@ -92,7 +97,9 @@ def _seed_canonical_registries():
 @app.on_event("shutdown")
 def shutdown():
     from .cancellation import shutdown_event
+    from .scheduler import stop_scheduler
     shutdown_event.set()
+    stop_scheduler()
     log.info("Shutdown event set — pipeline will stop at next checkpoint")
 
 @app.get("/health")

@@ -804,17 +804,17 @@ const GLOSSARY = [
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const SYNC_LANES = [
-  { id: 'sync',    label: 'Chart Sync · Hourly Pull',           color: '#0ea5e9' },
-  { id: 'notes',   label: 'Note Indexing · Local FAISS',        color: '#7c6af7' },
-  { id: 'context', label: 'Context Building · Rolling Summary', color: '#f97316' },
-  { id: 'cds',     label: 'CDS · Hourly Suggestions',           color: '#4ade80' },
+  { id: 'sync',    label: 'Chart Sync · Hourly Pull',                    color: '#0ea5e9' },
+  { id: 'notes',   label: 'Note Indexing · Local FAISS',                 color: '#7c6af7' },
+  { id: 'context', label: 'Context Building · Structured Summary',       color: '#f97316' },
+  { id: 'cds',     label: 'CDS · Conditional (worsening / critical)',    color: '#4ade80' },
 ]
 
 const SYNC_ROW_DEFS = [
-  { laneId: 'sync',    nodeIds: ['workspace_in', 'get_admitted', 'chart_pull', 'local_upsert'] },
-  { laneId: 'notes',   nodeIds: ['normalize', 'build_faiss', 'note_cache'] },
+  { laneId: 'sync',    nodeIds: ['workspace_in', 'get_admitted', 'chart_pull', 'snapshot_store'] },
+  { laneId: 'notes',   nodeIds: ['load_admission', 'build_faiss', 'note_cache'] },
   { laneId: 'context', nodeIds: ['delta_extract', 'summary_update', 'running_ctx'] },
-  { laneId: 'cds',     nodeIds: ['cds_call', 'notes_tool', 'suggestions'] },
+  { laneId: 'cds',     nodeIds: ['worsening_check', 'cds_call', 'notes_tool', 'suggestions', 'gchat_alert'] },
 ]
 
 const SYNC_NODES = [
@@ -836,11 +836,12 @@ const SYNC_NODES = [
     id: 'get_admitted', label: 'Get Admitted Patients', sublabel: 'workspacewise skill',
     lane: 'sync', type: 'process',
     tooltip: {
-      title: 'Patient Discovery',
-      body: 'Calls RADAR_READ_URL with function=get_workspace_patients. Returns normalised list. First patient in the list is selected for this run.',
+      title: 'Patient Discovery + Discharge Guard',
+      body: 'Fetches current admitted patients per workspace. Patients no longer in the admitted list are automatically deactivated in snapshot_schedule (deactivated_reason: "discharged").',
       fields: [
-        { k: 'Auth',   v: 'GCP service account ID token' },
-        { k: 'Select', v: 'First patient in workspace (or --cpmrn override)' },
+        { k: 'Auth',         v: 'GCP service account ID token' },
+        { k: 'Discharge',    v: 'Auto-deactivates patients no longer in admitted list' },
+        { k: 'Idempotency',  v: 'Skips if a snapshot already exists within last 50 min' },
       ],
     },
   },
@@ -858,29 +859,30 @@ const SYNC_NODES = [
     },
   },
   {
-    id: 'local_upsert', label: 'Local MongoDB', sublabel: 'patients collection · _synced_at',
+    id: 'snapshot_store', label: 'Local MongoDB', sublabel: 'snapshots collection · snapshot_at',
     lane: 'sync', type: 'artifact',
     tooltip: {
-      title: 'Local Chart Store',
-      body: 'Full chart upserted into local MongoDB patients collection under the real CPMRN. Tagged with _synced_at timestamp. This is the single source of truth for all downstream steps — Radar is not touched again until the next hourly run.',
+      title: 'Snapshot Store (db.snapshots)',
+      body: 'Full chart stored as a timestamped document in db.snapshots. Each hourly run produces a new immutable snapshot. This is the single source of truth for all downstream steps — Radar is not called again until the next run.',
       fields: [
-        { k: 'Collection', v: 'patients' },
-        { k: 'Key',        v: 'CPMRN (real, not anonymised)' },
-        { k: 'Tag',        v: '_synced_at: datetime.utcnow()' },
+        { k: 'Collection',   v: 'snapshots' },
+        { k: 'Key fields',   v: 'CPMRN, encounter, snapshot_at (UTC)' },
+        { k: 'Content',      v: 'chart: {vitals, documents, orders, notes, io, …}' },
+        { k: 'Idempotency',  v: 'Skipped if snapshot exists within last 50 min' },
       ],
     },
   },
   // ── Note Indexing lane ───────────────────────────────────────────────────
   {
-    id: 'normalize', label: 'radar_adapter', sublabel: 'normalize_patient()',
+    id: 'load_admission', label: 'load_admission()', sublabel: 'notes_module · from snapshot',
     lane: 'notes', type: 'process',
     tooltip: {
-      title: 'Radar JSON Normalisation',
-      body: 'Converts raw Radar patient JSON into structured DataFrames (labs, vitals, med_admin, io, etc.) plus a notes_df with all clinician notes. Ported from vector_search/app/services/radar_adapter.py — no external service dependency.',
+      title: 'Admission Note Loader',
+      body: 'Reads the chart from the freshly stored snapshot. Extracts finalNotes, strips HTML from each component, and produces text chunks ready for embedding. Runs inside the hourly pipeline immediately after the snapshot is stored.',
       fields: [
-        { k: 'Output tables', v: 'labs, vitals, med_admin, io, diets, procedures, notes' },
-        { k: 'Notes source',  v: 'notes.finalNotes → notes_df (time, type, author, text)' },
-        { k: 'HTML strip',    v: 'All note components HTML-stripped before chunking' },
+        { k: 'Source',      v: 'snapshot chart.notes.finalNotes' },
+        { k: 'HTML strip',  v: 'All note components HTML-stripped before chunking' },
+        { k: 'Module',      v: 'tools/radar_sync/notes_module/admission_loader.py' },
       ],
     },
   },
@@ -889,12 +891,12 @@ const SYNC_NODES = [
     lane: 'notes', type: 'process',
     tooltip: {
       title: 'Note Indexing',
-      body: 'Notes chunked at 600 tokens (80-token overlap via tiktoken cl100k_base). Embedded with Gemini Embedding API in batches (max 250 texts / 20k tokens per batch). FAISS IndexFlatL2 built over all chunks. Rebuilt fresh every hourly run.',
+      body: 'Notes chunked at 600 tokens (80-token overlap via tiktoken cl100k_base). Embedded with Gemini Embedding API in batches. FAISS IndexFlatL2 built over all chunks. Rebuilt fresh every hourly run from the latest snapshot.',
       fields: [
         { k: 'Chunking',   v: '600 tokens, 80 overlap' },
         { k: 'Embedding',  v: 'Gemini models/gemini-embedding-001' },
         { k: 'Index type', v: 'faiss.IndexFlatL2 (exact L2 search)' },
-        { k: 'Retry',      v: 'Exponential backoff on 429/timeout' },
+        { k: 'Rebuild',    v: 'Fresh each run — always reflects latest snapshot' },
       ],
     },
   },
@@ -903,7 +905,7 @@ const SYNC_NODES = [
     lane: 'notes', type: 'artifact',
     tooltip: {
       title: 'MongoDB Note Index Cache',
-      body: 'FAISS index serialized via faiss.serialize_index() → stored as bson.Binary in local MongoDB. Chunks stored as JSON array. Replaces GCS from the original vector_search service — entirely local, zero cloud dependency.',
+      body: 'FAISS index serialized via faiss.serialize_index() → stored as bson.Binary in local MongoDB. Chunks stored as JSON array. Keyed by admission_id = "{CPMRN}_{encounter}".',
       fields: [
         { k: 'Collection', v: 'note_indexes' },
         { k: 'Key',        v: 'admission_id = "{CPMRN}_{encounter}"' },
@@ -917,7 +919,7 @@ const SYNC_NODES = [
     lane: 'context', type: 'process',
     tooltip: {
       title: 'Chart Delta',
-      body: 'Compares the current chart against last_snapshot_at stored in patient_contexts. Extracts only new events: vitals with timestamp > cutoff, lab panels with reportedAt > cutoff, new note entries, and all current active orders.',
+      body: 'Reads last_snapshot_at from patient_contexts. Extracts only events newer than the previous run: vitals, labs, notes (by timestamp), and the full current orders snapshot.',
       fields: [
         { k: 'New vitals', v: 'Readings with timestamp > last_snapshot_at' },
         { k: 'New labs',   v: 'Documents with reportedAt > last_snapshot_at' },
@@ -927,44 +929,59 @@ const SYNC_NODES = [
     },
   },
   {
-    id: 'summary_update', label: 'Rolling Summary Update', sublabel: 'LLM · prev + new events',
+    id: 'summary_update', label: 'Rolling Summary Update', sublabel: 'Gemini · PatientSummary',
     lane: 'context', type: 'process',
     tooltip: {
-      title: 'Longitudinal Context Update',
-      body: 'Small LLM call: reads existing running_summary plus the delta. Produces a concise 3-5 sentence updated narrative capturing patient trajectory. Ensures longitudinal context (e.g. "creatinine rising for 3 days") is preserved even without explicit progress notes.',
+      title: 'Structured Summary Update (Gemini)',
+      body: 'Calls summary_updater.update_summary() using gemini-3.1-flash-lite with structured output. Produces a PatientSummary dict — one ActiveProblem entry per clinical problem, each with a status field: critical / worsening / stable / improving / resolved.',
       fields: [
-        { k: 'Input',    v: 'running_summary (prev) + formatted delta' },
-        { k: 'Output',   v: 'updated_running_summary (3-5 sentences)' },
-        { k: 'First run', v: 'No prior summary — writes initial assessment from raw data' },
+        { k: 'Model',       v: 'gemini-3.1-flash-lite (structured JSON output)' },
+        { k: 'Schema',      v: 'PatientSummary: admission_narrative, problems[], resolved_problems[], narrative, suggested_actions[]' },
+        { k: 'Problem',     v: '{name, status, presenting_features, workup, management, current_state, plan_changing_event}' },
+        { k: 'First run',   v: 'Full chart context — initial assessment from scratch' },
+        { k: 'Update runs', v: 'Delta only — preserves historical context, updates current_state' },
       ],
     },
   },
   {
-    id: 'running_ctx', label: 'patient_contexts', sublabel: 'running_summary · MongoDB',
+    id: 'running_ctx', label: 'patient_contexts', sublabel: 'structured_summary · MongoDB',
     lane: 'context', type: 'artifact',
     tooltip: {
       title: 'Persistent Patient Context',
-      body: 'MongoDB document per patient. running_summary is a durable LLM-generated narrative that accumulates across hourly runs. hourly_entries is an append-only log.',
+      body: 'MongoDB document per patient. Stores both the rich structured_summary dict (problems + statuses) and the plain running_summary narrative for backward compatibility. hourly_entries appended only when CDS fires.',
       fields: [
-        { k: 'Collection',      v: 'patient_contexts' },
-        { k: 'running_summary', v: 'Longitudinal narrative, updated each hour' },
-        { k: 'hourly_entries',  v: 'Append-only log: delta_summary + suggestions' },
-        { k: 'last_snapshot_at', v: 'UTC timestamp of last successful run' },
+        { k: 'Collection',         v: 'patient_contexts' },
+        { k: 'structured_summary', v: 'Full PatientSummary dict — problems with status labels' },
+        { k: 'running_summary',    v: 'Plain narrative (backward compat + LLM context)' },
+        { k: 'last_snapshot_at',   v: 'UTC timestamp of last successful run' },
+        { k: 'hourly_entries',     v: 'Append-only log — written only when CDS triggers' },
       ],
     },
   },
-  // ── CDS + Output lane ────────────────────────────────────────────────────
+  // ── CDS lane (conditional) ────────────────────────────────────────────────
   {
-    id: 'cds_call', label: 'CDS Call', sublabel: 'chat_pipeline · wiki-grounded',
+    id: 'worsening_check', label: 'Worsening Check', sublabel: 'problems[].status',
+    lane: 'cds', type: 'decision',
+    tooltip: {
+      title: 'CDS Trigger — Status Gate',
+      body: 'Reads the problems list from the freshly updated PatientSummary. If ANY problem has status "worsening" or "critical", CDS fires. If all problems are stable/improving/resolved, CDS and the Google Chat alert are both skipped — and this is logged.',
+      fields: [
+        { k: 'Trigger statuses', v: '"worsening", "critical"' },
+        { k: 'Skip statuses',    v: '"stable", "improving", "resolved"' },
+        { k: 'If skipped',       v: 'pipeline logs reason; no entry added to hourly_entries' },
+      ],
+    },
+  },
+  {
+    id: 'cds_call', label: 'CDS Call', sublabel: 'cds_runner · wiki-grounded',
     lane: 'cds', type: 'process',
     tooltip: {
-      title: 'Wiki-Grounded CDS',
-      body: 'Reuses run_chat() from app/backend/services/chat_pipeline.py with mode="cds". The question contains the running_summary + current vitals + active orders + recent labs. Phase 1 tool loop can also query local MongoDB for additional data.',
+      title: 'Wiki-Grounded CDS (Conditional)',
+      body: 'Calls run_cds() from cds_runner.py. Feeds the structured PatientSummary + current chart + I/O balance. Only executes when the worsening check passes.',
       fields: [
-        { k: 'Function',  v: 'run_chat(question, mode="cds", cpmrn=cpmrn)' },
-        { k: 'Context',   v: 'running_summary + vitals + orders + labs + I/O balance' },
+        { k: 'Function',  v: 'run_cds(cpmrn, encounter, structured_summary, chart, io_summary)' },
+        { k: 'Context',   v: 'PatientSummary narrative + vitals + orders + labs + I/O balance' },
         { k: 'Grounding', v: 'Wiki vector search (Arm A)' },
-        { k: 'Question',  v: '"Given this patient\'s current status, what are the next steps?"' },
       ],
     },
   },
@@ -973,7 +990,7 @@ const SYNC_NODES = [
     lane: 'cds', type: 'feedback',
     tooltip: {
       title: 'Note Query Tool',
-      body: 'Semantic search over all clinician notes. The LLM can call this on demand during or before the CDS call: "what is the current respiratory status?", "any recent escalation events?". Loads cached FAISS index from MongoDB.',
+      body: 'Semantic search over all clinician notes. The LLM can call this on demand during the CDS call. Loads the FAISS index built earlier in this same hourly run.',
       fields: [
         { k: 'Source',  v: 'note_indexes collection (FAISS + chunks)' },
         { k: 'k',       v: '5 chunks per query' },
@@ -983,36 +1000,53 @@ const SYNC_NODES = [
     },
   },
   {
-    id: 'suggestions', label: 'Suggestions', sublabel: 'hourly_entries · structured',
+    id: 'suggestions', label: 'Suggestions', sublabel: 'hourly_entries · conditional',
+    lane: 'cds', type: 'artifact',
+    tooltip: {
+      title: 'CDS Output — Written Only When Triggered',
+      body: 'Structured CDS result appended to patient_contexts.hourly_entries. Includes the triggering problem names, the full PatientSummary at that point, and CDS action lists. Only written when worsening_check passes.',
+      fields: [
+        { k: 'Storage',              v: 'patient_contexts.hourly_entries (append-only)' },
+        { k: 'triggering_problems',  v: 'Names of problems with worsening/critical status' },
+        { k: 'structured_summary',   v: 'PatientSummary snapshot at time of alert' },
+        { k: 'suggestions',          v: 'immediate_actions, immediate_next_steps, clinical_reasoning' },
+      ],
+    },
+  },
+  {
+    id: 'gchat_alert', label: 'Google Chat Alert', sublabel: 'webhook · card message',
     lane: 'cds', type: 'io',
     tooltip: {
-      title: 'Hourly CDS Output',
-      body: 'Structured order suggestions with clinical reasoning. Appended to patient_contexts.hourly_entries. Includes immediate actions, structured orders, clinical reasoning, and monitoring plan.',
+      title: 'Google Chat Webhook Alert',
+      body: 'Posts a structured card to the configured Google Chat space. Shows the worsening/critical problem names with current_state values, and the top CDS suggested actions. Only fires when the webhook is enabled in Settings → Alerts.',
       fields: [
-        { k: 'Storage',          v: 'patient_contexts.hourly_entries (append-only)' },
-        { k: 'immediate_actions', v: '5-8 prioritised bedside steps' },
-        { k: 'structured_orders', v: 'Medication / lab / procedure orders with doses' },
-        { k: 'Next run',          v: 'running_summary carries context forward automatically' },
+        { k: 'Trigger',      v: 'Any problem with status worsening or critical' },
+        { k: 'Format',       v: 'Google Chat card: problem blocks + suggested actions + narrative snippet' },
+        { k: 'Config',       v: 'Settings → Alerts → Webhook URL + enable toggle (db.app_settings)' },
+        { k: 'Module',       v: 'tools/radar_sync/gchat_notifier.py' },
+        { k: 'If disabled',  v: 'Silently skipped — suggestions still written to hourly_entries' },
       ],
     },
   },
 ]
 
 const SYNC_EDGES = [
-  { from: 'workspace_in',   to: 'get_admitted' },
-  { from: 'get_admitted',   to: 'chart_pull' },
-  { from: 'chart_pull',     to: 'local_upsert' },
-  { from: 'local_upsert',   to: 'normalize',       cross: true },
-  { from: 'normalize',      to: 'build_faiss' },
-  { from: 'build_faiss',    to: 'note_cache' },
-  { from: 'local_upsert',   to: 'delta_extract',   cross: true },
-  { from: 'delta_extract',  to: 'summary_update' },
-  { from: 'summary_update', to: 'running_ctx' },
-  { from: 'running_ctx',    to: 'cds_call',         cross: true },
-  { from: 'note_cache',     to: 'notes_tool',        cross: true },
-  { from: 'notes_tool',     to: 'cds_call',          label: 'on demand', dashed: true, arcAbove: true },
-  { from: 'cds_call',       to: 'suggestions' },
-  { from: 'suggestions',    to: 'delta_extract',     label: '+ 1h', dashed: true, arcAbove: true },
+  { from: 'workspace_in',    to: 'get_admitted' },
+  { from: 'get_admitted',    to: 'chart_pull' },
+  { from: 'chart_pull',      to: 'snapshot_store' },
+  { from: 'snapshot_store',  to: 'load_admission',    cross: true },
+  { from: 'load_admission',  to: 'build_faiss' },
+  { from: 'build_faiss',     to: 'note_cache' },
+  { from: 'snapshot_store',  to: 'delta_extract',     cross: true },
+  { from: 'delta_extract',   to: 'summary_update' },
+  { from: 'summary_update',  to: 'running_ctx' },
+  { from: 'running_ctx',     to: 'worsening_check',   cross: true },
+  { from: 'note_cache',      to: 'notes_tool',         cross: true },
+  { from: 'notes_tool',      to: 'cds_call',           label: 'on demand', dashed: true, arcAbove: true },
+  { from: 'worsening_check', to: 'cds_call',           label: 'worsening/critical' },
+  { from: 'cds_call',        to: 'suggestions' },
+  { from: 'suggestions',     to: 'gchat_alert' },
+  { from: 'suggestions',     to: 'delta_extract',      label: '+ 1h', dashed: true, arcAbove: true },
 ]
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1114,7 +1148,7 @@ export default function PipelineDocs() {
             {tab === 'cds'
               ? 'Arm A · Wiki-Grounded · Phase 1 → Phase 2 → Order Generation'
               : tab === 'sync'
-              ? 'Hourly chart sync · Local FAISS note index · Rolling summary · CDS suggestions'
+              ? 'Hourly chart sync → FAISS note index → structured summary → conditional CDS → Google Chat alert'
               : 'Periodic wiki maintenance · Stub expansion + Scope contamination fix'}
           </p>
         </div>

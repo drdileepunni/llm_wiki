@@ -247,6 +247,33 @@ class GeminiLLMClient:
         out_tok = getattr(meta, "candidates_token_count", 0) or 0
         return text, LLMUsage(in_tok, out_tok)
 
+    def generate_json(
+        self,
+        prompt: str,
+        schema: type,
+        system: str = "",
+        max_tokens: int = 2048,
+    ) -> dict:
+        """
+        Call Gemini with native structured output (response_mime_type=application/json).
+        `schema` must be a Pydantic BaseModel subclass.
+        Returns a plain Python dict guaranteed to match the schema.
+        """
+        import json as _json
+        from google.genai import types
+
+        raw = self._client.models.generate_content(
+            model=self.model,
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=types.GenerateContentConfig(
+                system_instruction=system or None,
+                response_mime_type="application/json",
+                response_schema=schema,
+                max_output_tokens=max_tokens,
+            ),
+        )
+        return _json.loads(raw.text)
+
     def create_message(
         self,
         messages: list[dict],

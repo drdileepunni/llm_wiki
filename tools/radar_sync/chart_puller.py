@@ -72,6 +72,26 @@ def get_admitted_patients(workspace: str = "1A") -> list[dict]:
     return [p for p in patients if p["CPMRN"]]
 
 
+def _filter_vitals(vitals: list[dict]) -> list[dict]:
+    """
+    Keep only vitals that are clinically trustworthy:
+      - isVerified=True  (clinician confirmed), OR
+      - abnormal_list is non-empty (Netra flagged an alarm, clinician hasn't reviewed yet)
+
+    This drops the large volume of routine unverified Netra camera captures that
+    have no abnormal flags, keeping MongoDB lean and the LLM context clean.
+    """
+    kept, dropped = [], 0
+    for v in vitals:
+        if v.get("isVerified") is True or bool(v.get("abnormal_list")):
+            kept.append(v)
+        else:
+            dropped += 1
+    if dropped:
+        logger.debug("_filter_vitals: dropped %d unverified/non-abnormal vitals", dropped)
+    return kept
+
+
 def pull_chart(cpmrn: str, encounter: int = 1) -> dict:
     """Fetch full chart for a single patient from Radar."""
     result = _radar_post({
@@ -82,8 +102,16 @@ def pull_chart(cpmrn: str, encounter: int = 1) -> dict:
     if isinstance(result, list):
         if not result:
             raise ValueError(f"No patient found for CPMRN={cpmrn} encounter={encounter}")
-        return result[0]
-    return result
+        chart = result[0]
+    else:
+        chart = result
+
+    if "vitals" in chart:
+        before = len(chart["vitals"])
+        chart["vitals"] = _filter_vitals(chart["vitals"])
+        logger.info("pull_chart: vitals %d → %d after filter (CPMRN=%s)", before, len(chart["vitals"]), cpmrn)
+
+    return chart
 
 
 def upsert_to_local(chart: dict) -> None:

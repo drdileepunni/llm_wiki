@@ -939,3 +939,101 @@ export async function inferPageSubtype(kbName, page) {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+
+// ── Radar CDS Replay ────────────────────────────────────────────────────────
+export function getReplayPatients() {
+  return fetch(`${BASE}/radar-replay/patients`).then(r => r.json())
+}
+export function getReplaySnapshots(cpmrn, encounter) {
+  return fetch(`${BASE}/radar-replay/${encodeURIComponent(cpmrn)}/${encounter}/snapshots`).then(r => r.json())
+}
+export function getReplayResults(cpmrn, encounter) {
+  return fetch(`${BASE}/radar-replay/${encodeURIComponent(cpmrn)}/${encounter}/results`).then(r => r.json())
+}
+export async function startReplay(cpmrn, encounter, fromIndex = 0, force = false) {
+  const res = await fetch(`${BASE}/radar-replay/${encodeURIComponent(cpmrn)}/${encounter}/replay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_index: fromIndex, force }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export function getReplayStatus(runId) {
+  return fetch(`${BASE}/radar-replay/replay/${encodeURIComponent(runId)}`).then(r => r.json())
+}
+
+// ── Snapshot collector ───────────────────────────────────────────────────────
+export function getSnapshotSchedule() {
+  return fetch(`${BASE}/snapshots/schedule`).then(r => r.json())
+}
+export async function addToSchedule(cpmrn, encounter = 1, workspace = null) {
+  const res = await fetch(`${BASE}/snapshots/schedule`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cpmrn, encounter, workspace }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function removeFromSchedule(cpmrn, encounter) {
+  const res = await fetch(`${BASE}/snapshots/schedule/${encodeURIComponent(cpmrn)}/${encounter}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function collectNow(cpmrn, encounter = 1) {
+  const res = await fetch(`${BASE}/snapshots/collect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cpmrn, encounter }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export function getSchedulerStatus() {
+  return fetch(`${BASE}/snapshots/scheduler/status`).then(r => r.json())
+}
+export async function pauseScheduler() {
+  const res = await fetch(`${BASE}/snapshots/scheduler/pause`, { method: 'POST' })
+  return res.json()
+}
+export async function resumeScheduler() {
+  const res = await fetch(`${BASE}/snapshots/scheduler/resume`, { method: 'POST' })
+  return res.json()
+}
+export async function collectWorkspace(workspace, schedule = false) {
+  const res = await fetch(`${BASE}/snapshots/collect-workspace`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace, schedule }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function deleteSnapshot(snapshotId) {
+  const res = await fetch(`${BASE}/snapshots/snapshots/${encodeURIComponent(snapshotId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Alert settings ─────────────────────────────────────────────────────────
+export async function getGchatWebhook() {
+  const res = await fetch(`${BASE}/settings/gchat-webhook`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function saveGchatWebhook(url, enabled) {
+  const res = await fetch(`${BASE}/settings/gchat-webhook`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, enabled }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+export async function testGchatWebhook() {
+  const res = await fetch(`${BASE}/settings/gchat-webhook/test`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+

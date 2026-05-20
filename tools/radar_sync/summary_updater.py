@@ -1,4 +1,9 @@
-"""Update the rolling patient summary using the LLM."""
+"""
+Update the rolling patient summary using Gemini structured output.
+
+update_summary() returns a PatientSummary dict (see patient_summary_schema.py).
+The caller stores structured_summary=<dict> and running_summary=<dict["narrative"]>.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,6 +13,33 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_SUMMARY_MODEL = "gemini-3.1-flash-lite"
+
+# ── Timezone helper ───────────────────────────────────────────────────────────
+
+from datetime import timedelta
+
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _to_ist(ts_val: Any) -> str:
+    """
+    Convert a timestamp value (datetime object or ISO string, assumed UTC when
+    naive) to an IST-labelled string like '2026-05-20 06:40 IST'.
+    Returns the raw value as a string if parsing fails.
+    """
+    if ts_val is None:
+        return ""
+    try:
+        import pandas as pd
+        from datetime import timezone as _tz
+        dt = pd.to_datetime(ts_val, utc=True).to_pydatetime()
+        # pd.to_datetime treats naive strings as UTC when utc=True
+        ist = dt + _IST_OFFSET
+        return ist.strftime("%Y-%m-%d %H:%M IST")
+    except Exception:
+        return str(ts_val)
 
 
 # ── Chart context formatters ──────────────────────────────────────────────────
@@ -23,12 +55,13 @@ def _format_demographics(chart: dict) -> str:
 
 
 def _format_vitals_trend(chart: dict) -> str:
-    vitals = (chart.get("vitals") or [])[:8]  # newest 8
+    # Vitals are pre-filtered at ingestion time (chart_puller._filter_vitals)
+    vitals = (chart.get("vitals") or [])[:8]
     if not vitals:
         return "No vitals"
     lines = []
     for v in vitals:
-        ts   = v.get("timestamp", "")
+        ts   = _to_ist(v.get("timestamp"))
         hr   = v.get("daysHR")
         bp   = v.get("daysBP")
         map_ = v.get("daysMAP")
@@ -48,14 +81,15 @@ def _format_labs_full(chart: dict) -> str:
     if not docs:
         return "No labs"
     lines = []
-    for doc in docs[-12:]:  # newest 12 panels
+    for doc in docs[-12:]:
         name  = doc.get("name", "")
-        ts    = doc.get("reportedAt", "")
+        ts    = _to_ist(doc.get("reportedAt"))
         attrs = doc.get("attributes") or {}
+        valued = [(k, v) for k, v in attrs.items()
+                  if isinstance(v, dict) and v.get("value") not in (None, "")]
         vals  = ", ".join(
             f"{k}={v.get('value')} {v.get('unit', '')}".strip()
-            for k, v in list(attrs.items())[:8]
-            if isinstance(v, dict) and v.get("value") is not None
+            for k, v in valued[:8]
         )
         lines.append(f"  [{ts}] {name}: {vals}" if vals else f"  [{ts}] {name}")
     return "\n".join(lines)
@@ -70,7 +104,6 @@ def _format_active_meds(chart: dict) -> str:
 
 
 def _format_notes_full(chart: dict) -> str:
-    """Extract all substantive note text for initial context."""
     notes_obj = chart.get("notes") or {}
     entries = []
     for note in (notes_obj.get("finalNotes") or []):
@@ -82,12 +115,12 @@ def _format_notes_full(chart: dict) -> str:
             text = " ".join(p for p in text_parts if p).strip()
             if len(text) < 80:
                 continue
-            ts     = content.get("timestamp") or note.get("createdTimestamp") or ""
+            ts     = _to_ist(content.get("timestamp") or note.get("createdTimestamp"))
             ntype  = f"{content.get('noteType', '')} / {content.get('noteSubType', '')}".strip(" /")
             author = ""
             if isinstance(content.get("author"), dict):
                 author = content["author"].get("name", "")
-            entries.append((str(ts), ntype, author, text))
+            entries.append((ts, ntype, author, text))
     if not entries:
         return "No notes"
     lines = []
@@ -97,7 +130,6 @@ def _format_notes_full(chart: dict) -> str:
 
 
 def _format_delta(delta: dict) -> str:
-    """Format incremental delta for update prompts."""
     lines = []
 
     vitals = delta.get("new_vitals") or []
@@ -109,7 +141,7 @@ def _format_delta(delta: dict) -> str:
             spo2 = v.get("daysSpO2")
             rr   = v.get("daysRR")
             map_ = v.get("daysMAP")
-            ts   = v.get("timestamp", "")
+            ts   = _to_ist(v.get("timestamp"))
             parts = [x for x in [
                 f"HR={hr}", f"BP={bp}", f"MAP={map_}",
                 f"SpO2={spo2}", f"RR={rr}",
@@ -121,12 +153,13 @@ def _format_delta(delta: dict) -> str:
         lines.append(f"New labs ({len(labs)} panels):")
         for lab in labs[-5:]:
             name  = lab.get("name", "")
-            ts    = lab.get("reportedAt", "")
+            ts    = _to_ist(lab.get("reportedAt"))
             attrs = lab.get("attributes") or {}
+            valued = [(k, v) for k, v in attrs.items()
+                      if isinstance(v, dict) and v.get("value") not in (None, "")]
             vals  = ", ".join(
                 f"{k}={v.get('value')} {v.get('unit', '')}".strip()
-                for k, v in list(attrs.items())[:6]
-                if isinstance(v, dict) and v.get("value") is not None
+                for k, v in valued[:6]
             )
             lines.append(f"  [{ts}] {name}: {vals}" if vals else f"  [{ts}] {name}")
 
@@ -155,118 +188,129 @@ def _format_delta(delta: dict) -> str:
     return "\n".join(lines) if lines else "(no new events)"
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
-def update_summary(existing_summary: str, delta: dict, cpmrn: str, chart: dict | None = None) -> str:
-    """
-    Call the LLM to produce or update a problem-oriented rolling patient summary.
-    On first run (no existing_summary), pass chart for full context.
-    Returns the updated summary string.
-    """
-    if not existing_summary.strip():
-        prompt = _initial_prompt(cpmrn, delta, chart)
-    else:
-        prompt = _update_prompt(cpmrn, existing_summary, delta)
-
-    return _call_llm(prompt)
-
+_SYSTEM = (
+    "You are a senior ICU physician writing concise, problem-oriented patient summaries. "
+    "Use specific numbers (vitals, lab values, drug names and doses). "
+    "Be factual — do not invent findings not present in the data."
+)
 
 def _initial_prompt(cpmrn: str, delta: dict, chart: dict | None) -> str:
     if chart:
-        demographics = _format_demographics(chart)
-        vitals_text  = _format_vitals_trend(chart)
-        labs_text    = _format_labs_full(chart)
-        meds_text    = _format_active_meds(chart)
-        notes_text   = _format_notes_full(chart)
-        context = f"""DEMOGRAPHICS: {demographics}
+        context = f"""DEMOGRAPHICS: {_format_demographics(chart)}
 
 VITALS TREND (newest first):
-{vitals_text}
+{_format_vitals_trend(chart)}
 
 LABORATORY RESULTS:
-{labs_text}
+{_format_labs_full(chart)}
 
-ACTIVE MEDICATIONS: {meds_text}
+ACTIVE MEDICATIONS: {_format_active_meds(chart)}
 
 CLINICAL NOTES:
-{notes_text}"""
+{_format_notes_full(chart)}"""
     else:
         context = f"CLINICAL DATA:\n{_format_delta(delta)}"
 
-    return f"""You are a senior ICU physician writing an initial problem-oriented patient summary.
-Patient CPMRN: {cpmrn}
+    return f"""Patient CPMRN: {cpmrn}
 
 {context}
 
-Write a structured problem-oriented ICU summary using EXACTLY this format:
+Write a structured problem-oriented ICU summary.
 
-**[Age]y [sex] with PMH of [conditions] presented with [chief complaint and key initial findings].**
+For each active clinical problem include:
+- name: concise problem name (e.g. "Septic shock", "AKI")
+- status: one of critical / worsening / stable / improving / resolved
+- presenting_features: how it first appeared with specific values
+- workup: investigations done and key results
+- management: current treatment with drug names and doses
+- current_state: latest status with specific numbers
+- plan_changing_event: if a specific investigation result or event changed the care plan, describe it; otherwise null
 
-**Active Problems:**
-1. **[Problem name]:** [What was found/initial presentation] → [Workup done and key results] → [Current management] → [Current status with specific numbers]
-2. **[Problem name]:** ...
-(list all active clinical problems — aim for 4-6 problems)
-
-**Resolved / Improving:**
-- [Problem]: [Brief note on resolution or improvement]
-
-Rules:
-- Each problem gets ONE entry with the full arc: presentation → workup → management → current status
-- Use specific numbers throughout (vitals, lab values, drug names and doses where available)
-- Separate problems clearly — do not lump everything together
-- If a problem has multiple components (e.g. hypertension led to pulmonary oedema), still list as separate problems
-- Write as a handover note a covering physician would read"""
+admission_narrative: one sentence — age, sex, PMH, presenting complaint.
+resolved_problems: list of strings for problems that have resolved.
+narrative: a 4-6 sentence paragraph covering the full picture (this is the human-readable summary).
+suggested_actions: list of 3-5 specific, actionable clinical suggestions for the most critical active problems — e.g. "Start vancomycin 25 mg/kg IV q12h for MRSA coverage", "Check serum lactate and repeat in 2h", "Noradrenaline 0.1 mcg/kg/min — consider uptitration if MAP <65". Be specific with drug names, doses, and routes. Do not suggest actions already reflected in current management."""
 
 
-def _update_prompt(cpmrn: str, existing_summary: str, delta: dict) -> str:
+def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict) -> str:
     delta_text = _format_delta(delta)
-    return f"""You are a senior ICU physician updating a problem-oriented patient summary.
-Patient CPMRN: {cpmrn}
+    existing_narrative = existing_summary.get("narrative", "") if isinstance(existing_summary, dict) else existing_summary
+
+    # Enumerate current problem names so the model reuses them exactly
+    existing_problems = existing_summary.get("problems", []) if isinstance(existing_summary, dict) else []
+    if existing_problems:
+        names_block = "\n".join(f"  - {p['name']}" for p in existing_problems)
+        names_instruction = (
+            f"\nEXISTING PROBLEM NAMES — use these EXACT strings if the problem is the same. "
+            f"Do NOT rename, split, or create synonyms:\n{names_block}\n"
+        )
+    else:
+        names_instruction = ""
+
+    return f"""Patient CPMRN: {cpmrn}
 
 CURRENT SUMMARY:
-{existing_summary}
-
+{existing_narrative}
+{names_instruction}
 NEW EVENTS IN THE LAST HOUR:
 {delta_text}
 
-Update the summary to reflect these new events. Keep the same problem-oriented structure:
-
-**[demographics line]**
-
-**Active Problems:**
-1. **[Problem]:** ... → [updated current status]
-...
-
-**Resolved / Improving:**
-- ...
+Update the structured summary to reflect these new events.
 
 Rules:
-- Keep all existing problems; update their current status with new numbers
-- If a problem has resolved or significantly improved, move it to Resolved/Improving
-- Add new problems only if genuinely new issues have emerged
-- Use specific numbers. Do not lose historical context (e.g. initial BP, presenting complaint).
-- Write only the updated summary, nothing else."""
+- Keep all existing problems; update their current_state with new numbers
+- Use the EXACT same problem name strings listed above — never rename or create synonyms (e.g. do not add "Respiratory Failure" if "Acute Respiratory Failure" already exists)
+- If a problem has resolved or significantly improved, move it to resolved_problems
+- Add new problems ONLY if a genuinely NEW clinical issue emerged that is not already listed
+- Set plan_changing_event if a new investigation result changed the management plan
+- Do not lose historical context (initial presentation, key prior results)
+- narrative: updated 4-6 sentence paragraph covering the current picture
+- suggested_actions: 3-5 specific actionable suggestions based on new events (drug names, doses, routes, specific labs). Do not repeat actions already in current management."""
 
 
-# ── LLM call ──────────────────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
-def _call_llm(prompt: str) -> str:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "app"))
+def update_summary(existing_summary: str | dict, delta: dict, cpmrn: str, chart: dict | None = None) -> dict:
+    """
+    Produce or update a structured PatientSummary dict.
+
+    existing_summary: either the previous structured dict or the legacy narrative string.
+                      Pass "" or {} for the first snapshot.
+    Returns a PatientSummary dict with keys:
+        admission_narrative, problems, resolved_problems, narrative
+    """
+    # Normalise seed
+    if isinstance(existing_summary, dict):
+        seed_text = existing_summary.get("narrative", "")
+        seed_dict = existing_summary
+    else:
+        seed_text = existing_summary or ""
+        seed_dict = {}
+
+    if not seed_text.strip():
+        prompt = _initial_prompt(cpmrn, delta, chart)
+    else:
+        prompt = _update_prompt(cpmrn, seed_dict, delta)
+
+    return _call_gemini_structured(prompt)
+
+
+# ── Gemini structured call ────────────────────────────────────────────────────
+
+def _call_gemini_structured(prompt: str) -> dict:
+    _root = Path(__file__).resolve().parents[2]
+    for p in [str(_root / "app"), str(_root)]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parents[2] / "app" / ".env")
-    from backend.services.llm_client import get_llm_client
-    llm = get_llm_client()
-    resp = llm.create_message(
-        messages=[{"role": "user", "content": prompt}],
-        tools=[],
-        max_tokens=1024,
-    )
-    if hasattr(resp, "content"):
-        content = resp.content
-        if isinstance(content, list):
-            return "".join(
-                block.text if hasattr(block, "text") else str(block)
-                for block in content
-            ).strip()
-        return str(content).strip()
-    return str(resp).strip()
+    load_dotenv(_root / "app" / ".env")
+
+    from backend.config import GOOGLE_API_KEY
+    from backend.services.llm_client import GeminiLLMClient
+    from tools.radar_sync.patient_summary_schema import PatientSummary
+
+    client = GeminiLLMClient(api_key=GOOGLE_API_KEY, model=_SUMMARY_MODEL)
+    return client.generate_json(prompt=prompt, schema=PatientSummary, system=_SYSTEM, max_tokens=2048)

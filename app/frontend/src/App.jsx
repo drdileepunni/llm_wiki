@@ -18,6 +18,8 @@ import Validation from './pages/Validation'
 import ClinicalRules from './pages/ClinicalRules'
 import PipelineDocs from './pages/PipelineDocs'
 import Mopup from './pages/Mopup'
+import CdsReplay from './pages/CdsReplay'
+import Settings from './pages/Settings'
 
 export default function App() {
   return (
@@ -43,6 +45,8 @@ export default function App() {
             <Route path="clinical-rules" element={<ClinicalRules />} />
             <Route path="mopup" element={<Mopup />} />
             <Route path="docs" element={<PipelineDocs />} />
+            <Route path="cds-replay" element={<CdsReplay />} />
+            <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
       </BrowserRouter>
