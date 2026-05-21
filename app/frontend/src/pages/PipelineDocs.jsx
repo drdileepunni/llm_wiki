@@ -1050,6 +1050,345 @@ const SYNC_EDGES = [
 ]
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Problem Tracker — node / edge / lane definitions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PT_LANES = [
+  { id: 'classifier', label: 'Status Classifier · gemini-2.5-flash + thinking',  color: '#7c6af7' },
+  { id: 'loop',       label: 'Problem Tracker · ReAct Loop · gemini-2.5-flash',  color: '#f97316' },
+  { id: 'storage',    label: 'Problem Lifecycle · MongoDB',                        color: '#0ea5e9' },
+  { id: 'alert',      label: 'Alert Gate · Google Chat',                           color: '#4ade80' },
+]
+
+const PT_ROW_DEFS = [
+  { laneId: 'classifier', nodeIds: ['clf_in',      'clf_react',  'clf_tools',   'clf_out'    ] },
+  { laneId: 'loop',       nodeIds: ['pt_in',       'pt_react',   'pt_tools',    'pt_assess'  ] },
+  { laneId: 'storage',    nodeIds: ['db_problems',  'db_next',    'db_audit',    'db_trace'   ] },
+  { laneId: 'alert',      nodeIds: ['al_gate',      'al_cooldown','al_gchat'                  ] },
+]
+
+const PT_NODES = [
+  // ── Status Classifier lane ───────────────────────────────────────────────
+  {
+    id: 'clf_in', label: 'Draft Summary', sublabel: 'problems[].status (draft)',
+    lane: 'classifier', type: 'io',
+    tooltip: {
+      title: 'Input — Draft Problem Statuses',
+      body: 'The structured_summary produced by summary_updater contains draft statuses for each problem — assigned from a single snapshot without trajectory context. The classifier reviews only problems labelled worsening or critical.',
+      fields: [
+        { k: 'Source',     v: 'summary_updater → PatientSummary.problems[]' },
+        { k: 'Reviewed',   v: 'Only worsening / critical problems' },
+        { k: 'Skipped',    v: 'stable / improving / resolved — passed through unchanged' },
+      ],
+    },
+  },
+  {
+    id: 'clf_react', label: 'Classifier Loop', sublabel: '≤8 rounds · thinking=8k',
+    lane: 'classifier', type: 'process',
+    tooltip: {
+      title: 'Status Classifier ReAct Loop',
+      body: 'Gemini 2.5 Flash with 8 000-token thinking budget. Reviews draft worsening/critical labels by querying vital and lab trends across stored snapshots. Must see ≥2 consecutive deteriorating readings to confirm worsening. A single abnormal reading → stable.',
+      fields: [
+        { k: 'Model',          v: 'gemini-2.5-flash (thinking_budget=8000)' },
+        { k: 'Max rounds',     v: '8' },
+        { k: 'Worsening rule', v: '≥2 consecutive deteriorating readings required' },
+        { k: 'Critical rule',  v: 'Vasopressors+MAP<60, SpO2<88% on FiO2>60%, K>6.5, pH<7.1, GCS acutely falling' },
+      ],
+      tools: ['get_vital_trend', 'get_lab_trend', 'query_patient_notes'],
+    },
+  },
+  {
+    id: 'clf_tools', label: 'Trend Tools', sublabel: 'vitals · labs · notes',
+    lane: 'classifier', type: 'feedback',
+    tooltip: {
+      title: 'Classifier Tools',
+      body: 'The classifier can pull vital sign readings and lab values across multiple stored snapshots, plus semantic note search. All data comes from local MongoDB — no Radar calls during classification.',
+      fields: [
+        { k: 'get_vital_trend',   v: 'HR, BP, MAP, SpO2, RR, FiO2 — newest-first from snapshots' },
+        { k: 'get_lab_trend',     v: 'Any lab by partial name — Hb, Creatinine, Potassium, etc.' },
+        { k: 'query_patient_notes', v: 'Semantic FAISS search over all clinician notes' },
+      ],
+    },
+  },
+  {
+    id: 'clf_out', label: 'set_problem_statuses', sublabel: 'verified · 1 call',
+    lane: 'classifier', type: 'artifact',
+    tooltip: {
+      title: 'Classifier Output',
+      body: 'Single tool call at the end of the loop with verified statuses and one-sentence reasoning per problem. Applied back to the structured_summary before the problem tracker runs.',
+      fields: [
+        { k: 'problem_name',        v: 'Exact name from structured_summary' },
+        { k: 'status',              v: 'critical | worsening | stable | improving | resolved' },
+        { k: 'reasoning',           v: 'One sentence — what trend data supported this' },
+        { k: 'classifier_reasoning', v: 'Stored on each problem in MongoDB for audit' },
+      ],
+      outputs: ['verified structured_summary', 'pipeline_traces (step=status_classifier)'],
+    },
+  },
+
+  // ── Problem Tracker ReAct Loop lane ──────────────────────────────────────
+  {
+    id: 'pt_in', label: 'Verified Problems', sublabel: 'structured_summary + stored state',
+    lane: 'loop', type: 'io',
+    tooltip: {
+      title: 'Tracker Input',
+      body: 'The tracker receives the classifier-verified structured_summary plus a list of which problem names already exist in patient_problems. New vs existing problems are flagged in the user message so the model knows which to query notes for and which have pending next_checks.',
+      fields: [
+        { k: 'structured_summary', v: 'Verified problems with statuses and management text' },
+        { k: 'stored_names',       v: 'Problem names already in patient_problems — existing vs new' },
+        { k: 'snapshot_at',        v: 'Timestamp of this hourly run' },
+      ],
+    },
+  },
+  {
+    id: 'pt_react', label: 'Tracker Loop', sublabel: '≤10 rounds · thinking=8k',
+    lane: 'loop', type: 'process',
+    tooltip: {
+      title: 'Problem Tracker ReAct Loop',
+      body: 'One reasoning session covers ALL problems for this patient — the model sees the full problem list, queries what it needs per problem, and outputs a single set_all_assessments call at the end. This avoids re-querying the same notes for multiple problems.',
+      fields: [
+        { k: 'Model',      v: 'gemini-2.5-flash (thinking_budget=8000)' },
+        { k: 'Max rounds', v: '10' },
+        { k: 'New problem',      v: 'Query notes → is there a documented plan? → set next_check' },
+        { k: 'Existing problem', v: 'Check stored next_check → if overdue, query chart for result' },
+        { k: 'Alert rule',       v: 'New + not addressed  OR  next_check overdue and missing' },
+      ],
+      tools: ['get_vital_trend', 'get_lab_trend', 'query_patient_notes', 'get_problem_state', 'set_all_assessments'],
+    },
+  },
+  {
+    id: 'pt_tools', label: 'All 5 Tools', sublabel: 'vitals · labs · notes · state',
+    lane: 'loop', type: 'feedback',
+    tooltip: {
+      title: 'Problem Tracker Tools',
+      body: 'The tracker has two additional tools beyond the classifier: get_problem_state (fetches stored lifecycle state for a problem) and set_all_assessments (final output, called once). The other three are shared with the classifier.',
+      fields: [
+        { k: 'get_vital_trend',    v: 'Shared with classifier — trend data from snapshots' },
+        { k: 'get_lab_trend',      v: 'Shared with classifier — lab values across snapshots' },
+        { k: 'query_patient_notes', v: 'Finds documented plans and treatment evidence in notes' },
+        { k: 'get_problem_state',  v: 'Fetches stored being_addressed, next_check, last_alerted_at' },
+        { k: 'set_all_assessments', v: 'Final structured output for all problems in one call' },
+      ],
+    },
+  },
+  {
+    id: 'pt_assess', label: 'set_all_assessments', sublabel: 'full output · all problems',
+    lane: 'loop', type: 'artifact',
+    tooltip: {
+      title: 'Tracker Output — set_all_assessments',
+      body: 'Single tool call covering every problem. The model provides a complete assessment for each one. The system then computes due_after from the next_check type and upserts patient_problems.',
+      fields: [
+        { k: 'problem_name',       v: 'Exact name from structured_summary' },
+        { k: 'clinical_status',    v: 'critical | worsening | stable | improving | resolved' },
+        { k: 'being_addressed',    v: 'true = documented plan exists (not necessarily working yet)' },
+        { k: 'addressed_evidence', v: 'Quote from notes or "No plan documented"' },
+        { k: 'should_alert',       v: 'true = new+unaddressed OR next_check overdue+missing' },
+        { k: 'alert_reason',       v: 'Required when should_alert=true' },
+        { k: 'suggestions',        v: 'Specific actionable steps if alerting' },
+        { k: 'next_check.what',    v: 'What to look for: "Hb post-transfusion", "HR on Cardizem"' },
+        { k: 'next_check.type',    v: 'vital → due in 1h · lab → due in 6h' },
+      ],
+    },
+  },
+
+  // ── MongoDB Storage lane ──────────────────────────────────────────────────
+  {
+    id: 'db_problems', label: 'patient_problems', sublabel: 'per CPMRN + encounter + problem',
+    lane: 'storage', type: 'artifact',
+    tooltip: {
+      title: 'patient_problems Collection',
+      body: 'One MongoDB document per (CPMRN, encounter, problem_name). Persists across hourly runs. Accumulates a full audit trail of every assessment. The get_problem_state tool reads from this collection.',
+      fields: [
+        { k: 'Key',               v: 'CPMRN + encounter + problem_name' },
+        { k: 'clinical_status',   v: 'Latest verified status' },
+        { k: 'being_addressed',   v: 'Latest assessment' },
+        { k: 'addressed_evidence', v: 'Quote from notes' },
+        { k: 'next_check',        v: '{what, type, due_after}' },
+        { k: 'last_alerted_at',   v: 'UTC timestamp of last alert fired' },
+        { k: 'first_detected_at', v: 'Set on insert — problem discovery time' },
+      ],
+    },
+  },
+  {
+    id: 'db_next', label: 'next_check timing', sublabel: 'vital +1h · lab +6h',
+    lane: 'storage', type: 'process',
+    tooltip: {
+      title: 'next_check — Hardcoded Timing Rules',
+      body: 'The model outputs next_check.type ("vital" or "lab"). The system computes due_after at write time — no LLM reasoning about timing. This prevents errors from the model guessing time windows.',
+      fields: [
+        { k: 'type = "vital"', v: 'due_after = now + 1 hour' },
+        { k: 'type = "lab"',   v: 'due_after = now + 6 hours' },
+        { k: 'Examples',       v: '"HR on Cardizem" → vital → +1h' },
+        { k: '',               v: '"Hb post-transfusion" → lab → +6h' },
+        { k: 'Alert trigger',  v: 'datetime.now() > due_after AND expected result not found in chart' },
+      ],
+    },
+  },
+  {
+    id: 'db_audit', label: 'Assessments Log', sublabel: 'last 50 per problem',
+    lane: 'storage', type: 'artifact',
+    tooltip: {
+      title: 'Per-Problem Audit Trail',
+      body: 'Every hourly assessment is appended to patient_problems.assessments[]. Capped at 50 entries (oldest dropped). Records clinical_status, being_addressed, addressed_evidence, next_check, and whether an alert was sent.',
+      fields: [
+        { k: 'assessed_at',        v: 'UTC timestamp' },
+        { k: 'clinical_status',    v: 'At time of this assessment' },
+        { k: 'being_addressed',    v: 'At time of this assessment' },
+        { k: 'addressed_evidence', v: 'Quote from notes at this time' },
+        { k: 'alerted',            v: 'true if an alert was actually sent this round' },
+        { k: 'Cap',                v: '$slice: -50 — only last 50 kept' },
+      ],
+    },
+  },
+  {
+    id: 'db_trace', label: 'pipeline_traces', sublabel: 'full debug trace · per run',
+    lane: 'storage', type: 'artifact',
+    tooltip: {
+      title: 'pipeline_traces — Debug Collection',
+      body: 'Every ReAct loop (both classifier and tracker) saves a full trace to MongoDB. Each round captures thinking text, tool calls with args, tool results (truncated to 1 000 chars), text responses, and token counts. Use this to understand exactly what the model reasoned.',
+      fields: [
+        { k: 'step',         v: '"status_classifier" or "problem_tracker"' },
+        { k: 'rounds[]',     v: 'Per-round: thinking, tool_calls, tool_results, text, tokens' },
+        { k: 'thinking',     v: 'Gemini 2.5 thinking text (part.thought=True) — human-readable' },
+        { k: 'total_tokens', v: '{in, out} summed across all rounds' },
+        { k: 'final_output', v: 'Summarised outcome for quick inspection' },
+        { k: 'Query tip',    v: 'db.pipeline_traces.find({CPMRN:"X", step:"problem_tracker"}).sort({started_at:-1}).limit(1)' },
+      ],
+    },
+  },
+
+  // ── Alert Gate lane ───────────────────────────────────────────────────────
+  {
+    id: 'al_gate', label: 'Alert Gate', sublabel: 'should_alert=true?',
+    lane: 'alert', type: 'decision',
+    tooltip: {
+      title: 'Alert Gate — Two Conditions',
+      body: 'An alert fires only when set_all_assessments returns should_alert=true for a problem. The model sets this in exactly two cases: (1) new problem with no documented plan, or (2) a pending next_check is now overdue and the expected result is not in the chart.',
+      fields: [
+        { k: 'Condition 1', v: 'New problem + being_addressed=false → alert immediately' },
+        { k: 'Condition 2', v: 'next_check.due_after elapsed + result not found in chart → alert' },
+        { k: 'Not alerting', v: 'Worsening but addressed + next_check not due → no alert' },
+        { k: 'Example',     v: 'PRBC running → being_addressed=true, next_check: Hb +6h → no alert until due' },
+      ],
+    },
+  },
+  {
+    id: 'al_cooldown', label: 'Cooldown Check', sublabel: '8h per problem',
+    lane: 'alert', type: 'decision',
+    tooltip: {
+      title: 'Alert Cooldown — 8 Hours Per Problem',
+      body: 'Even if should_alert=true, an alert is suppressed if the same problem was alerted within the last 8 hours. last_alerted_at is checked from patient_problems. Suppressed alerts are logged but not sent.',
+      fields: [
+        { k: 'Window',      v: '8 hours from last_alerted_at' },
+        { k: 'Scope',       v: 'Per-problem — different problems in the same patient have independent cooldowns' },
+        { k: 'Logged as',   v: '"alerts_suppressed" in pipeline_traces.final_output' },
+        { k: 'Override',    v: 'No manual override — must wait for cooldown to expire' },
+      ],
+    },
+  },
+  {
+    id: 'al_gchat', label: 'Google Chat', sublabel: 'targeted · per-problem',
+    lane: 'alert', type: 'io',
+    tooltip: {
+      title: 'Google Chat Alert — Targeted',
+      body: 'Fires only for the specific problem that triggered. Includes the problem name, current_state, alert_reason, and suggestions from the tracker output. Uses the same gchat_notifier.py webhook as before.',
+      fields: [
+        { k: 'Content',    v: 'Problem name + status + alert_reason + suggestions[]' },
+        { k: 'Config',     v: 'Settings → Alerts → Webhook URL + enable toggle' },
+        { k: 'Cooldown',   v: '8h per problem — repeat alerts suppressed' },
+        { k: 'last_alerted_at', v: 'Written to patient_problems on successful send' },
+      ],
+    },
+  },
+]
+
+const PT_EDGES = [
+  { from: 'clf_in',      to: 'clf_react'   },
+  { from: 'clf_react',   to: 'clf_tools',   arcAbove: true, label: 'tool calls' },
+  { from: 'clf_tools',   to: 'clf_react',   arcAbove: true, dashed: true, label: 'results' },
+  { from: 'clf_react',   to: 'clf_out'      },
+  { from: 'clf_out',     to: 'pt_in',       cross: true   },
+  { from: 'pt_in',       to: 'pt_react'     },
+  { from: 'pt_react',    to: 'pt_tools',    arcAbove: true, label: 'tool calls' },
+  { from: 'pt_tools',    to: 'pt_react',    arcAbove: true, dashed: true, label: 'results' },
+  { from: 'pt_react',    to: 'pt_assess'    },
+  { from: 'pt_assess',   to: 'db_problems', cross: true   },
+  { from: 'pt_assess',   to: 'db_trace',    cross: true   },
+  { from: 'db_problems', to: 'db_next'      },
+  { from: 'db_next',     to: 'db_audit'     },
+  { from: 'db_problems', to: 'al_gate',     cross: true   },
+  { from: 'al_gate',     to: 'al_cooldown', label: 'yes'  },
+  { from: 'al_cooldown', to: 'al_gchat',    label: 'not suppressed' },
+  { from: 'db_problems', to: 'pt_in',       dashed: true, arcAbove: true, label: 'next run' },
+]
+
+const PT_GLOSSARY = [
+  {
+    term: 'Problem Tracker',
+    color: '#f97316',
+    body: 'A per-patient ReAct reasoning loop that runs every hour after the status classifier. It maintains a persistent problem list in MongoDB and fires targeted alerts only when a problem is new and unaddressed, or a follow-up check is overdue and missing. Replaces the previous broad CDS gate.',
+  },
+  {
+    term: 'Status Classifier',
+    color: '#7c6af7',
+    body: 'Upstream step that runs before the tracker. Uses gemini-2.5-flash with thinking to verify that worsening/critical labels from the summary updater are supported by actual trends (≥2 consecutive deteriorating readings). A single abnormal reading is not worsening.',
+  },
+  {
+    term: 'being_addressed',
+    color: '#f97316',
+    body: 'A problem is "being addressed" if a documented plan exists in the clinician notes — not necessarily if the treatment is working yet. A transfusion that is ongoing counts as being_addressed even before the repeat Hb comes back. This prevents premature alerts during the response window.',
+  },
+  {
+    term: 'next_check',
+    color: '#0ea5e9',
+    body: 'The specific thing to look for after a plan is documented. Set by the model as {what, type} — e.g. "Hb post-transfusion" (type=lab) or "HR on Cardizem" (type=vital). The system computes due_after: vitals due in 1 hour, labs due in 6 hours. An alert fires only when due_after is elapsed and the expected result is absent.',
+  },
+  {
+    term: 'Alert Conditions',
+    color: '#4ade80',
+    body: 'Exactly two conditions trigger an alert: (1) A new problem with no documented plan — should_alert=true immediately. (2) A pending next_check whose due_after has elapsed and the expected result is not found in the chart. Worsening problems that have a plan and a non-overdue next_check do not alert — the plan is trusted.',
+  },
+  {
+    term: '8-hour Cooldown',
+    color: '#4ade80',
+    body: 'Even when should_alert=true, an alert is suppressed if the same problem was alerted within the last 8 hours. Cooldowns are per-problem and independent — different problems in the same patient have separate cooldown clocks. Suppressed alerts are logged in pipeline_traces.',
+  },
+  {
+    term: 'pipeline_traces',
+    color: '#0ea5e9',
+    body: 'MongoDB debug collection. Every ReAct loop (classifier and tracker) saves a full trace: each round\'s thinking text, tool calls with args, tool results, and token counts. Query with: db.pipeline_traces.find({CPMRN:"X", step:"problem_tracker"}).sort({started_at:-1}).limit(1). Use .rounds to step through the model\'s reasoning.',
+  },
+  {
+    term: 'ReAct Pattern',
+    color: '#7c6af7',
+    body: 'Reasoning + Acting — an LLM loop where the model reasons (thinking tokens), calls a tool, sees the result, reasons again, and repeats until it has enough evidence. One session per patient covers all problems — the model queries what it needs per problem and outputs everything in a single set_all_assessments call at the end.',
+  },
+]
+
+function PtGlossaryItem({ g }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="rounded-lg border border-border bg-ink-800/60 overflow-hidden">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-3 py-2.5 text-left"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: g.color, opacity: 0.8 }} />
+          <span className="text-xs font-semibold text-white truncate">{g.term}</span>
+        </div>
+        <span className="text-muted text-[10px] ml-2 flex-shrink-0">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-0">
+          <p className="text-[11px] text-muted leading-relaxed">{g.body}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Diagram canvas component (reusable)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1140,15 +1479,18 @@ export default function PipelineDocs() {
       <div className="px-8 py-4 border-b border-border flex items-center justify-between flex-shrink-0">
         <div>
           <h1 className="font-display text-xl text-white">
-            {tab === 'cds'   ? 'CDS Pipeline Architecture'
-             : tab === 'sync' ? 'Live Patient Sync Pipeline'
-             :                  'Wiki Mop-up Pipeline'}
+            {tab === 'cds'     ? 'CDS Pipeline Architecture'
+             : tab === 'sync'   ? 'Live Patient Sync Pipeline'
+             : tab === 'tracker'? 'Problem Tracker Architecture'
+             :                    'Wiki Mop-up Pipeline'}
           </h1>
           <p className="text-muted text-xs mt-0.5 font-mono">
             {tab === 'cds'
               ? 'Arm A · Wiki-Grounded · Phase 1 → Phase 2 → Order Generation'
               : tab === 'sync'
               ? 'Hourly chart sync → FAISS note index → structured summary → conditional CDS → Google Chat alert'
+              : tab === 'tracker'
+              ? 'Status classifier → Problem Tracker ReAct loop → next_check lifecycle → targeted alerts'
               : 'Periodic wiki maintenance · Stub expansion + Scope contamination fix'}
           </p>
         </div>
@@ -1156,9 +1498,10 @@ export default function PipelineDocs() {
           {/* Tab switcher */}
           <div className="flex rounded-lg border border-border overflow-hidden text-xs font-mono">
             {[
-              { id: 'cds',   label: 'CDS Pipeline'       },
-              { id: 'mopup', label: 'Wiki Mop-up'        },
-              { id: 'sync',  label: 'Live Patient Sync'  },
+              { id: 'cds',     label: 'CDS Pipeline'       },
+              { id: 'mopup',   label: 'Wiki Mop-up'        },
+              { id: 'sync',    label: 'Live Patient Sync'  },
+              { id: 'tracker', label: 'Problem Tracker'    },
             ].map(t => (
               <button
                 key={t.id}
@@ -1196,6 +1539,16 @@ export default function PipelineDocs() {
           {tab === 'sync' && (
             <div className="flex items-center gap-4 text-xs font-mono text-muted">
               {SYNC_LANES.map(l => (
+                <div key={l.id} className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm" style={{ background: l.color, opacity: 0.8 }} />
+                  <span>{l.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab === 'tracker' && (
+            <div className="flex items-center gap-4 text-xs font-mono text-muted">
+              {PT_LANES.map(l => (
                 <div key={l.id} className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-sm" style={{ background: l.color, opacity: 0.8 }} />
                   <span>{l.label}</span>
@@ -1249,6 +1602,28 @@ export default function PipelineDocs() {
             rowDefs={SYNC_ROW_DEFS}
             lanes={SYNC_LANES}
           />
+        )}
+        {tab === 'tracker' && (
+          <>
+            <div className="w-72 flex-shrink-0 flex flex-col border-r border-border bg-ink-900 overflow-y-auto">
+              <div className="px-4 py-3 border-b border-border">
+                <p className="text-[10px] uppercase tracking-widest text-muted font-mono">Concepts & Definitions</p>
+              </div>
+              <div className="flex-1 px-3 py-3 space-y-1.5">
+                {PT_GLOSSARY.map((g, i) => (
+                  <PtGlossaryItem key={g.term} g={g} />
+                ))}
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <DiagramCanvas
+                nodes={PT_NODES}
+                edges={PT_EDGES}
+                rowDefs={PT_ROW_DEFS}
+                lanes={PT_LANES}
+              />
+            </div>
+          </>
         )}
       </div>
     </div>

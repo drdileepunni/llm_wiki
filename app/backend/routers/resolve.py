@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from ..config import KBConfig
 from ..dependencies import resolve_kb
 from ..services.fill_sections_pipeline import fill_sections
-from ..services.gap_resolver import fetch_article_content, search_for_gap, BBPool, _llm_fallback
+from ..services.gap_resolver import fetch_article_content, search_for_gap
 from ..services.llm_client import get_llm_client
 
 log = logging.getLogger("wiki.resolve")
@@ -83,7 +83,7 @@ def delete_gap(gap_stem: str, kb: KBConfig = Depends(resolve_kb)):
 
 @router.post("/search")
 async def resolve_search(req: SearchRequest, kb: KBConfig = Depends(resolve_kb)):
-    """Search Google/PubMed for articles that would fill the gap. Takes ~20-30s."""
+    """Fill the gap using MedGemma."""
     articles, _ = await asyncio.to_thread(
         search_for_gap, req.gap_title, req.gap_sections, req.max_results
     )
@@ -246,15 +246,6 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig, gap_fil
     _batches[batch_id]["total_gaps"] = len(gaps)
     log.info("resolve-all batch %s: %d gaps", batch_id, len(gaps))
 
-    # Pre-create 3 shared BB sessions for the whole batch (reduces billed minutes
-    # from N×60s to just 3×actual_duration).
-    def _start_pool():
-        p = BBPool(size=3)
-        p.start()
-        return p
-
-    pool = await asyncio.to_thread(_start_pool)
-
     async def _ingest_article(article, gap, skip_quality_gate=None):
         job_id = str(uuid.uuid4())[:8]
         _jobs[job_id] = {"status": "running", "title": article.get("title", ""), "result": None, "error": None}
@@ -278,76 +269,32 @@ async def _do_resolve_all(batch_id: str, max_results: int, kb: KBConfig, gap_fil
         result = _jobs[job_id].get("result") or {}
         return len(result.get("files_written", []))
 
-    _SECTION_LLM_THRESHOLD = 2  # go straight to LLM if any section has been filed this many times
-
     async def process_gap(gap):
         try:
-            section_times = gap.get("section_times_opened") or {}
-            escalated_sections = [
-                s for s in gap["missing_sections"]
-                if section_times.get(s, 0) >= _SECTION_LLM_THRESHOLD
-            ]
-            use_llm_directly = bool(escalated_sections)
-
             log.info(
-                "process_gap: title=%r  sections=%s  missing_values=%s  question=%s  escalated=%s",
+                "process_gap: title=%r  sections=%s  missing_values=%s  question=%s",
                 gap["title"], gap["missing_sections"],
                 gap.get("missing_values") or [],
                 (gap.get("resolution_question") or "")[:100],
-                escalated_sections or "none",
             )
-
-            files_written = 0
-
-            if use_llm_directly:
-                log.info(
-                    "resolve-all gap '%s': sections %s filed %d+ times — skipping PubMed, using LLM directly",
-                    gap["title"], escalated_sections, _SECTION_LLM_THRESHOLD,
-                )
-                llm_articles, _ = await asyncio.to_thread(
-                    _llm_fallback,
-                    gap["title"],
-                    gap["missing_sections"],
-                    gap.get("resolution_question", ""),
-                    gap.get("missing_values") or [],
-                )
-                for article in llm_articles:
-                    files_written += await _ingest_article(article, gap, skip_quality_gate=True)
-            else:
-                articles, _ = await asyncio.to_thread(
-                    search_for_gap,
-                    gap["title"],
-                    gap["missing_sections"],
-                    max_results,
-                    pool,
-                    gap.get("resolution_question", ""),
-                    gap.get("missing_values") or [],
-                )
-                for article in articles:
-                    files_written += await _ingest_article(article, gap)
-
-                # LLM fallback if PubMed articles were found but nothing got written.
-                if files_written == 0:
-                    log.info("resolve-all gap '%s': 0 files written — triggering LLM fallback", gap["title"])
-                    llm_articles, _ = await asyncio.to_thread(
-                        _llm_fallback,
-                        gap["title"],
-                        gap["missing_sections"],
-                        gap.get("resolution_question", ""),
-                        gap.get("missing_values") or [],
-                    )
-                    for article in llm_articles:
-                        await _ingest_article(article, gap, skip_quality_gate=True)
+            articles, _ = await asyncio.to_thread(
+                search_for_gap,
+                gap["title"],
+                gap["missing_sections"],
+                max_results,
+                None,
+                gap.get("resolution_question", ""),
+                gap.get("missing_values") or [],
+            )
+            for article in articles:
+                await _ingest_article(article, gap, skip_quality_gate=True)
         except Exception as exc:
-            log.warning("resolve-all gap '%s' search failed: %s", gap["title"], exc)
+            log.warning("resolve-all gap '%s' failed: %s", gap["title"], exc)
         finally:
             _batches[batch_id]["completed_gaps"] += 1
 
-    try:
-        await asyncio.gather(*[process_gap(g) for g in gaps])
-    finally:
-        await asyncio.to_thread(pool.stop)
-
+    for g in gaps:
+        await process_gap(g)
     _batches[batch_id]["status"] = "done"
     log.info("resolve-all batch %s done: %d jobs started", batch_id, len(_batches[batch_id]["job_ids"]))
 

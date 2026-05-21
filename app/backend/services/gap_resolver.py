@@ -550,113 +550,22 @@ def search_for_gap(
     times_opened: int = 0,
 ) -> tuple[list[dict], float]:
     """
-    Search Google/PubMed for free full-text articles covering the gap.
-    Falls back to LLM-generated content (KG_FALLBACK_MODEL) when PubMed yields 0 results
-    or when times_opened >= 1 (gap already attempted once without closing).
-    Pass a BBPool for batch usage — sessions are shared across all gaps in the batch.
-    Pass resolution_question for targeted search and fallback generation.
+    Fill a knowledge gap using MedGemma directly.
     Returns (articles, cost_usd).
     """
-    log.info("=== search_for_gap START  gap='%s'  sections=%s  question=%s  times_opened=%d ===",
-             gap_title, gap_sections, resolution_question[:80] if resolution_question else "none", times_opened)
+    log.info("=== search_for_gap START  gap='%s'  sections=%s  question=%s ===",
+             gap_title, gap_sections, resolution_question[:80] if resolution_question else "none")
 
-    if times_opened >= 1:
-        if KG_FALLBACK_MODEL.startswith("medgemma") and not _is_ollama_reachable():
-            log.warning(
-                "[gap=%s] MedGemma is down — gap left open, will be resolved when MedGemma is back",
-                gap_title,
-            )
-            return [], 0.0
-        log.info("[gap=%s] times_opened=%d >= 1 — skipping PubMed, going straight to LLM fallback",
-                 gap_title, times_opened)
-        llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
-        log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(llm_articles))
-        return llm_articles, llm_cost
+    if KG_FALLBACK_MODEL.startswith("medgemma") and not _is_ollama_reachable():
+        log.warning(
+            "[gap=%s] MedGemma is down — gap left open, will be resolved when MedGemma is back",
+            gap_title,
+        )
+        return [], 0.0
 
-    query, search_cost = generate_search_query(gap_title, gap_sections, resolution_question)
-    total_search_cost  = search_cost
-    articles: list[dict] = []
-
-    from playwright.sync_api import sync_playwright
-
-    @contextmanager
-    def _browser_ctx():
-        if bb_pool is not None:
-            with bb_pool.acquire() as browser:
-                yield browser
-        else:
-            with _BB_SEM, _BB() as bb:
-                with sync_playwright() as pw:
-                    browser = pw.chromium.connect_over_cdp(bb.cdp_url)
-                    yield browser
-
-    with _browser_ctx() as browser:
-
-            seen_ids: set[str] = set()
-            all_hits: list[dict] = []
-            for h in _google_search_in_session(browser, query):
-                if h["id"] not in seen_ids:
-                    seen_ids.add(h["id"])
-                    all_hits.append(h)
-
-            log.info("[gap=%s] Google search found %d unique PubMed/PMC hits", gap_title, len(all_hits))
-
-            for hit in all_hits:
-                if len(articles) >= max_results:
-                    break
-
-                if hit["type"] == "pmc":
-                    pmid = _pmc_to_pmid(hit["id"])
-                    if not pmid:
-                        continue
-                    known_pmc = hit["id"]
-                else:
-                    pmid      = hit["id"]
-                    known_pmc = None
-
-                try:
-                    article = _fetch_article_meta(pmid)
-                except Exception as exc:
-                    log.warning("[gap=%s] Metadata fetch failed for PMID %s: %s", gap_title, pmid, exc)
-                    continue
-
-                if known_pmc and not article["pmc_id"]:
-                    article["pmc_id"] = known_pmc
-
-                if not article["pmc_id"]:
-                    log.debug("[gap=%s] PMID %s has no PMC full text — skipping", gap_title, pmid)
-                    continue
-
-                relevant, reason, rel_cost = _is_relevant(
-                    article, gap_title, gap_sections,
-                    resolution_question=resolution_question,
-                    missing_values=missing_values,
-                )
-                total_search_cost += rel_cost
-                article["relevant"]         = relevant
-                article["relevance_reason"] = reason
-                if relevant:
-                    articles.append(article)
-
-            browser.close()
-
-    log.info("[gap=%s] PubMed path: %d relevant article(s) from %d hits",
-             gap_title, len(articles), len(all_hits))
-
-    # ── LLM fallback when PubMed yields nothing ───────────────────────────────
-    if not articles:
-        if KG_FALLBACK_MODEL.startswith("medgemma") and not _is_ollama_reachable():
-            log.warning(
-                "[gap=%s] MedGemma is down — gap left open, will be resolved when MedGemma is back",
-                gap_title,
-            )
-        else:
-            llm_articles, llm_cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
-            articles.extend(llm_articles)
-            total_search_cost += llm_cost
-
+    articles, cost = _llm_fallback(gap_title, gap_sections, resolution_question, missing_values)
     log.info("=== search_for_gap END  gap='%s'  articles=%d ===", gap_title, len(articles))
-    return articles, total_search_cost
+    return articles, cost
 
 
 def fetch_article_content(pmc_id: str) -> Optional[str]:

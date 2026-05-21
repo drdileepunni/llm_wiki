@@ -56,6 +56,13 @@ class LLMTextBlock:
 
 
 @dataclass
+class LLMThinkingBlock:
+    """Gemini 2.5 thinking text surfaced when part.thought == True."""
+    type: str = "thinking"
+    text: str = ""
+
+
+@dataclass
 class LLMResponse:
     stop_reason: str          # "end_turn" | "tool_use" | "max_tokens"
     content: list[Any]        # LLMToolUseBlock | LLMTextBlock items
@@ -458,6 +465,9 @@ class GeminiLLMClient:
                 ts = getattr(part, "thought_signature", None) or getattr(fc, "thought_signature", None)
                 content.append(LLMToolUseBlock(name=fc.name, input=args, id=f"gemini_{fc.name}", thought_signature=ts or None))
                 stop_reason = "tool_use"
+            elif getattr(part, "thought", False) and getattr(part, "text", None):
+                # Gemini 2.5 thinking text — human-readable reasoning, not echoed back
+                content.append(LLMThinkingBlock(text=part.text))
             elif getattr(part, "text", None):
                 content.append(LLMTextBlock(text=part.text))
 

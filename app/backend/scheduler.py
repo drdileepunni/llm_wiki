@@ -2,10 +2,11 @@
 
 Per-patient pipeline (runs after each successful snapshot):
   1. Chart sync        — snapshot_collector.collect() → db.snapshots
-  2. Note indexing     — FAISS index rebuilt from latest chart
+  2. Note indexing     — FAISS index rebuilt from latest chart (skipped if notes unchanged)
   3. Delta extraction  — new vitals/labs/notes vs last_snapshot_at
   4. Rolling summary   — Gemini structured update → db.patient_contexts
-  5. CDS (conditional) — runs only when any problem is worsening / critical
+  4b. Status classifier — reasoning model verifies worsening/critical labels
+  5. Problem tracker   — persistent problem list, targeted alerts, next_check lifecycle
 
 Only one process may hold the scheduler at a time. An exclusive fcntl file lock
 is acquired on startup and held for the lifetime of the process. When the process
@@ -28,8 +29,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
-
-_WORSENING_STATUSES = {"worsening", "critical"}
 
 _scheduler: BackgroundScheduler | None = None
 _last_run_at: datetime | None = None
@@ -144,7 +143,7 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
 
     # Persist updated context
     try:
-        from tools.radar_sync.patient_context import append_entry, update_summary as _ctx_update_summary
+        from tools.radar_sync.patient_context import update_summary as _ctx_update_summary
         narrative = (
             new_structured.get("narrative", "")
             if isinstance(new_structured, dict)
@@ -152,7 +151,6 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
         )
         _ctx_update_summary(cpmrn, encounter, narrative, snapshot_at)
 
-        # Store structured summary alongside narrative
         from backend.services.emr.db import get_db as _get_db
         _get_db()["patient_contexts"].update_one(
             {"CPMRN": cpmrn, "encounter": encounter},
@@ -161,56 +159,15 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
     except Exception:
         logger.exception("pipeline: context save failed for %s enc=%d", cpmrn, encounter)
 
-    # Step 5: CDS — only if any problem is worsening or critical
-    problems = new_structured.get("problems", []) if isinstance(new_structured, dict) else []
-    triggering = [p["name"] for p in problems if p.get("status") in _WORSENING_STATUSES]
-
-    if triggering:
-        logger.info(
-            "pipeline: CDS triggered for %s enc=%d — worsening/critical: %s",
-            cpmrn, encounter, triggering,
-        )
-        try:
-            from tools.radar_sync.cds_runner import run_cds
-            io_summary = delta.get("io_last_24h", {})
-            cds_result = run_cds(cpmrn, encounter, new_structured, chart, io_summary)
-
-            # Append to hourly_entries so the frontend can surface it
-            from tools.radar_sync.patient_context import append_entry
-            append_entry(cpmrn, encounter, {
-                "snapshot_at":    snapshot_at,
-                "triggering_problems": triggering,
-                "structured_summary": new_structured,
-                "suggestions":    cds_result,
-            })
-            status["cds"] = {"triggered": True, "problems": triggering}
-            logger.info("pipeline: CDS complete for %s enc=%d", cpmrn, encounter)
-
-            # Google Chat alert — only if webhook is configured and enabled
-            try:
-                from backend.services.emr.db import get_db as _get_db
-                from tools.radar_sync.gchat_notifier import send_gchat_alert
-                cfg = _get_db()["app_settings"].find_one({"_id": "gchat_webhook"})
-                if cfg and cfg.get("enabled") and cfg.get("url"):
-                    sent = send_gchat_alert(
-                        cpmrn, encounter, triggering,
-                        new_structured, cds_result,
-                        cfg["url"],
-                    )
-                    status["cds"]["gchat_alert"] = "sent" if sent else "failed"
-            except Exception:
-                logger.exception("pipeline: gchat alert failed for %s enc=%d", cpmrn, encounter)
-                status["cds"]["gchat_alert"] = "error"
-        except Exception:
-            logger.exception("pipeline: CDS failed for %s enc=%d", cpmrn, encounter)
-            status["cds"] = {"triggered": True, "problems": triggering, "error": True}
-    else:
-        logger.info(
-            "pipeline: CDS skipped for %s enc=%d — no worsening/critical problems (statuses: %s)",
-            cpmrn, encounter,
-            [p.get("status") for p in problems],
-        )
-        status["cds"] = {"triggered": False}
+    # Step 5: problem tracker — manages persistent problem list + targeted alerts
+    try:
+        from tools.radar_sync.problem_tracker import track_problems
+        tracker_result = track_problems(cpmrn, encounter, new_structured, snapshot_at)
+        status["problem_tracker"] = tracker_result
+        logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)
+    except Exception:
+        logger.exception("pipeline: problem tracker failed for %s enc=%d", cpmrn, encounter)
+        status["problem_tracker"] = {"error": "exception"}
 
     return status
 

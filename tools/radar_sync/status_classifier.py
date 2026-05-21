@@ -317,8 +317,11 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
 
     from backend.config import GOOGLE_API_KEY
     from backend.services.llm_client import GeminiLLMClient
+    from backend.services.emr.db import get_db as _get_db
+    from tools.radar_sync.react_tracer import ReActTracer
 
     client = GeminiLLMClient(api_key=GOOGLE_API_KEY, model=_CLASSIFIER_MODEL)
+    tracer = ReActTracer(cpmrn, encounter, step="status_classifier", db=_get_db())
 
     # Build the initial user message
     problem_block = "\n".join(
@@ -341,6 +344,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
     final_assessments: list[dict] = []
 
     for round_num in range(_MAX_TOOL_ROUNDS):
+        tracer.start_round(round_num)
         try:
             force = round_num < _MAX_TOOL_ROUNDS - 1  # last round: don't force tool
             resp = client.create_message(
@@ -353,15 +357,22 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
             )
         except Exception:
             logger.exception("status_classifier: LLM call failed on round %d for %s", round_num, cpmrn)
+            tracer.end_round()
             break
+
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens)
 
         # Collect assistant content for history
         assistant_parts: list[dict] = []
         tool_calls: list[dict] = []
 
         for block in resp.content:
-            if block.type == "tool_use":
+            if block.type == "thinking":
+                tracer.log_thinking(block.text)
+                # thinking blocks are not added to message history
+            elif block.type == "tool_use":
                 tool_calls.append(block)
+                tracer.log_tool_call(block.name, block.input)
                 part: dict = {
                     "type": "tool_use",
                     "name": block.name,
@@ -372,10 +383,13 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
                     part["thought_signature"] = block.thought_signature
                 assistant_parts.append(part)
             else:
+                tracer.log_text(block.text)
                 assistant_parts.append({"type": "text", "text": block.text})
 
         if assistant_parts:
             messages.append({"role": "assistant", "content": assistant_parts})
+
+        tracer.end_round()
 
         if not tool_calls:
             break
@@ -398,6 +412,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
                 })
             else:
                 result_text = _run_tool(tc.name, tc.input, cpmrn, encounter)
+                tracer.log_tool_result(tc.name, result_text)
                 logger.info("status_classifier: tool %s → %d chars", tc.name, len(result_text))
                 tool_results.append({
                     "type": "tool_result",
@@ -416,6 +431,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
     # Apply verified statuses back to the summary
     if not final_assessments:
         logger.warning("status_classifier: no assessments returned for %s — keeping draft statuses", cpmrn)
+        tracer.save(final_output={"error": "no_assessments"})
         return structured_summary
 
     name_to_assessment = {a["problem_name"]: a for a in final_assessments}
@@ -433,4 +449,8 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
             p = {**p, "status": new_status, "classifier_reasoning": assessment.get("reasoning", "")}
         updated_problems.append(p)
 
-    return {**structured_summary, "problems": updated_problems}
+    result = {**structured_summary, "problems": updated_problems}
+    tracer.save(final_output={
+        "assessments": [(a["problem_name"], a["status"]) for a in final_assessments],
+    })
+    return result
