@@ -7,35 +7,64 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def query_patient_notes(cpmrn: str, encounter: int, question: str, k: int = 5) -> str:
-    """
-    Semantic search over all clinician notes for this patient.
-    Returns formatted note excerpts with timestamps and note types.
-    Requires the note index to already exist in MongoDB (built by sync pipeline).
-    """
+def _load_store(cpmrn: str, encounter: int):
+    """Load the FAISS note store for this patient. Returns store or None."""
     from .notes_module.admission_loader import AdmissionStore
     from .notes_module.mongo_cache import load_index, index_exists
-    from .notes_module.rag_index import retrieve
 
     admission_id = f"{cpmrn}_{encounter}"
     if not index_exists(admission_id):
-        return f"No note index found for {cpmrn} encounter {encounter}. Run sync first."
+        return None, f"No note index found for {cpmrn} encounter {encounter}. Run sync first."
 
-    # Build a minimal store to host the index
     store = AdmissionStore(admission_id=admission_id, start_time=None, end_time=None, dfs={})
     if not load_index(store, admission_id):
-        return "Failed to load note index from cache."
+        return None, "Failed to load note index from cache."
+
+    return store, None
+
+
+def query_patient_notes(cpmrn: str, encounter: int, question: str, k: int = 5) -> str:
+    """
+    Semantic search over all clinician notes for this patient.
+    Returns plain formatted text (no chunk objects) — use for display only.
+    For citation-aware retrieval use query_patient_notes_with_chunks().
+    """
+    text, _ = query_patient_notes_with_chunks(cpmrn, encounter, question, k)
+    return text
+
+
+def query_patient_notes_with_chunks(
+    cpmrn: str,
+    encounter: int,
+    question: str,
+    k: int = 5,
+    start_index: int = 0,
+) -> tuple[str, list]:
+    """
+    Semantic search over all clinician notes.
+    Returns (formatted_text, chunks) where:
+      - formatted_text has each chunk prefixed with [N] where N = start_index + i
+      - chunks is the raw list of Chunk objects in the same order
+
+    start_index lets callers maintain a global numbering across multiple calls
+    so the model sees [0], [1], [2]... across the entire session.
+    """
+    from .notes_module.rag_index import retrieve
+
+    store, err = _load_store(cpmrn, encounter)
+    if store is None:
+        return err, []
 
     chunks = retrieve(store, question, k=k)
     if not chunks:
-        return "No relevant notes found."
+        return "No relevant notes found.", []
 
     parts = []
-    for chunk in chunks:
-        header = f"[{chunk.note_time or 'unknown time'} | {chunk.note_type or 'note'}"
+    for i, chunk in enumerate(chunks):
+        idx = start_index + i
+        header = f"[{idx}] {chunk.note_time or 'unknown time'} | {chunk.note_type or 'note'}"
         if chunk.author:
             header += f" | {chunk.author}"
-        header += "]"
         parts.append(f"{header}\n{chunk.text}")
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), chunks

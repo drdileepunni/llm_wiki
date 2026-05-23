@@ -23,5 +23,6 @@ dependencies = [
     "tiktoken>=0.13.0",
     "google-generativeai>=0.8.6",
     "google-auth>=2.49.1",
+    "google-cloud-bigquery>=3.0.0",
     "apscheduler>=3.10.0",
 ]

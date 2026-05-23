@@ -38,6 +38,7 @@ log = logging.getLogger("wiki.llm_client")
 class LLMUsage:
     input_tokens: int
     output_tokens: int
+    thinking_tokens: int = 0   # Gemini 2.5: thoughts_token_count from usage_metadata
 
 
 @dataclass
@@ -491,14 +492,15 @@ class GeminiLLMClient:
                     pass
 
         # ── usage ────────────────────────────────────────────────────────────
-        meta    = raw.usage_metadata
-        in_tok  = getattr(meta, "prompt_token_count", 0) or 0
-        out_tok = getattr(meta, "candidates_token_count", 0) or 0
+        meta         = raw.usage_metadata
+        in_tok       = getattr(meta, "prompt_token_count",    0) or 0
+        out_tok      = getattr(meta, "candidates_token_count", 0) or 0
+        think_tok    = getattr(meta, "thoughts_token_count",   0) or 0
 
         return LLMResponse(
             stop_reason=stop_reason,
             content=content,
-            usage=LLMUsage(in_tok, out_tok),
+            usage=LLMUsage(in_tok, out_tok, thinking_tokens=think_tok),
         )
 
 

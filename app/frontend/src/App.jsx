@@ -20,6 +20,7 @@ import PipelineDocs from './pages/PipelineDocs'
 import Mopup from './pages/Mopup'
 import CdsReplay from './pages/CdsReplay'
 import Settings from './pages/Settings'
+import Study from './pages/Study'
 
 export default function App() {
   return (
@@ -47,6 +48,7 @@ export default function App() {
             <Route path="docs" element={<PipelineDocs />} />
             <Route path="cds-replay" element={<CdsReplay />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="study" element={<Study />} />
           </Route>
         </Routes>
       </BrowserRouter>

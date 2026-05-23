@@ -3,7 +3,7 @@ import sys
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm, validation_runner, clinical_rules, mopup, radar_replay, snapshot_router, settings_router
+from .routers import ingest, chat, dashboard, wiki, kbs, resolve, assess, clinical_assess, learn, order_gen, viva, viva_batch, logs, graph, vm, validation_runner, clinical_rules, mopup, radar_replay, snapshot_router, settings_router, gchat_scraper_router, clinical_context_rules_router, study_router
 
 # ── Logging config ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -66,6 +66,9 @@ app.include_router(mopup.router)
 app.include_router(radar_replay.router)
 app.include_router(snapshot_router.router)
 app.include_router(settings_router.router)
+app.include_router(gchat_scraper_router.router)
+app.include_router(clinical_context_rules_router.router)
+app.include_router(study_router.router)
 
 @app.on_event("startup")
 def startup():

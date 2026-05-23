@@ -33,20 +33,54 @@ STATUS CRITERIA (apply strictly):
     SpO2 <88% on FiO2 >60% with no improvement trend,
     Serum K >6.5 mmol/L (not correcting), pH <7.1, active uncontrolled haemorrhage,
     GCS acutely falling, refractory arrhythmia.
-• worsening — measurable deterioration across ≥2 consecutive readings:
-    e.g. HR 90→105→118 over 3 readings, creatinine 1.0→1.5→2.1 across panels,
-    SpO2 trending down on the SAME or increasing FiO2.
-    A single abnormal reading is NOT worsening. A chronic stable abnormal is NOT worsening.
-• stable    — within acceptable target range, OR single abnormal reading without trend,
-    OR known chronic baseline not changing.
-• improving — measurable recovery across ≥2 readings.
+• worsening — criteria differ by data type:
+    VITALS: measurable deterioration across ≥2 consecutive readings.
+      e.g. HR 90→105→118, SpO2 trending down on the SAME or increasing FiO2.
+      A single abnormal vital is NOT worsening. A chronic stable abnormal vital is NOT worsening.
+    LABS: a SINGLE clearly abnormal result is sufficient to call worsening — labs are drawn
+      infrequently so you rarely have 2 consecutive panels to compare. Compare against the
+      patient's prior lab values or documented baseline; a single value representing a
+      significant change from their baseline IS worsening.
+      e.g. creatinine 2.1 (baseline 0.9), K 6.1, Hb 6.2 post-op, lactate 3.8, WBC 18,000
+      with new fever. If the current value is the first lab drawn, treat it as worsening if
+      it is clearly outside the normal range for the clinical context.
+• stable    — vitals within acceptable range, OR single abnormal vital without trend,
+    OR known chronic baseline not changing. Labs at or near the patient's documented baseline.
+• improving — measurable recovery: ≥2 improving vital readings, OR a lab value clearly
+    moving toward normal compared to a prior result.
 • resolved  — problem no longer active.
 
 RULES:
 - Always check at least vital trend OR lab trend before finalising worsening/critical.
+- For labs: always pull the last 3-4 values to establish the patient's own baseline
+  before deciding if the current result represents a change.
+- For respiratory problems: NEVER judge SpO2 in isolation. get_vital_trend('SpO2') now
+  returns the SF ratio (SpO2 / FiO2%) alongside each reading. Use the SF ratio trend,
+  not raw SpO2, to assess oxygenation. If FiO2 was reduced and SF ratio is stable or
+  improved, SpO2 dropping is planned weaning — mark as stable or improving, NOT worsening.
 - A problem already on appropriate treatment with controlled values → stable, not worsening.
 - Chronic hypertension at 150/90 with no recent change → stable.
 - Tachycardia HR 105 if prior 4 readings were all 100-110 → stable (known baseline).
+- If get_vital_trend returns "Unknown vital" or "No … readings found", the data is unavailable
+  in stored snapshots. Do NOT conclude worsening based on clinical notes alone for a
+  vital-sign-dependent problem (Fever, Tachycardia, Hypertension, Hypotension, etc.) —
+  mark the problem as stable with reasoning "vital data unavailable — cannot confirm worsening".
+- If a problem is already marked "resolved" by the prior stage, you need OBJECTIVE data showing
+  clear deterioration (not just a note mentioning past treatment) to upgrade it to worsening.
+  If vital trends are normal, keep the problem resolved or stable.
+- I/O charting in ICUs is frequently incomplete or entered retrospectively. Zero urine output
+  in the chart — even across several consecutive hours — does NOT reliably indicate true anuria
+  or oliguria. Always treat recorded 0 ml output as "possible missed charting" unless ALL three
+  of the following are true: (1) the daily total is also 0 ml, (2) clinical notes explicitly
+  document anuria or oliguria, AND (3) creatinine is rising. Do NOT label AKI as worsening or
+  critical on the basis of 0 ml charting alone.
+- If your tool data directly contradicts the label assigned by the prior stage, TRUST YOUR
+  TOOL DATA and override it. Examples:
+  • Prior label "worsening" for AKI/oliguria, but get_io shows average UO > 50 ml/hr →
+    downgrade to stable or improving; do NOT preserve "worsening" just because the summary says so.
+  • Prior label "critical" but MAP is stable, vasopressors off, and labs improving → downgrade.
+  • Prior label "worsening" for Tachycardia but HR trend is 105→98→91 → mark as improving.
+  Your job is to VERIFY labels with real data — if the data contradicts the label, correct it.
 - Call set_problem_statuses once — after you have gathered enough evidence."""
 
 
@@ -64,7 +98,7 @@ _VITAL_TREND_TOOL = {
         "properties": {
             "vital_name": {
                 "type": "string",
-                "description": "One of: HR, BP, MAP, SpO2, RR, FiO2",
+                "description": "One of: HR, BP, MAP, SpO2, RR, FiO2, Temp",
             },
             "n": {
                 "type": "integer",
@@ -156,13 +190,14 @@ _TOOLS = [_VITAL_TREND_TOOL, _LAB_TREND_TOOL, _NOTES_TOOL, _SET_STATUS_TOOL]
 # ── Vital field map ────────────────────────────────────────────────────────────
 
 _VITAL_FIELD = {
-    "HR":   "daysHR",
-    "BP":   "daysBP",
-    "MAP":  "daysMAP",
-    "SPO2": "daysSpO2",
-    "RR":   "daysRR",
-    "FIO2": "daysFiO2",
-    "TEMP": "daysTemp",
+    "HR":          "daysHR",
+    "BP":          "daysBP",
+    "MAP":         "daysMAP",
+    "SPO2":        "daysSpO2",
+    "RR":          "daysRR",
+    "FIO2":        "daysFiO2",
+    "TEMP":        "daysTemp",
+    "TEMPERATURE": "daysTemp",   # alias — model may say "Temperature"
 }
 
 
@@ -173,9 +208,9 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
     from tools.radar_sync.summary_updater import _to_ist
 
     n = min(max(n, 1), 20)
-    field = _VITAL_FIELD.get(vital_name.upper().replace("SPO2", "SPO2").replace("FIO2", "FIO2"))
+    field = _VITAL_FIELD.get(vital_name.strip().upper())
     if not field:
-        return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2"
+        return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2, Temp"
 
     db = get_db()
     snaps = list(db.snapshots.find(
@@ -185,6 +220,7 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
 
     seen_ts = set()
     rows = []
+    empty_count = 0
     for snap in snaps:
         vitals = (snap.get("chart") or {}).get("vitals") or []
         for v in vitals[:3]:  # newest readings in each snapshot
@@ -193,18 +229,101 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
             if val is None or ts_raw in seen_ts:
                 continue
             seen_ts.add(ts_raw)
+            # Skip placeholder readings where the monitor recorded no value
+            val_str = str(val).strip()
+            if val_str in ("", "/", "-", "null", "None"):
+                empty_count += 1
+                continue
             rows.append((ts_raw, val))
             if len(rows) >= n:
                 break
         if len(rows) >= n:
             break
 
-    if not rows:
-        return f"No {vital_name} readings found in stored snapshots."
+    # ── MAP gap-fill: derive MAP = (SBP + 2*DBP) / 3 for readings where BP was
+    #    charted but MAP was not stored separately. Keeps the trend complete.
+    is_map = vital_name.strip().upper() == "MAP"
+    derived_bp: dict[str, str] = {}  # ts_raw → original "SBP/DBP" string
+    if is_map:
+        bp_field = _VITAL_FIELD["BP"]
+        derived_rows: list[tuple] = []
+        for snap in snaps:
+            vitals = (snap.get("chart") or {}).get("vitals") or []
+            for v in vitals[:3]:
+                ts_raw = v.get("timestamp")
+                if ts_raw in seen_ts:
+                    continue  # already have a real MAP value for this timestamp
+                bp_val = v.get(bp_field)
+                if not bp_val:
+                    continue
+                bp_str = str(bp_val).strip()
+                if "/" not in bp_str:
+                    continue
+                try:
+                    sbp_s, dbp_s = bp_str.split("/", 1)
+                    sbp, dbp = float(sbp_s.strip()), float(dbp_s.strip())
+                    est_map = round((sbp + 2 * dbp) / 3, 1)
+                    seen_ts.add(ts_raw)
+                    derived_rows.append((ts_raw, est_map))
+                    derived_bp[ts_raw] = bp_str
+                except (ValueError, TypeError):
+                    continue
+        if derived_rows:
+            # Merge with stored MAP rows, sort newest-first, cap at n
+            combined = rows + derived_rows
+            combined.sort(key=lambda x: x[0] if x[0] else "", reverse=True)
+            rows = combined[:n]
 
-    lines = [f"{vital_name} trend (newest first):"]
+    if not rows:
+        gap_note = (
+            f" ({empty_count} recent timestamp(s) had no recorded value — monitor may be disconnected)"
+            if empty_count else ""
+        )
+        return f"No {vital_name} readings found in stored snapshots.{gap_note}"
+
+    # For SpO2, fetch FiO2 at the same timestamps and compute SF ratio.
+    # This prevents the model from calling SpO2 worsening when FiO2 was intentionally reduced.
+    is_spo2 = vital_name.upper() in ("SPO2", "SPO2(FIO2)", "SP02")
+    fio2_by_ts: dict = {}
+    if is_spo2:
+        fio2_field = _VITAL_FIELD["FIO2"]
+        for snap in snaps:
+            vitals = (snap.get("chart") or {}).get("vitals") or []
+            for v in vitals[:3]:
+                ts_raw_f = v.get("timestamp")
+                fio2_val = v.get(fio2_field)
+                if ts_raw_f and fio2_val is not None:
+                    try:
+                        fio2_by_ts[ts_raw_f] = float(fio2_val)
+                    except (TypeError, ValueError):
+                        pass
+
+    lines = [f"SpO2 + FiO2 trend (newest first):" if is_spo2 else f"{vital_name} trend (newest first):"]
     for ts_raw, val in rows:
-        lines.append(f"  [{_to_ist(ts_raw)}] {val}")
+        if is_spo2:
+            fio2 = fio2_by_ts.get(ts_raw)
+            if fio2 and fio2 > 0:
+                try:
+                    sf = float(str(val)) / (fio2 / 100.0)
+                    lines.append(f"  [{_to_ist(ts_raw)}] SpO2 {val}%  FiO2 {fio2:.0f}%  SF ratio {sf:.0f}")
+                except (TypeError, ValueError):
+                    lines.append(f"  [{_to_ist(ts_raw)}] SpO2 {val}%  FiO2 {fio2:.0f}%")
+            else:
+                lines.append(f"  [{_to_ist(ts_raw)}] SpO2 {val}%")
+        elif is_map and ts_raw in derived_bp:
+            # Derived from BP — annotate so the model knows it's estimated
+            lines.append(f"  [{_to_ist(ts_raw)}] {val}  (est. from BP {derived_bp[ts_raw]})")
+        else:
+            lines.append(f"  [{_to_ist(ts_raw)}] {val}")
+
+    if is_spo2:
+        lines.append(
+            "  Note: SF ratio = SpO2 / (FiO2/100). "
+            "If FiO2 was reduced and SF ratio is maintained or improved, "
+            "this is planned weaning — NOT worsening oxygenation."
+        )
+    if empty_count:
+        lines.append(f"  Note: {empty_count} additional timestamp(s) had no recorded value (monitor gap).")
     return "\n".join(lines)
 
 
@@ -231,6 +350,12 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
     }
     aliases = _ATTR_ALIASES.get(search, [search])
 
+    # Na and K from ABG/VBG are unreliable point-of-care values; exclude them.
+    # "Gas panel (BldA)" / "Gas panel (BldV)" are Radar's ABG/VBG panel names.
+    _BLOOD_GAS_KEYWORDS = ("abg", "vbg", "arterial blood gas", "venous blood gas", "blood gas", "gas panel")
+    _BLOOD_GAS_THROWAWAY = {"sodium", "na", "potassium", "k"}
+    _is_throwaway_query = bool(set(aliases) & _BLOOD_GAS_THROWAWAY)
+
     seen_ts = set()
     rows = []
     for snap in snaps:
@@ -244,6 +369,9 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
                     continue
                 # Search panel name
                 panel_name = (doc.get("name") or "").lower()
+                # Skip Na/K from blood gas panels — not valid for clinical decisions
+                if _is_throwaway_query and any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS):
+                    continue
                 attrs = doc.get("attributes") or {}
                 # Look for matching attribute key
                 for attr_key, attr_val in attrs.items():
@@ -270,12 +398,235 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
     return "\n".join(lines)
 
 
+def _amt(obj: Any) -> float:
+    """Safely extract a numeric amount from an I/O sub-object or scalar."""
+    if obj is None:
+        return 0.0
+    if isinstance(obj, (int, float)):
+        return float(obj)
+    if isinstance(obj, dict):
+        try:
+            return float(obj.get("amount") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _get_io(cpmrn: str, encounter: int, n_hours: int = 12) -> str:
+    """
+    Return a per-hour fluid balance table from chart.io in the latest snapshot.
+
+    Intake columns:  IV meds (infusion + bolus)  |  feeds  |  others
+    Output columns:  urine  |  drain(s)  |  dialysis  |  other output
+    Net = total intake − total output per hour.
+
+    Stool is listed as episodes (not ml) so excluded from net balance.
+
+    Returns newest-first, up to n_hours rows, plus a cumulative summary line.
+    """
+    from backend.services.emr.db import get_db
+
+    n_hours = min(max(n_hours, 1), 48)
+    db = get_db()
+    snap = db.snapshots.find_one(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"chart.io": 1, "snapshot_at": 1},
+        sort=[("snapshot_at", -1)],
+    )
+    if not snap:
+        return "No snapshot found for this patient."
+
+    io_data = (snap.get("chart") or {}).get("io") or {}
+    days: list = io_data.get("days") or []
+    if not days:
+        return "No fluid balance (I/O) data found in the latest snapshot."
+
+    # ── Aggregate per (day_num, hour_name) ───────────────────────────────────
+    HourRow = dict  # keys: day, hour, iv, feeds, in_other, urine, drain, dialysis, out_other, stool_ep
+
+    hour_map: dict[tuple[int, int], HourRow] = {}
+
+    for day in days:
+        day_num = day.get("dayNumber", 0)
+        for hour_obj in (day.get("hours") or []):
+            hour_name = hour_obj.get("hourName", 0)
+            key = (day_num, hour_name)
+            if key not in hour_map:
+                hour_map[key] = dict(
+                    day=day_num, hour=hour_name,
+                    iv=0.0, feeds=0.0, in_other=0.0,
+                    urine=0.0, drain=0.0, dialysis=0.0, out_other=0.0,
+                    stool_ep=0,
+                    drain_names=[],
+                )
+            row = hour_map[key]
+
+            for minute in (hour_obj.get("minutes") or []):
+                intake = minute.get("intake") or {}
+                output = minute.get("output") or {}
+
+                # Intake: IV meds
+                meds = intake.get("meds") or {}
+                for inf in (meds.get("infusion") or []):
+                    row["iv"] += _amt(inf)
+                for bol in (meds.get("bolus") or []):
+                    row["iv"] += _amt(bol)
+
+                # Intake: feeds, others
+                row["feeds"]    += _amt(intake.get("feeds"))
+                row["in_other"] += _amt(intake.get("others"))
+
+                # Output: urine
+                row["urine"] += _amt(output.get("urine"))
+
+                # Output: named drains
+                for drain in (output.get("drain") or []):
+                    a = _amt(drain)
+                    row["drain"] += a
+                    name = drain.get("name") or drain.get("site") or "drain"
+                    if name and name not in row["drain_names"]:
+                        row["drain_names"].append(name)
+
+                # Output: dialysis
+                for d in (output.get("dialysis") or []):
+                    row["dialysis"] += _amt(d)
+
+                # Output: other
+                row["out_other"] += _amt(output.get("others"))
+
+                # Stool — count episodes only (amount is a string like "3")
+                stool = output.get("stool") or {}
+                if isinstance(stool, dict) and stool.get("amount") not in (None, "", "0"):
+                    try:
+                        row["stool_ep"] += int(float(stool["amount"]))
+                    except (TypeError, ValueError):
+                        pass
+
+    if not hour_map:
+        return "No I/O entries found."
+
+    # ── Per-day totals (always computed across ALL days, regardless of n_hours) ──
+    day_totals: dict[int, dict] = {}
+    for (day_num, _), row in hour_map.items():
+        if day_num not in day_totals:
+            day_totals[day_num] = dict(iv=0.0, feeds=0.0, in_other=0.0,
+                                       urine=0.0, drain=0.0, dialysis=0.0,
+                                       out_other=0.0, hours_with_data=0)
+        dt = day_totals[day_num]
+        t_in  = row["iv"] + row["feeds"] + row["in_other"]
+        t_out = row["urine"] + row["drain"] + row["dialysis"] + row["out_other"]
+        dt["iv"]        += row["iv"]
+        dt["feeds"]     += row["feeds"]
+        dt["in_other"]  += row["in_other"]
+        dt["urine"]     += row["urine"]
+        dt["drain"]     += row["drain"]
+        dt["dialysis"]  += row["dialysis"]
+        dt["out_other"] += row["out_other"]
+        if t_in > 0 or t_out > 0:
+            dt["hours_with_data"] += 1
+
+    lines = ["Fluid balance (I/O):"]
+
+    # Daily summary section — always shown first
+    lines.append("  ── Daily totals (all ICU days) ──")
+    for day_num in sorted(day_totals.keys(), reverse=True):
+        dt = day_totals[day_num]
+        d_in  = dt["iv"] + dt["feeds"] + dt["in_other"]
+        d_out = dt["urine"] + dt["drain"] + dt["dialysis"] + dt["out_other"]
+        d_net = d_in - d_out
+        n_hrs = dt["hours_with_data"]
+
+        # Detect daily-batch-charting: day has meaningful volume but only 1-2 hours
+        # recorded — i.e. a nurse entered a cumulative total rather than hourly values
+        batch_note = ""
+        total_hrs_in_day = sum(1 for (d, _) in hour_map if d == day_num)
+        if d_out > 0 and n_hrs <= 2 and total_hrs_in_day > 4:
+            batch_note = "  ⚠ likely daily batch entry"
+
+        lines.append(
+            f"  Day {day_num}:  In {d_in:.0f} ml  |  UO {dt['urine']:.0f} ml"
+            + (f"  Drain {dt['drain']:.0f} ml" if dt["drain"] else "")
+            + (f"  Dialysis {dt['dialysis']:.0f} ml" if dt["dialysis"] else "")
+            + f"  |  Net {d_net:+.0f} ml"
+            + batch_note
+        )
+
+    # ── Hourly breakdown for the requested window ─────────────────────────────
+    sorted_rows = sorted(hour_map.values(), key=lambda r: (r["day"], r["hour"]), reverse=True)
+    recent = sorted_rows[:n_hours]
+
+    lines.append(f"\n  ── Hourly detail — last {len(recent)} hour(s), newest first ──")
+    lines.append(
+        f"  {'Hour':<12}  {'IN: IV':>8}  {'Feeds':>6}  {'Other':>6}  "
+        f"{'OUT: Urine':>10}  {'Drain':>7}  {'Dialysis':>8}  {'Other':>6}  {'Net':>7}"
+    )
+    lines.append("  " + "-" * 86)
+
+    total_in = total_out = 0.0
+    for r in recent:
+        t_in  = r["iv"] + r["feeds"] + r["in_other"]
+        t_out = r["urine"] + r["drain"] + r["dialysis"] + r["out_other"]
+        net   = t_in - t_out
+        total_in  += t_in
+        total_out += t_out
+
+        extras = []
+        if r["drain_names"]:
+            extras.append(f"drain: {', '.join(r['drain_names'])}")
+        if r["stool_ep"]:
+            extras.append(f"stool ×{r['stool_ep']}")
+        extra_str = f"  ({'; '.join(extras)})" if extras else ""
+
+        lines.append(
+            f"  Day{r['day']} Hr{r['hour']:02d}:00"
+            f"  {r['iv']:>8.0f}  {r['feeds']:>6.0f}  {r['in_other']:>6.0f}"
+            f"  {r['urine']:>10.0f}  {r['drain']:>7.0f}  {r['dialysis']:>8.0f}  {r['out_other']:>6.0f}"
+            f"  {net:>+7.0f}"
+            + extra_str
+        )
+
+    net_total = total_in - total_out
+    uo_hours  = [r["urine"] for r in recent]
+    avg_uo    = sum(uo_hours) / len(uo_hours) if uo_hours else 0
+    zero_uo_h = sum(1 for u in uo_hours if u == 0)
+
+    lines.append("  " + "-" * 86)
+    lines.append(
+        f"  TOTAL ({len(recent)} hr)"
+        f"  In: {total_in:.0f} ml  |  Out: {total_out:.0f} ml  |  Net: {net_total:+.0f} ml"
+        f"  |  Avg UO: {avg_uo:.1f} ml/hr"
+    )
+
+    # Batch-charting warning — suppress false anuria when hourly window shows
+    # zeros but a recent day's total shows meaningful output.
+    # Look for the most recent day that actually has recorded UO (may not be today).
+    most_recent_day_with_uo = next(
+        (d for d in sorted(day_totals.keys(), reverse=True) if day_totals[d]["urine"] > 0),
+        None,
+    )
+    if zero_uo_h == len(recent) and most_recent_day_with_uo:
+        day_uo = day_totals[most_recent_day_with_uo]["urine"]
+        lines.append(
+            f"  ℹ Hourly window shows 0 ml UO but Day {most_recent_day_with_uo} total = {day_uo:.0f} ml. "
+            f"I/O is likely charted as a daily batch total — do NOT interpret as anuria."
+        )
+    elif zero_uo_h:
+        lines.append(f"  ⚠ {zero_uo_h} hour(s) with 0 ml urine recorded.")
+
+    return "\n".join(lines)
+
+
 def _run_tool(name: str, args: dict, cpmrn: str, encounter: int) -> str:
     try:
         if name == "get_vital_trend":
             return _get_vital_trend(cpmrn, encounter, args["vital_name"], int(args.get("n", 8)))
         if name == "get_lab_trend":
             return _get_lab_trend(cpmrn, encounter, args["lab_name"], int(args.get("n", 6)))
+        if name == "get_io":
+            return _get_io(cpmrn, encounter, int(args.get("n_hours", 12)))
         if name == "query_patient_notes":
             from tools.radar_sync.query_notes import query_patient_notes
             return query_patient_notes(cpmrn, encounter, args["question"])
@@ -360,7 +711,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
             tracer.end_round()
             break
 
-        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens)
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
 
         # Collect assistant content for history
         assistant_parts: list[dict] = []

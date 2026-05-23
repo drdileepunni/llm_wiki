@@ -30,6 +30,7 @@ const primaryNav = [
   { to: '/wiki',       label: 'Wiki',       icon: BookOpenIcon },
   { to: '/viva',       label: 'Viva',       icon: UserGroupIcon },
   { to: '/validation', label: 'Validation', icon: BeakerIcon },
+  { to: '/study',      label: 'Study',      icon: ChartBarIcon },
   { to: '/cds-replay', label: 'CDS Replay', icon: FilmIcon },
 ]
 
@@ -41,8 +42,8 @@ const toolsNav = [
   { to: '/gap-intelligence', label: 'Gaps',     icon: ExclamationTriangleIcon },
   { to: '/graph',            label: 'Graph',    icon: ShareIcon },
   { to: '/learn',            label: 'Learn',    icon: AcademicCapIcon },
-  { to: '/clinical-rules',  label: 'Rules',    icon: ShieldCheckIcon },
-  { to: '/mopup',           label: 'Mop-up',   icon: SparklesIcon },
+  { to: '/clinical-rules', label: 'Rules',  icon: ShieldCheckIcon },
+  { to: '/mopup',          label: 'Mop-up', icon: SparklesIcon },
   { to: '/docs',            label: 'Docs',     icon: BookOpenIcon },
   { to: '/settings',        label: 'Alerts',   icon: BellAlertIcon },
 ]
@@ -199,10 +200,11 @@ export default function Layout() {
           </p>
           <div className="flex items-center gap-1">
             <select
-              value={activeKB}
+              value={activeKB ?? ''}
               onChange={e => switchKB(e.target.value)}
               className="flex-1 bg-ink-800 border border-border rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-accent truncate"
             >
+              {!activeKB && <option value="">Loading…</option>}
               {kbList.map(kb => (
                 <option key={kb} value={kb}>{kb}</option>
               ))}

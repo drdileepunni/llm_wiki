@@ -1037,3 +1037,103 @@ export async function testGchatWebhook() {
   return res.json()
 }
 
+// ── GChat scraper ───────────────────────────────────────────────────────────
+export async function getGchatScraperStatus() {
+  const res = await fetch(`${BASE}/settings/gchat-scraper/status`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function syncGchat() {
+  const res = await fetch(`${BASE}/settings/gchat-scraper/sync`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getGchatFeedback() {
+  const res = await fetch(`${BASE}/settings/gchat-scraper/data`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Clinical Context Rules ──────────────────────────────────────────────────
+export async function listContextRules() {
+  const res = await fetch(`${BASE}/clinical-context-rules/`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createContextRule(rule) {
+  const res = await fetch(`${BASE}/clinical-context-rules/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rule),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateContextRule(ruleId, rule) {
+  const res = await fetch(`${BASE}/clinical-context-rules/${ruleId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rule),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteContextRule(ruleId) {
+  const res = await fetch(`${BASE}/clinical-context-rules/${ruleId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+
+// ── Study / Adjudication ──────────────────────────────────────────────────────
+
+export async function getStudyQueue() {
+  const res = await fetch(`${BASE}/study/queue`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyAlert(alertId) {
+  const res = await fetch(`${BASE}/study/alert/${alertId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function submitAdjudication(alertId, verdict, explainabilityRating, reviewerNotes = '') {
+  const res = await fetch(`${BASE}/study/adjudicate/${alertId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verdict, explainability_rating: explainabilityRating, reviewer_notes: reviewerNotes }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyMetrics() {
+  const res = await fetch(`${BASE}/study/metrics`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyMetricsHistory(n = 48) {
+  const res = await fetch(`${BASE}/study/metrics/history?n=${n}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyCosts(n = 48) {
+  const res = await fetch(`${BASE}/study/costs?n=${n}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyCostSummary() {
+  const res = await fetch(`${BASE}/study/costs/summary`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}

@@ -169,6 +169,17 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
         logger.exception("pipeline: problem tracker failed for %s enc=%d", cpmrn, encounter)
         status["problem_tracker"] = {"error": "exception"}
 
+    # Step 6: false-negative detector — safety net for missed deteriorations
+    try:
+        from tools.radar_sync.fn_detector import run_fn_detector
+        from backend.services.emr.db import get_db as _get_db2
+        fn_result = run_fn_detector(cpmrn, encounter, new_structured, snapshot_at, _get_db2())
+        status["fn_detector"] = fn_result
+        logger.info("pipeline: fn_detector done for %s enc=%d — %s", cpmrn, encounter, fn_result)
+    except Exception:
+        logger.exception("pipeline: fn_detector failed for %s enc=%d", cpmrn, encounter)
+        status["fn_detector"] = {"error": "exception"}
+
     return status
 
 
@@ -183,30 +194,66 @@ def _collect_all():
         from tools.radar_sync.chart_puller import get_admitted_patients
 
         db = get_db()
-        patients = list(db.snapshot_schedule.find({"active": True}))
-        logger.info("scheduler: collecting %d scheduled patient(s)", len(patients))
 
-        # Build admitted-patient sets per workspace (fetch once per unique workspace)
-        admitted_by_workspace: dict[str, set] = {}
-        for p in patients:
-            ws = p.get("workspace")
-            if ws and ws not in admitted_by_workspace:
-                try:
-                    admitted = get_admitted_patients(ws)
-                    admitted_by_workspace[ws] = {
-                        (a["CPMRN"], a["encounter"]) for a in admitted
-                    }
-                    logger.info("scheduler: workspace %s has %d admitted patient(s)", ws, len(admitted))
-                except Exception:
-                    logger.exception("scheduler: could not fetch admitted patients for workspace %s", ws)
-                    admitted_by_workspace[ws] = None  # None = couldn't check; don't skip
+        # ── Step 0: auto-enroll new admissions ────────────────────────────────
+        # Derive monitored workspaces from app_settings (primary) and from any
+        # workspace already present in snapshot_schedule (backward compat).
+        ws_config = db["app_settings"].find_one({"_id": "monitored_workspaces"})
+        configured_ws: list[str] = (ws_config or {}).get("workspaces", [])
+        scheduled_ws: list[str] = db.snapshot_schedule.distinct(
+            "workspace", {"workspace": {"$exists": True, "$ne": None}}
+        )
+        all_workspaces: list[str] = list(dict.fromkeys(configured_ws + scheduled_ws))  # ordered, deduped
+
+        # Fetch admitted patients for every monitored workspace.
+        # admitted_by_workspace[ws] = set of (CPMRN, encounter) tuples, or None on error.
+        admitted_by_workspace: dict[str, set | None] = {}
+        for ws in all_workspaces:
+            try:
+                admitted = get_admitted_patients(ws)
+                admitted_by_workspace[ws] = {(a["CPMRN"], a["encounter"]) for a in admitted}
+                logger.info("scheduler: workspace %s — %d admitted patient(s)", ws, len(admitted))
+
+                # Enroll any patient not already active in snapshot_schedule
+                enrolled = 0
+                for patient in admitted:
+                    cpmrn    = patient["CPMRN"]
+                    encounter = patient["encounter"]
+                    existing = db.snapshot_schedule.find_one(
+                        {"CPMRN": cpmrn, "encounter": encounter}
+                    )
+                    if existing is None:
+                        db.snapshot_schedule.insert_one({
+                            "CPMRN":             cpmrn,
+                            "encounter":         encounter,
+                            "workspace":         ws,
+                            "active":            True,
+                            "added_at":          datetime.now(timezone.utc),
+                            "last_collected_at": None,
+                            "last_error":        None,
+                        })
+                        enrolled += 1
+                        logger.info(
+                            "scheduler: auto-enrolled %s enc=%d from workspace %s",
+                            cpmrn, encounter, ws,
+                        )
+                if enrolled:
+                    logger.info("scheduler: workspace %s — enrolled %d new patient(s)", ws, enrolled)
+
+            except Exception:
+                logger.exception("scheduler: could not fetch admitted patients for workspace %s", ws)
+                admitted_by_workspace[ws] = None  # None = couldn't check; don't skip or deactivate
+
+        # Reload patient list — now includes freshly enrolled patients
+        patients = list(db.snapshot_schedule.find({"active": True}))
+        logger.info("scheduler: collecting %d active patient(s)", len(patients))
 
         for p in patients:
             cpmrn     = p["CPMRN"]
             encounter = p.get("encounter", 1)
             workspace = p.get("workspace")
             try:
-                # Admission check — skip and auto-deactivate discharged patients
+                # ── Discharge check — deactivate patients no longer admitted ──
                 if workspace and admitted_by_workspace.get(workspace) is not None:
                     if (cpmrn, encounter) not in admitted_by_workspace[workspace]:
                         logger.info(
@@ -265,6 +312,35 @@ def _collect_all():
                 )
                 _last_run_results.append({"cpmrn": cpmrn, "status": "error", "error": str(e)})
                 logger.exception("scheduler: collect failed for %s", cpmrn)
+        # ── Study pipeline — runs after all patients are processed ───────────
+        try:
+            from tools.radar_sync.study_runner import run_study_jobs
+            study_result = run_study_jobs(db)
+            _last_run_results.append({"step": "study_jobs", **study_result})
+            logger.info("scheduler: study jobs done — %s", study_result)
+        except Exception:
+            logger.exception("scheduler: study jobs failed")
+            _last_run_results.append({"step": "study_jobs", "error": "exception"})
+
+        # ── Cost tracker — aggregate LLM token costs for this run ────────────
+        try:
+            from tools.radar_sync.study_cost_tracker import compute_run_cost
+            cost_doc = compute_run_cost(db, _last_run_at)
+            totals = cost_doc.get("totals", {})
+            _last_run_results.append({
+                "step":          "cost_summary",
+                "patient_count": cost_doc.get("patient_count", 0),
+                "trace_count":   cost_doc.get("trace_count", 0),
+                "total_cost_usd": totals.get("cost_usd", 0),
+                "total_input_tokens":    totals.get("input_tokens", 0),
+                "total_output_tokens":   totals.get("output_tokens", 0),
+                "total_thinking_tokens": totals.get("thinking_tokens", 0),
+            })
+            logger.info("scheduler: cost summary — $%.4f USD", totals.get("cost_usd", 0))
+        except Exception:
+            logger.exception("scheduler: cost tracker failed")
+            _last_run_results.append({"step": "cost_summary", "error": "exception"})
+
     except Exception:
         logger.exception("scheduler: _collect_all crashed")
 

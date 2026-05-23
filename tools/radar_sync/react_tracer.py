@@ -113,12 +113,12 @@ class ReActTracer:
             preview, "…" if len(text) > 200 else "",
         )
 
-    def log_tokens(self, input_tokens: int, output_tokens: int) -> None:
-        self._cur["tokens"] = {"in": input_tokens, "out": output_tokens}
+    def log_tokens(self, input_tokens: int, output_tokens: int, thinking_tokens: int = 0) -> None:
+        self._cur["tokens"] = {"in": input_tokens, "out": output_tokens, "thinking": thinking_tokens}
         logger.debug(
-            "[%s] %s enc=%d round=%d tokens in=%d out=%d",
+            "[%s] %s enc=%d round=%d tokens in=%d out=%d thinking=%d",
             self.step, self.cpmrn, self.encounter,
-            self._cur.get("round", "?"), input_tokens, output_tokens,
+            self._cur.get("round", "?"), input_tokens, output_tokens, thinking_tokens,
         )
 
     # ── persist ────────────────────────────────────────────────────────────────
@@ -131,8 +131,9 @@ class ReActTracer:
         total_ms = int((datetime.now(timezone.utc) - self.started_at).total_seconds() * 1000)
 
         # Summarise token totals across all rounds
-        total_in  = sum((r.get("tokens") or {}).get("in", 0)  for r in self.rounds)
-        total_out = sum((r.get("tokens") or {}).get("out", 0) for r in self.rounds)
+        total_in      = sum((r.get("tokens") or {}).get("in", 0)       for r in self.rounds)
+        total_out     = sum((r.get("tokens") or {}).get("out", 0)      for r in self.rounds)
+        total_think   = sum((r.get("tokens") or {}).get("thinking", 0) for r in self.rounds)
 
         doc = {
             "CPMRN":        self.cpmrn,
@@ -141,7 +142,7 @@ class ReActTracer:
             "started_at":   self.started_at,
             "duration_ms":  total_ms,
             "total_rounds": len(self.rounds),
-            "total_tokens": {"in": total_in, "out": total_out},
+            "total_tokens": {"in": total_in, "out": total_out, "thinking": total_think},
             "rounds":       self.rounds,
             "final_output": final_output,
         }

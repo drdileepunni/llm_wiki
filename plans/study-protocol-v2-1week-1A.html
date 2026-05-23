@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Study Protocol — LLM CDS Validation, Workspace 1A</title>
+<style>
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,300;0,400;0,600;1,400&family=Source+Sans+3:wght@300;400;600&display=swap');
+
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page) " of " counter(pages);
+        font-size: 9pt;
+        color: #9ca3af;
+        font-family: 'Source Sans 3', sans-serif;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: 'Source Serif 4', 'Georgia', serif;
+    font-size: 10.5pt;
+    line-height: 1.65;
+    color: #1a1a2e;
+    max-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+/* Cover-style title block */
+body > h1:first-child {
+    font-size: 20pt;
+    font-weight: 600;
+    color: #0f2044;
+    border-bottom: 3px solid #1e40af;
+    padding-bottom: 10px;
+    margin-top: 0;
+    margin-bottom: 4px;
+    line-height: 1.25;
+}
+body > h2:nth-child(2) {
+    font-size: 13pt;
+    font-weight: 300;
+    color: #374151;
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-style: italic;
+}
+
+/* Section headings */
+h1 { font-size: 16pt; color: #0f2044; margin-top: 28px; margin-bottom: 6px; border-bottom: 2px solid #1e40af; padding-bottom: 4px; }
+h2 { font-size: 13pt; color: #1e3a8a; margin-top: 20px; margin-bottom: 4px; }
+h3 { font-size: 11pt; color: #1d4ed8; margin-top: 14px; margin-bottom: 2px; font-style: italic; }
+
+/* Meta block (bold lines at top of document) */
+p strong:only-child {
+    color: #374151;
+}
+
+/* Paragraphs */
+p { margin: 0.45em 0; }
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-family: 'Source Sans 3', 'Arial', sans-serif;
+    font-size: 9.5pt;
+}
+thead tr {
+    background-color: #1e3a8a;
+    color: white;
+}
+thead th {
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+}
+tbody tr:nth-child(even) { background-color: #f0f4ff; }
+tbody tr:nth-child(odd)  { background-color: #ffffff; }
+tbody td { padding: 5px 10px; border-bottom: 1px solid #e2e8f0; }
+
+/* Code blocks */
+code {
+    font-family: 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f1f5f9;
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: #334155;
+}
+pre { background: #f1f5f9; padding: 10px 14px; border-radius: 5px; overflow-x: auto; margin: 10px 0; }
+pre code { background: none; padding: 0; }
+
+/* Horizontal rule */
+hr { border: none; border-top: 1px solid #cbd5e1; margin: 18px 0; }
+
+/* Lists */
+ul, ol { padding-left: 1.4em; margin: 0.4em 0; }
+li { margin-bottom: 0.2em; }
+
+/* Blockquote / callout */
+blockquote {
+    border-left: 4px solid #3b82f6;
+    margin: 12px 0;
+    padding: 6px 14px;
+    background: #eff6ff;
+    color: #1e3a8a;
+    font-style: italic;
+}
+
+/* Page break hints */
+h1 { page-break-before: auto; }
+table { page-break-inside: avoid; }
+
+</style>
+</head>
+<body>
+<h1 id="study-protocol">Study Protocol</h1>
+<h2 id="prospective-validation-of-a-react-llm-based-clinical-decision-support-system-in-a-tele-icu-setting">Prospective Validation of a ReAct LLM-Based Clinical Decision Support System in a Tele-ICU Setting</h2>
+<p><strong>Protocol version:</strong> 2.0<br />
+<strong>Date:</strong> 22 May 2026<br />
+<strong>Principal Investigator:</strong> Dr. Dileep Unni, Cloudphysician<br />
+<strong>Study duration:</strong> 7 days<br />
+<strong>Study unit:</strong> Workspace 1A (multi-hospital tele-ICU, ~30 admitted patients)<br />
+<strong>Status:</strong> Pending IEC approval and compute budget approval</p>
+<hr />
+<h2 id="1-background-and-rationale">1. Background and Rationale</h2>
+<h3 id="11-the-problem-with-existing-icu-alert-systems">1.1 The problem with existing ICU alert systems</h3>
+<p>Clinical decision support (CDS) tools in the ICU broadly fall into two categories:</p>
+<ol>
+<li>
+<p><strong>Rule-based early warning scores</strong> (NEWS2, MEWS, SOFA) — transparent but insensitive to clinical context. They score a single snapshot of vital signs without knowing whether a problem is already being managed, resulting in high false-positive rates and alert fatigue.</p>
+</li>
+<li>
+<p><strong>Machine learning classifiers</strong> — higher aggregate accuracy in controlled retrospective datasets, but typically black-box outputs, brittle to data missingness, and unable to reason over free-text clinical notes where most ICU decision-making is documented.</p>
+</li>
+</ol>
+<p>Both share a critical failure mode: <strong>alert fatigue</strong>. They fire without knowing whether the clinical team has already identified and addressed the problem. In a multi-hospital tele-ICU, where a single remote physician monitors dozens of patients simultaneously, unfiltered alerts are unworkable.</p>
+<h3 id="12-a-new-approach-agentic-llm-reasoning">1.2 A new approach: agentic LLM reasoning</h3>
+<p>Large language models (LLMs) with extended reasoning and tool-calling (ReAct loop) enable a qualitatively different CDS paradigm. Rather than passively scoring a feature vector, an LLM agent actively queries the patient record before reaching a conclusion:</p>
+<ul>
+<li>Retrieves vital sign trends, lab trajectories, fluid balance, and free-text clinical notes</li>
+<li>Determines whether each problem is already documented as being managed (citing the relevant note excerpt verbatim)</li>
+<li>Applies patient-specific clinical context rules (e.g., permissive hypertension targets in ischaemic stroke, accepted low SpO₂ in a weaning protocol)</li>
+<li>Produces auditable, human-readable justifications for every alert it fires or suppresses</li>
+</ul>
+<p>This approach directly addresses alert fatigue: the system remains silent when a problem is already addressed, and speaks only when it finds a genuine unresolved concern.</p>
+<h3 id="13-the-tele-icu-context">1.3 The tele-ICU context</h3>
+<p>Cloudphysician operates a multi-hospital remote ICU monitoring network. Remote physicians manage patients across geographically dispersed hospitals without direct physical access. In this setting:</p>
+<ul>
+<li>Decision-making relies entirely on documented data and real-time vital signs</li>
+<li>A single physician monitors many patients simultaneously — alert volume directly impacts patient safety</li>
+<li>The "being addressed" dimension is clinically essential — the remote team must know whether the bedside team already has a plan before escalating</li>
+<li>Free-text note synthesis is a core cognitive task — the remote physician receives no verbal handover</li>
+</ul>
+<p>This study prospectively validates the first LLM-based CDS system purpose-built for this tele-ICU context, measuring its diagnostic accuracy against an independent ground-truth reference standard.</p>
+<hr />
+<h2 id="2-system-description">2. System Description</h2>
+<h3 id="21-pipeline-architecture">2.1 Pipeline architecture</h3>
+<p>The system executes once per hour per admitted patient. Each cycle runs three sequential stages:</p>
+<p><strong>Stage 1 — Status Classifier</strong><br />
+A Gemini 2.5 Flash reasoning model with extended thinking (budget: 8,000 thinking tokens) reviews all problems preliminarily labelled "worsening" or "critical." It actively queries vital sign trends (requiring ≥2 consecutive deteriorating readings) and lab trends before confirming or downgrading the label. This prevents single-snapshot noise from propagating to the alert stage.</p>
+<p><strong>Stage 2 — Problem Tracker (ReAct loop)</strong><br />
+A second Gemini 2.5 Flash reasoning model takes the verified problem list and determines, for each active problem:
+- Is the problem being addressed? (queries clinical notes via semantic FAISS search; requires a documented plan with verbatim citation)
+- Is a monitoring checkpoint overdue? (e.g., post-transfusion Hb recheck due but not yet arrived)
+- Should an alert fire? (only when: confirmed worsening/critical AND not addressed AND &gt;8 hours since last alert for this problem)</p>
+<p>Each fired alert includes: problem name, clinical status, baseline vs. current values, trend direction, verbatim cited note excerpt, and direct chart link.</p>
+<p><strong>Stage 3 — False Negative Safety Net</strong><br />
+A rule-based NEWS2 detector. If a problem is within its 8-hour cooldown window but NEWS2 has deteriorated significantly since the last alert (≥3 points on any single parameter or ≥6 total), the cooldown is overridden and the alert re-fires.</p>
+<h3 id="22-model-and-infrastructure">2.2 Model and infrastructure</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Specification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reasoning model</td>
+<td>Gemini 2.5 Flash (Google AI)</td>
+</tr>
+<tr>
+<td>Thinking budget</td>
+<td>8,000 tokens per ReAct call</td>
+</tr>
+<tr>
+<td>Deployment</td>
+<td>Python / FastAPI, self-hosted</td>
+</tr>
+<tr>
+<td>Data storage</td>
+<td>MongoDB (patient contexts, alerts, study data)</td>
+</tr>
+<tr>
+<td>Note indexing</td>
+<td>FAISS vector index, rebuilt per snapshot</td>
+</tr>
+<tr>
+<td>Alert delivery</td>
+<td>Google Chat webhook</td>
+</tr>
+<tr>
+<td>Study data pipeline</td>
+<td>Hourly SBAR sync from BigQuery; LLM semantic matching; automated metrics</td>
+</tr>
+</tbody>
+</table>
+<h3 id="23-alert-suppression-mechanism">2.3 Alert suppression mechanism</h3>
+<p>The "being addressed" suppression is the key innovation. When the model finds a documented plan in recent clinical notes, it suppresses the alert and logs a suppression event. A secondary endpoint of this study measures what fraction of suppressed events correspond to a real high-urgency SBAR (i.e., how often the suppression was clinically correct).</p>
+<hr />
+<h2 id="3-study-objectives">3. Study Objectives</h2>
+<h3 id="31-primary-objectives">3.1 Primary objectives</h3>
+<ol>
+<li><strong>Sensitivity</strong> — proportion of high-urgency clinical events (as defined by the SBAR reference standard) for which the system generated at least one alert in the preceding 6-hour window</li>
+<li><strong>Specificity</strong> — proportion of patient-encounters with no high-urgency SBAR for which the system generated no alert during the study period</li>
+</ol>
+<h3 id="32-secondary-objectives">3.2 Secondary objectives</h3>
+<ol>
+<li>Positive predictive value (PPV), negative predictive value (NPV), F1 score</li>
+<li><strong>Alert lead time</strong> — time between system alert and corresponding high-urgency SBAR creation (for matched TPs); primary question: does the system alert <em>before</em> the SBAR is raised?</li>
+<li><strong>Explainability rating</strong> — clinician rating of alert justifications on a 3-point scale (clear / partial / unclear)</li>
+<li><strong>Suppression accuracy</strong> — of all worsening/critical problems where the system suppressed an alert because it judged the problem as "being addressed," what fraction corresponded to a real SBAR within the matching window?</li>
+<li><strong>Alert burden</strong> — total alerts per patient-day; fraction suppressed by the "being addressed" mechanism</li>
+<li><strong>Cost per event detected</strong> — LLM API cost per true-positive alert</li>
+</ol>
+<hr />
+<h2 id="4-study-design">4. Study Design</h2>
+<p>Prospective observational cohort study. The LLM CDS system runs passively alongside standard clinical care. No patient management decisions are altered by participation in this study. Clinician response to alerts follows the existing standard workflow.</p>
+<p>The study uses a <strong>continuous automated pipeline</strong> design: alert data, SBAR imports, matching, and metrics computation run automatically every hour. Manual clinician adjudication (via a dedicated web UI) is the only human-in-the-loop step.</p>
+<hr />
+<h2 id="5-study-setting-and-population">5. Study Setting and Population</h2>
+<h3 id="51-setting">5.1 Setting</h3>
+<p>Workspace 1A of the Cloudphysician multi-hospital tele-ICU monitoring network. This workspace encompasses ICU and HDU patients across multiple partner hospitals, all monitored by the same remote physician team.</p>
+<p>Current census at study initiation: approximately 30 admitted patients (exact number varies with admissions and discharges; new admissions auto-enroll hourly, discharges are auto-detected and deactivated).</p>
+<h3 id="52-inclusion-criteria">5.2 Inclusion criteria</h3>
+<ul>
+<li>All patients admitted to a workspace 1A monitored bed at any point during the 7-day study window</li>
+<li>Patient encounter active for ≥2 consecutive hours (to allow at least two pipeline cycles)</li>
+</ul>
+<h3 id="53-exclusion-criteria">5.3 Exclusion criteria</h3>
+<ul>
+<li>Patients whose data pipeline failed to sync for &gt;50% of expected hourly snapshots during their admission (data completeness failure)</li>
+<li>NICU or PICU patients, if any are routed to workspace 1A (different physiological thresholds)</li>
+</ul>
+<hr />
+<h2 id="6-study-period">6. Study Period</h2>
+<table>
+<thead>
+<tr>
+<th>Milestone</th>
+<th>Date</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Study start (00:00 IST)</td>
+<td>Monday, 26 May 2026</td>
+</tr>
+<tr>
+<td>Study end (23:59 IST)</td>
+<td>Sunday, 1 June 2026</td>
+</tr>
+<tr>
+<td>Adjudication window</td>
+<td>2–6 June 2026</td>
+</tr>
+<tr>
+<td>Analysis and write-up</td>
+<td>6 June 2026 onwards</td>
+</tr>
+<tr>
+<td>Target submission</td>
+<td>August 2026</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Duration rationale:</strong> Seven days provides a larger patient-hours base than the 48-hour pilot, captures day-of-week variation in SBAR patterns and census, and is sufficient to estimate sensitivity and specificity with Wilson 95% CIs of ±15% or better (estimated, based on expected event rates).</p>
+<hr />
+<h2 id="7-reference-standard-and-outcome-definitions">7. Reference Standard and Outcome Definitions</h2>
+<h3 id="71-alert-classification-manual-adjudication">7.1 Alert classification — manual adjudication</h3>
+<p>All system alerts generated during the study window will be reviewed by the principal investigator using a web-based adjudication interface. Each alert is assessed against the full patient chart at the time the alert fired. The reviewer records:</p>
+<ul>
+<li><strong>Verdict:</strong> Appropriate (would have been clinically useful to act on) or Inappropriate (already addressed, clinically trivial, or factually incorrect)</li>
+<li><strong>Explainability rating:</strong> 1 = clear and actionable, 2 = understandable but incomplete, 3 = unclear or misleading</li>
+<li><strong>Free-text notes</strong> (optional)</li>
+</ul>
+<h3 id="72-event-detection-sbar-reference-standard">7.2 Event detection — SBAR reference standard</h3>
+<p>High-urgency SBAR notifications (<code>urgency = 'High'</code>) from the BigQuery table <code>prod-tech-project1-bv479-zo027.patient.latest_sbar_fact</code> are used as the independent ground-truth reference standard for clinical deterioration events.</p>
+<p>These SBARs are generated by the nursing documentation system and represent urgent clinical events independently flagged by bedside staff for physician review, most commonly abnormal arterial blood gas (ABG) results and renal function tests — the primary physiological domains in which rapid deterioration occurs.</p>
+<p><strong>SBAR-alert matching:</strong><br />
+An LLM-based semantic matching step (Gemini 2.5 Flash) determines whether a given SBAR and a given alert refer to the same clinical problem for the same patient. A SBAR is matched to an alert if:
+- Same patient (CPMRN) and encounter
+- Alert fired within [SBAR creation − 6h, SBAR creation + 2h]
+- LLM semantic similarity score ≥ 0.70 (on a 0–1 scale)</p>
+<p>The asymmetric window captures the primary scenario (system alerts in advance of the SBAR) while allowing concurrent detection.</p>
+<p><strong>2×2 classification:</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Alert fired</th>
+<th>No alert</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>High SBAR exists</strong></td>
+<td>TP (confirmed by adjudication)</td>
+<td>FN</td>
+</tr>
+<tr>
+<td><strong>No High SBAR</strong></td>
+<td>FP (confirmed by adjudication)</td>
+<td>TN</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>TP</strong> — alert fired AND clinician adjudicated "Appropriate" AND matched to a high-urgency SBAR</li>
+<li><strong>FP</strong> — alert fired AND clinician adjudicated "Inappropriate," OR alert fired but no matching SBAR within window</li>
+<li><strong>FN</strong> — high-urgency SBAR created with no matching system alert within the window</li>
+<li><strong>TN</strong> — patient-encounter hour with no alert and no high-urgency SBAR</li>
+</ul>
+<h3 id="73-sbar-scope-restriction">7.3 SBAR scope restriction</h3>
+<p>Only high-urgency SBARs from modules <code>vitals</code>, <code>summary</code>, <code>documents</code>, and <code>intake-output</code> are included. Modules <code>orders</code>, <code>mar</code>, and <code>notes</code> are excluded as they do not represent primary physiological deterioration events.</p>
+<hr />
+<h2 id="8-statistical-analysis">8. Statistical Analysis</h2>
+<h3 id="81-primary-analysis">8.1 Primary analysis</h3>
+<p>From the 2×2 matrix:</p>
+<ul>
+<li><strong>Sensitivity</strong> = TP / (TP + FN)</li>
+<li><strong>Specificity</strong> = TN / (TN + FP)</li>
+<li><strong>PPV</strong> = TP / (TP + FP)</li>
+<li><strong>NPV</strong> = TN / (TN + FN)</li>
+<li><strong>F1</strong> = 2 × PPV × Sensitivity / (PPV + Sensitivity)</li>
+</ul>
+<p>All proportions reported with <strong>95% Wilson score confidence intervals</strong>.</p>
+<h3 id="82-lead-time-analysis">8.2 Lead time analysis</h3>
+<p>For all matched TPs, lead time = SBAR creation time − system alert time (minutes). Reported as median and IQR. Negative values indicate the system alerted <em>before</em> the SBAR was raised (early warning). Positive values indicate post-hoc detection.</p>
+<h3 id="83-suppression-analysis">8.3 Suppression analysis</h3>
+<p>For all worsening/critical problems where the "being addressed" suppression was triggered: proportion that had a corresponding high-urgency SBAR within the matching window. A high suppression-FN rate would indicate the system is incorrectly silencing real events; a low rate validates the suppression mechanism.</p>
+<h3 id="84-sample-size-considerations">8.4 Sample size considerations</h3>
+<p>Based on a census of ~30 patients over 7 days (168 patient-encounters), with an estimated 0.5–1.0 high-urgency SBARs per patient per day (yielding ~100–200 event-hours), Wilson CIs for a sensitivity of 0.80 are expected to be approximately ±8% at n=100 events. This is adequate for a prospective proof-of-concept study.</p>
+<hr />
+<h2 id="9-data-management">9. Data Management</h2>
+<p>All study data are stored in a self-hosted MongoDB instance within the Cloudphysician infrastructure. No patient data leaves the network perimeter. Study collections (<code>study_alerts</code>, <code>study_sbar_import</code>, <code>study_adjudications</code>, <code>study_metrics_snapshots</code>) are append-only after initial write; no retrospective modification of alert records is possible.</p>
+<p>The adjudication interface is accessible only over VPN by the principal investigator.</p>
+<hr />
+<h2 id="10-ethical-considerations">10. Ethical Considerations</h2>
+<p>This study is observational. The LLM CDS system runs as a passive monitoring layer alongside existing clinical workflows. No patient management protocol is altered. Clinicians receive alerts through the existing Google Chat channel; their decision to act on or ignore any alert remains entirely at their discretion.</p>
+<p>Patient data are processed within Cloudphysician's existing clinical data infrastructure, governed by existing data processing agreements with partner hospitals. No new data collection is introduced. An IEC waiver of consent is requested on the grounds that: (a) the study involves no intervention; (b) individual patient-level results are not reported; (c) the data pipeline is already in clinical use.</p>
+<hr />
+<h2 id="11-compute-and-api-cost-budget">11. Compute and API Cost Budget</h2>
+<h3 id="111-observed-cost-from-live-runs-22-may-2026">11.1 Observed cost (from live runs, 22 May 2026)</h3>
+<p>Two complete hourly runs have been executed over the study unit (workspace 1A, ~30 patients). Observed costs:</p>
+<table>
+<thead>
+<tr>
+<th>Run</th>
+<th>Patients</th>
+<th>Input tokens</th>
+<th>Output tokens</th>
+<th>Thinking tokens</th>
+<th><strong>Cost (USD)</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2026-05-22 19:00 UTC</td>
+<td>30</td>
+<td>741,419</td>
+<td>21,475</td>
+<td>141,321</td>
+<td><strong>$0.5502</strong></td>
+</tr>
+<tr>
+<td>2026-05-22 20:00 UTC</td>
+<td>31</td>
+<td>758,419</td>
+<td>24,031</td>
+<td>142,028</td>
+<td><strong>$0.5540</strong></td>
+</tr>
+<tr>
+<td><strong>Average per run</strong></td>
+<td><strong>~30</strong></td>
+<td><strong>749,919</strong></td>
+<td><strong>22,753</strong></td>
+<td><strong>141,675</strong></td>
+<td><strong>$0.5521</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Token split by step (average):</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Input</th>
+<th>Output</th>
+<th>Thinking</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>problem_tracker</code></td>
+<td>621,822</td>
+<td>18,873</td>
+<td>106,465</td>
+<td>$0.4193</td>
+</tr>
+<tr>
+<td><code>status_classifier</code></td>
+<td>128,097</td>
+<td>3,880</td>
+<td>35,210</td>
+<td>$0.1329</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>749,919</strong></td>
+<td><strong>22,753</strong></td>
+<td><strong>141,675</strong></td>
+<td><strong>$0.5521</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Pricing model: Gemini 2.5 Flash — Input $0.075/1M, Output $0.30/1M, Thinking $3.50/1M.</p>
+<h3 id="112-projected-cost-for-1-week-study">11.2 Projected cost for 1-week study</h3>
+<table>
+<thead>
+<tr>
+<th>Period</th>
+<th>Runs</th>
+<th>Projected cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>7-day study (168 runs)</td>
+<td>168</td>
+<td><strong>$92.75</strong></td>
+</tr>
+<tr>
+<td>+ 20% contingency buffer</td>
+<td>—</td>
+<td>$18.55</td>
+</tr>
+<tr>
+<td><strong>Total budget requested</strong></td>
+<td>—</td>
+<td><strong>$111.30 USD (~₹9,300)</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="113-notes">11.3 Notes</h3>
+<ul>
+<li>Thinking tokens account for ~95% of the output cost. This is by design — the extended reasoning is what enables context-sensitive suppression.</li>
+<li>Cost scales linearly with patient census. If census rises above 40, the weekly cost may reach ~$120–$130. The contingency buffer covers this.</li>
+<li>The study_matcher LLM matching step (Gemini 2.5 Flash, no thinking) adds a small additional cost (~$0.01–0.02/run) not yet captured in the above, as it runs only when new SBARs arrive.</li>
+<li>No other API costs are incurred (FAISS index is self-hosted; MongoDB is self-hosted; BigQuery reads are covered by the existing GCP project budget).</li>
+</ul>
+<hr />
+<h2 id="12-timeline">12. Timeline</h2>
+<table>
+<thead>
+<tr>
+<th>Week</th>
+<th>Activity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>22–25 May 2026</td>
+<td>IEC application, budget approval, dry-run validation</td>
+</tr>
+<tr>
+<td>26 May – 1 June 2026</td>
+<td><strong>Active data collection</strong> (automated, 24×7)</td>
+</tr>
+<tr>
+<td>2–6 June 2026</td>
+<td>Adjudication (PI reviews all alerts via web UI)</td>
+</tr>
+<tr>
+<td>7–14 June 2026</td>
+<td>Statistical analysis, figure generation</td>
+</tr>
+<tr>
+<td>15–30 June 2026</td>
+<td>Manuscript draft</td>
+</tr>
+<tr>
+<td>July 2026</td>
+<td>Internal review, co-author revisions</td>
+</tr>
+<tr>
+<td>August 2026</td>
+<td>Submission target</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="13-target-journals">13. Target Journals</h2>
+<p>Primary: <em>npj Digital Medicine</em>, <em>The Lancet Digital Health</em>, <em>JAMIA</em><br />
+Secondary: <em>Critical Care Medicine</em>, <em>Intensive Care Medicine</em></p>
+<hr />
+<h2 id="14-anticipated-impact">14. Anticipated Impact</h2>
+<p>If the system demonstrates sensitivity ≥0.75 with specificity ≥0.90, it would represent a clinically meaningful advance over rule-based early warning systems (NEWS2 sensitivity ~0.60–0.65 in comparable populations) while providing the contextual suppression and explainability that ML classifiers lack. The prospective real-world design — fully automated, continuous, 24×7 — directly addresses the implementation gap between retrospective AI benchmarks and clinical deployment.</p>
+<hr />
+<p><em>Protocol prepared by Dr. Dileep Unni, Cloudphysician. For queries: dileep.unni@cloudphysician.net</em></p>
+</body>
+</html>

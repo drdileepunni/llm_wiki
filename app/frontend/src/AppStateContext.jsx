@@ -21,16 +21,16 @@ export function AppStateProvider({ children }) {
     searchTotal: 0,
   })
 
-  const [activeKB, setActiveKB] = useState('default')
-  const [kbList, setKbList] = useState(['default'])
+  const [activeKB, setActiveKB] = useState(null)
+  const [kbList, setKbList] = useState([])
 
   useEffect(() => {
     listKBs()
       .then(data => {
-        const kbs = data.kbs || ['default']
+        const kbs = data.kbs || []
         setKbList(kbs)
-        if (kbs.length > 0 && !kbs.includes('default')) {
-          setActiveKB(kbs[0])
+        if (kbs.length > 0) {
+          setActiveKB(prev => prev && kbs.includes(prev) ? prev : kbs[0])
         }
       })
       .catch(() => {})
