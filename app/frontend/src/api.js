@@ -1137,3 +1137,27 @@ export async function getStudyCostSummary() {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+
+// ── Traces ─────────────────────────────────────────────────────────────────────
+
+export async function getTraceRuns(mode) {
+  const url = mode ? `${BASE}/traces/runs?mode=${mode}` : `${BASE}/traces/runs`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getTraceRunPatients(date, hour, mode) {
+  const url = mode
+    ? `${BASE}/traces/runs/${date}/${hour}?mode=${mode}`
+    : `${BASE}/traces/runs/${date}/${hour}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getTraceEntry(runId) {
+  const res = await fetch(`${BASE}/traces/entry/${encodeURIComponent(runId)}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}

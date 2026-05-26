@@ -209,6 +209,50 @@ _SET_ALL_TOOL = {
                             "items": {"type": "string"},
                             "description": "Specific actionable suggestions if alerting",
                         },
+                        "reasoning_fingerprint": {
+                            "type": "object",
+                            "description": (
+                                "Compact reasoning record stored so the NEXT hourly run can update "
+                                "rather than re-derive this assessment from scratch. "
+                                "For reasoning_chain: write 3-5 sentences in first person tracing "
+                                "your steps — what data you checked, what you found, what clinical "
+                                "factors you weighed, and why you reached this conclusion. "
+                                "Do NOT just restate the verdict. Future runs read this to avoid "
+                                "re-deriving your logic."
+                            ),
+                            "properties": {
+                                "reasoning_chain": {
+                                    "type": "string",
+                                    "description": (
+                                        "3-5 sentence first-person narrative of reasoning steps. "
+                                        "Example: 'I checked the Cr trend and found 1.2→1.5→1.8 mg/dL "
+                                        "over 12h. I searched notes for nephrology or fluid management "
+                                        "and found none in the last 12h. The patient is on NSAIDs "
+                                        "which is a compounding factor. I suppressed the alert as the "
+                                        "8h cooldown is active but the trajectory remains concerning.'"
+                                    ),
+                                },
+                                "key_evidence": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Specific data points that anchored this decision (3-5 items)",
+                                },
+                                "alert_status": {
+                                    "type": "string",
+                                    "description": "e.g. 'alerted', 'suppressed — 8h cooldown', 'no alert — stable'",
+                                },
+                                "watch_conditions": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "What new data would change this assessment. "
+                                        "Be specific — e.g. 'new note documenting K+ management', "
+                                        "'Cr plateau or improvement', 'cooldown expires at 22:03'"
+                                    ),
+                                },
+                            },
+                            "required": ["reasoning_chain", "key_evidence", "alert_status", "watch_conditions"],
+                        },
                         "next_check": {
                             "type": "object",
                             "description": (
@@ -272,7 +316,7 @@ _SET_ALL_TOOL = {
                     },
                     "required": [
                         "problem_name", "clinical_status", "being_addressed",
-                        "addressed_evidence", "should_alert",
+                        "addressed_evidence", "should_alert", "reasoning_fingerprint",
                     ],
                 },
             },
@@ -534,6 +578,18 @@ def _upsert_problem(
         "cited_notes":        assessment.get("cited_notes", []),
     }
 
+    # Write reasoning fingerprint if provided by model
+    raw_fp = assessment.get("reasoning_fingerprint") or {}
+    stored_fingerprint: dict | None = None
+    if raw_fp.get("reasoning_chain"):
+        stored_fingerprint = {
+            "anchored_at":    now,
+            "reasoning_chain": raw_fp.get("reasoning_chain", ""),
+            "key_evidence":    raw_fp.get("key_evidence") or [],
+            "alert_status":    raw_fp.get("alert_status", ""),
+            "watch_conditions": raw_fp.get("watch_conditions") or [],
+        }
+
     set_fields: dict = {
         "CPMRN":              cpmrn,
         "encounter":          encounter,
@@ -544,6 +600,8 @@ def _upsert_problem(
         "next_check":         next_check,  # None clears the field
         "last_assessed_at":   now,
     }
+    if stored_fingerprint:
+        set_fields["reasoning_fingerprint"] = stored_fingerprint
 
     update: dict = {
         "$set": set_fields,
@@ -597,6 +655,122 @@ def _get_clinical_context_overrides(problems: list[dict], db: Any) -> str:
     return "\n".join(matched)
 
 
+# ── Pre-fetch helpers (Fix 4: collapse 3-5 rounds → 1-2) ─────────────────────
+
+def _build_prefetch_block(
+    cpmrn: str,
+    encounter: int,
+    problems: list[dict],
+    db: Any,
+    session_chunks: list,
+) -> str:
+    """
+    Pre-fetch all data the model is likely to need and return it as a formatted
+    block injected into the first user message. Tool calls become fallbacks for
+    edge cases not covered here.
+
+    Fetches:
+      - Stored problem state (+ auto-fetched trends) for every active problem
+      - Top-5 recent clinical notes (pre-queried, indices start from 0)
+      - Fluid balance / IO (last 12h)
+    """
+    lines: list[str] = [
+        "== PRE-FETCHED CONTEXT ==",
+        "Use the data below as your primary source.",
+        "Only call tools if you need something not listed here (e.g. a specific older lab).",
+        "",
+    ]
+
+    # 1. Stored problem state for every active problem
+    stored_names = [
+        d["problem_name"]
+        for d in db["patient_problems"].find(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"problem_name": 1},
+        )
+    ]
+    if stored_names:
+        lines.append("--- Stored problem states (includes auto-fetched trend data) ---")
+        for name in stored_names:
+            try:
+                state_text = _get_problem_state(cpmrn, encounter, name, db)
+                lines.append(state_text)
+                lines.append("")
+            except Exception:
+                logger.exception("prefetch: _get_problem_state failed for '%s' %s", name, cpmrn)
+
+    # 2. Recent clinical notes (pre-queried; indices available for citation)
+    try:
+        from tools.radar_sync.query_notes import query_patient_notes_with_chunks
+        start_idx = len(session_chunks)
+        note_text, new_chunks = query_patient_notes_with_chunks(
+            cpmrn, encounter,
+            "recent management plan treatment assessment clinical notes",
+            start_index=start_idx,
+        )
+        session_chunks.extend(new_chunks)
+        lines.append("--- Recent clinical notes (pre-fetched; use indices for citations) ---")
+        lines.append(note_text)
+        lines.append("")
+    except Exception:
+        logger.exception("prefetch: note query failed for %s enc=%d", cpmrn, encounter)
+
+    # 3. IO balance
+    try:
+        from tools.radar_sync.status_classifier import _get_io
+        io_text = _get_io(cpmrn, encounter, n_hours=12)
+        lines.append("--- Fluid balance / IO (last 12h) ---")
+        lines.append(io_text)
+        lines.append("")
+    except Exception:
+        logger.exception("prefetch: IO fetch failed for %s enc=%d", cpmrn, encounter)
+
+    return "\n".join(lines)
+
+
+def _build_fingerprint_block(cpmrn: str, encounter: int, db: Any) -> str:
+    """
+    Load prior reasoning fingerprints from patient_problems and format them
+    for injection into the prompt. Returns empty string if no fingerprints exist.
+    """
+    docs = list(db["patient_problems"].find(
+        {"CPMRN": cpmrn, "encounter": encounter,
+         "reasoning_fingerprint": {"$exists": True}},
+        {"problem_name": 1, "reasoning_fingerprint": 1, "last_assessed_at": 1},
+    ))
+    if not docs:
+        return ""
+
+    lines: list[str] = [
+        "== PRIOR REASONING (from last run) ==",
+        "For each problem below, read the prior reasoning chain and determine whether",
+        "it still holds given the new data. If new data touches a watch condition,",
+        "re-examine that problem fully. If no watch condition is touched and the data",
+        "is unchanged, confirm in one sentence and carry the fingerprint forward.",
+        "Rewrite reasoning_chain to reflect any updates.",
+        "",
+    ]
+
+    for doc in docs:
+        fp = doc.get("reasoning_fingerprint") or {}
+        if not fp:
+            continue
+        last_at = doc.get("last_assessed_at")
+        last_at_str = last_at.strftime("%Y-%m-%d %H:%M UTC") if isinstance(last_at, datetime) else "unknown"
+        lines.append(f"Problem: {doc['problem_name']}  (assessed: {last_at_str})")
+        lines.append(f"  Reasoning: {fp.get('reasoning_chain', '(none)')}")
+        ev = fp.get("key_evidence") or []
+        if ev:
+            lines.append(f"  Key evidence: {ev}")
+        lines.append(f"  Alert status: {fp.get('alert_status', '(none)')}")
+        wc = fp.get("watch_conditions") or []
+        if wc:
+            lines.append(f"  Watch conditions: {wc}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def track_problems(
@@ -633,6 +807,25 @@ def track_problems(
         logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
         return {"problem_tracker": "no_problems"}
 
+    # Accumulates Chunk objects from every query_patient_notes call this session.
+    # Indexed by the [N] numbers the model sees, so cited_note_indices can be resolved.
+    # Populated by prefetch FIRST so pre-fetched note indices are available for citation.
+    session_chunks: list = []
+
+    # ── Fix 4: Pre-fetch all data and inject into first message ──────────────
+    try:
+        prefetch_block = _build_prefetch_block(cpmrn, encounter, problems, db, session_chunks)
+    except Exception:
+        logger.exception("problem_tracker: prefetch failed for %s enc=%d — continuing without", cpmrn, encounter)
+        prefetch_block = ""
+
+    # ── Fix 5: Load prior reasoning fingerprints ──────────────────────────────
+    try:
+        fingerprint_block = _build_fingerprint_block(cpmrn, encounter, db)
+    except Exception:
+        logger.exception("problem_tracker: fingerprint load failed for %s enc=%d", cpmrn, encounter)
+        fingerprint_block = ""
+
     # Build the stored state summary for the model
     stored_names = [
         d["problem_name"]
@@ -652,7 +845,7 @@ def track_problems(
 
     new_block = (
         f"\nNEW problems (no prior state): {', '.join(new_names)}"
-        if new_names else "\nAll problems have prior state — check stored state with get_problem_state."
+        if new_names else "\nAll problems have prior state."
     )
 
     context_overrides = _get_clinical_context_overrides(problems, db)
@@ -660,19 +853,17 @@ def track_problems(
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        + (
-            f"CLINICAL CONTEXT RULES FOR THIS PATIENT:\n{context_overrides}\n\n"
-            if context_overrides else ""
-        )
-        + f"Current problems:\n{problem_block}\n{new_block}\n\n"
-        f"Review each problem using the available tools and call set_all_assessments when done."
+        + (f"CLINICAL CONTEXT RULES FOR THIS PATIENT:\n{context_overrides}\n\n"
+           if context_overrides else "")
+        + (f"{prefetch_block}\n\n" if prefetch_block else "")
+        + (f"{fingerprint_block}\n\n" if fingerprint_block else "")
+        + f"Current problems from summary:\n{problem_block}\n{new_block}\n\n"
+        + "Review each problem. The pre-fetched context above is your primary source — "
+        + "only call tools for data not listed there. Call set_all_assessments when done."
     )
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
     final_assessments: list[dict] = []
-    # Accumulates Chunk objects from every query_patient_notes call this session.
-    # Indexed by the [N] numbers the model sees, so cited_note_indices can be resolved.
-    session_chunks: list = []
 
     for round_num in range(_MAX_TOOL_ROUNDS):
         tracer.start_round(round_num)

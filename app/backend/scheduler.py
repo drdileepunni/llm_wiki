@@ -65,11 +65,30 @@ def _release_lock():
         _lock_fh = None
 
 
-def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: datetime) -> dict:
+def _run_live_pipeline(
+    cpmrn: str,
+    encounter: int,
+    chart: dict,
+    snapshot_at: datetime,
+    db=None,
+) -> dict:
     """
-    Steps 2-5 of the per-patient pipeline, run synchronously after a fresh snapshot.
+    Steps 2-6 of the per-patient pipeline, run synchronously after a fresh snapshot.
+
+    Cost-reduction gates (evaluated in order):
+      1. Cadence gate  — skip LLM if next_run_at is not yet due (fn_detector still runs)
+      2. Delta gate    — skip LLM if no new vitals/labs/notes since last_llm_run_at
+      3. Pass 1 screener — cheap call that decides if Pass 2 is needed
+      4. Pass 2        — status_classifier + problem_tracker (only when Pass 1 flags)
+
+    fn_detector always runs at the end (zero LLM cost, safety net).
+
     Returns a status dict that gets merged into the scheduler result entry.
     """
+    from backend.services.emr.db import get_db as _get_db
+    if db is None:
+        db = _get_db()
+
     status: dict = {}
 
     # Step 2: note indexing (FAISS) — skipped when notes haven't changed
@@ -93,26 +112,83 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
         logger.exception("pipeline: note indexing failed for %s enc=%d", cpmrn, encounter)
         status["note_index"] = "error"
 
-    # Step 3: delta extraction
+    now = datetime.now(timezone.utc)
+
+    # Read schedule doc early — needed for delta cutoff and both gates
+    sched_doc = db.snapshot_schedule.find_one({"CPMRN": cpmrn, "encounter": encounter}) or {}
+
+    # Step 3: delta extraction (always — free, no LLM)
+    # Cutoff: use last_llm_run_at when available so the delta captures ALL data since
+    # the last analysis (which may be 1/2/4h ago), not just since the last hourly snapshot.
     try:
         from tools.radar_sync.patient_context import get_context
         from tools.radar_sync.delta_extractor import extract_delta
         ctx = get_context(cpmrn, encounter)
-        last_ts = ctx.get("last_snapshot_at")
-        if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
-            last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+        # Prefer last_llm_run_at over last_snapshot_at for delta cutoff
+        last_llm_run_at_raw = sched_doc.get("last_llm_run_at")
+        last_snapshot_ts    = ctx.get("last_snapshot_at")
+        if isinstance(last_llm_run_at_raw, datetime):
+            last_ts = last_llm_run_at_raw
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+        else:
+            last_ts = last_snapshot_ts
+            if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+
         delta = extract_delta(chart, last_ts)
         status["delta"] = {
             "new_vitals": len(delta.get("new_vitals", [])),
             "new_labs":   len(delta.get("new_labs", [])),
             "new_notes":  len(delta.get("new_notes", [])),
         }
-        logger.info("pipeline: delta extracted for %s — %s", cpmrn, status["delta"])
+        logger.info("pipeline: delta extracted for %s — %s (cutoff: %s)",
+                    cpmrn, status["delta"],
+                    last_ts.strftime("%Y-%m-%d %H:%M UTC") if last_ts else "none")
     except Exception:
         logger.exception("pipeline: delta extraction failed for %s enc=%d", cpmrn, encounter)
         return status
 
-    # Step 4: rolling summary update (Gemini)
+    # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
+    next_run_at = sched_doc.get("next_run_at")
+    if isinstance(next_run_at, datetime):
+        if next_run_at.tzinfo is None:
+            next_run_at = next_run_at.replace(tzinfo=timezone.utc)
+        if now < next_run_at:
+            logger.info(
+                "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
+                cpmrn, encounter, next_run_at.strftime("%H:%M UTC"),
+            )
+            status["cadence_gate"] = "skipped"
+            # fn_detector still runs below using the last stored summary
+            new_structured = ctx.get("structured_summary") or {}
+            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+            return status
+
+    # ── Gate 2: Delta gate — skip LLM if nothing new since last analysis ─────
+    last_llm_run_at = last_llm_run_at_raw
+    if isinstance(last_llm_run_at, datetime):
+        if last_llm_run_at.tzinfo is None:
+            last_llm_run_at = last_llm_run_at.replace(tzinfo=timezone.utc)
+        has_new_data = any([
+            delta.get("new_vitals"), delta.get("new_labs"), delta.get("new_notes"),
+        ])
+        if not has_new_data:
+            logger.info(
+                "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
+                cpmrn, encounter,
+            )
+            status["delta_gate"] = "skipped"
+            db.snapshot_schedule.update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {"next_run_at": now + timedelta(hours=4)}},
+            )
+            new_structured = ctx.get("structured_summary") or {}
+            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+            return status
+
+    # ── Step 4: rolling summary update (gemini-3.1-flash-lite, no thinking) ───
     try:
         import importlib
         import tools.radar_sync.summary_updater as _su
@@ -130,7 +206,52 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
         status["summary"] = "error"
         return status
 
-    # Step 4b: status classification — reasoning model verifies worsening/critical labels
+    # ── Gate 3: Pass 1 screener — decide if full Pass 2 is needed ────────────
+    last_problems = list(db["patient_problems"].find(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"problem_name": 1, "clinical_status": 1, "being_addressed": 1,
+         "last_assessed_at": 1, "reasoning_fingerprint": 1},
+    ))
+    try:
+        from tools.radar_sync.pass1_screener import screen_patient
+        pass1 = screen_patient(cpmrn, encounter, new_structured, delta, last_problems, db)
+        status["pass1"] = {
+            "needs_full_analysis": pass1.needs_full_analysis,
+            "next_run_hours":      pass1.next_run_hours,
+            "flag_reason":         pass1.flag_reason,
+        }
+
+        # Always store lightweight summary
+        db["patient_contexts"].update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": {"lightweight_summary": pass1.lightweight_summary}},
+        )
+
+        # Update cadence fields
+        db.snapshot_schedule.update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": {
+                "last_llm_run_at": now,
+                "next_run_at":     now + timedelta(hours=pass1.next_run_hours),
+            }},
+        )
+
+        logger.info(
+            "pipeline: pass1 done for %s enc=%d — needs_full=%s next=%dh",
+            cpmrn, encounter, pass1.needs_full_analysis, pass1.next_run_hours,
+        )
+    except Exception:
+        logger.exception("pipeline: pass1 screener failed for %s enc=%d — running full Pass 2", cpmrn, encounter)
+        pass1 = None  # type: ignore[assignment]
+
+    # If Pass 1 says not needed (and didn't fail), skip status_classifier + problem_tracker
+    if pass1 is not None and not pass1.needs_full_analysis:
+        logger.info("pipeline: pass1 gate — skipping Pass 2 for %s enc=%d", cpmrn, encounter)
+        status["pass2"] = "skipped_by_pass1"
+        _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+        return status
+
+    # ── Step 4b: status classifier — Pass 2 reasoning (gemini-2.5-flash + thinking) ──
     try:
         from tools.radar_sync.status_classifier import classify_statuses
         new_structured = classify_statuses(cpmrn, encounter, new_structured)
@@ -150,9 +271,7 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
             else str(new_structured)
         )
         _ctx_update_summary(cpmrn, encounter, narrative, snapshot_at)
-
-        from backend.services.emr.db import get_db as _get_db
-        _get_db()["patient_contexts"].update_one(
+        db["patient_contexts"].update_one(
             {"CPMRN": cpmrn, "encounter": encounter},
             {"$set": {"structured_summary": new_structured}},
         )
@@ -169,18 +288,29 @@ def _run_live_pipeline(cpmrn: str, encounter: int, chart: dict, snapshot_at: dat
         logger.exception("pipeline: problem tracker failed for %s enc=%d", cpmrn, encounter)
         status["problem_tracker"] = {"error": "exception"}
 
-    # Step 6: false-negative detector — safety net for missed deteriorations
+    # Step 6: false-negative detector (always — zero LLM cost, safety net)
+    _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+
+    return status
+
+
+def _run_fn_detector_step(
+    cpmrn: str,
+    encounter: int,
+    structured_summary: dict,
+    snapshot_at: datetime,
+    db: Any,
+    status: dict,
+) -> None:
+    """Run fn_detector and write result into status dict. Always called, never skipped."""
     try:
         from tools.radar_sync.fn_detector import run_fn_detector
-        from backend.services.emr.db import get_db as _get_db2
-        fn_result = run_fn_detector(cpmrn, encounter, new_structured, snapshot_at, _get_db2())
+        fn_result = run_fn_detector(cpmrn, encounter, structured_summary, snapshot_at, db)
         status["fn_detector"] = fn_result
         logger.info("pipeline: fn_detector done for %s enc=%d — %s", cpmrn, encounter, fn_result)
     except Exception:
         logger.exception("pipeline: fn_detector failed for %s enc=%d", cpmrn, encounter)
         status["fn_detector"] = {"error": "exception"}
-
-    return status
 
 
 def _collect_all():

@@ -21,6 +21,7 @@ import {
   SparklesIcon,
   FilmIcon,
   BellAlertIcon,
+  MagnifyingGlassCircleIcon,
 } from '@heroicons/react/24/outline'
 import { getStats, createKB, listKBs, startLogCapture, stopLogCapture, getLogCaptureStatus, getVMStatus, startVM, stopVM, getCPUVMStatus, startCPUVM, stopCPUVM, getActiveInstance, setActiveInstance } from '../api'
 import { useAppState } from '../AppStateContext'
@@ -46,6 +47,7 @@ const toolsNav = [
   { to: '/mopup',          label: 'Mop-up', icon: SparklesIcon },
   { to: '/docs',            label: 'Docs',     icon: BookOpenIcon },
   { to: '/settings',        label: 'Alerts',   icon: BellAlertIcon },
+  { to: '/traces',          label: 'Traces',   icon: MagnifyingGlassCircleIcon },
 ]
 
 export default function Layout() {

@@ -674,6 +674,66 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
     client = GeminiLLMClient(api_key=GOOGLE_API_KEY, model=_CLASSIFIER_MODEL)
     tracer = ReActTracer(cpmrn, encounter, step="status_classifier", db=_get_db())
 
+    # ── Pre-fetch trend data for worsening/critical problems (Fix 4) ────────────
+    # Inject vital/lab trends upfront so the model can verify statuses in fewer
+    # rounds without calling get_vital_trend / get_lab_trend for common cases.
+    prefetch_lines: list[str] = [
+        "== PRE-FETCHED TREND DATA ==",
+        "Use this data to verify problem statuses. Only call tools for additional readings.",
+        "",
+    ]
+    # Vital keys commonly relevant per problem type (best-effort heuristic)
+    _PROBLEM_VITALS = {
+        "tachycardia": ["HR"], "bradycardia": ["HR"],
+        "hypertension": ["BP", "MAP"], "hypotension": ["BP", "MAP"],
+        "respiratory": ["SpO2", "RR", "FiO2"], "ards": ["SpO2", "FiO2"],
+        "sepsis": ["HR", "BP", "MAP", "Temp"], "shock": ["HR", "MAP", "BP"],
+        "fever": ["Temp"], "oliguria": ["HR"], "aki": ["HR"],
+    }
+    fetched_vitals: set[str] = set()
+    for p in candidates:
+        name_lower = p["name"].lower()
+        vitals_to_fetch = []
+        for kw, vitals in _PROBLEM_VITALS.items():
+            if kw in name_lower:
+                vitals_to_fetch.extend(vitals)
+        # Always fetch HR and BP for any worsening/critical problem
+        vitals_to_fetch = list(dict.fromkeys(["HR", "BP"] + vitals_to_fetch))
+
+        prefetch_lines.append(f"Problem: {p['name']} [{p['status'].upper()}]")
+        for vital in vitals_to_fetch[:4]:  # cap at 4 vitals per problem
+            if vital not in fetched_vitals:
+                try:
+                    trend = _get_vital_trend(cpmrn, encounter, vital, n=8)
+                    prefetch_lines.append(f"  {trend}")
+                    fetched_vitals.add(vital)
+                except Exception:
+                    pass
+
+        # Fetch relevant labs based on problem keywords
+        labs_to_fetch: list[str] = []
+        if any(kw in name_lower for kw in ("aki", "renal", "kidney", "creatinine")):
+            labs_to_fetch.append("Creatinine")
+        if any(kw in name_lower for kw in ("hypokal", "hyperkal", "potassium", "k+")):
+            labs_to_fetch.append("Potassium")
+        if any(kw in name_lower for kw in ("anemia", "anaemia", "transfusion", "hb", "haemoglobin")):
+            labs_to_fetch.append("Hb")
+        if any(kw in name_lower for kw in ("lactate", "shock", "sepsis")):
+            labs_to_fetch.append("Lactate")
+        if any(kw in name_lower for kw in ("sodium", "hyponatr", "hypernatr")):
+            labs_to_fetch.append("Sodium")
+        if any(kw in name_lower for kw in ("glucose", "hyperglycemia", "hypoglycemia")):
+            labs_to_fetch.append("Glucose")
+        for lab in labs_to_fetch[:3]:
+            try:
+                trend = _get_lab_trend(cpmrn, encounter, lab, n=4)
+                prefetch_lines.append(f"  {trend}")
+            except Exception:
+                pass
+        prefetch_lines.append("")
+
+    prefetch_block = "\n".join(prefetch_lines)
+
     # Build the initial user message
     problem_block = "\n".join(
         f"  {i+1}. {p['name']} [{p['status'].upper()}]\n"
@@ -686,9 +746,11 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
         f"Patient: {cpmrn} (encounter {encounter})\n\n"
         f"The following problems were preliminarily labelled WORSENING or CRITICAL "
         f"from a single chart snapshot. Please verify each by checking trend data.\n\n"
-        f"{problem_block}\n\n"
-        f"Use get_vital_trend and get_lab_trend to check trajectories, then call "
-        f"set_problem_statuses with your verified assessments."
+        f"{prefetch_block}\n"
+        f"Problems to verify:\n{problem_block}\n\n"
+        f"The pre-fetched data above covers common vitals/labs. Use get_vital_trend, "
+        f"get_lab_trend, or query_patient_notes for anything not already shown. "
+        f"Then call set_problem_statuses with your verified assessments."
     )
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
