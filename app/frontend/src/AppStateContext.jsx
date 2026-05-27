@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react'
-import { listKBs } from './api'
+import { listKBs, listStudies } from './api'
 
 const Ctx = createContext(null)
 
@@ -24,6 +24,10 @@ export function AppStateProvider({ children }) {
   const [activeKB, setActiveKB] = useState(null)
   const [kbList, setKbList] = useState([])
 
+  // Shared study state — used by Study page and FN Review page
+  const [studies, setStudies]         = useState([])
+  const [activeStudy, setActiveStudy] = useState(null)
+
   useEffect(() => {
     listKBs()
       .then(data => {
@@ -31,6 +35,18 @@ export function AppStateProvider({ children }) {
         setKbList(kbs)
         if (kbs.length > 0) {
           setActiveKB(prev => prev && kbs.includes(prev) ? prev : kbs[0])
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    listStudies()
+      .then(data => {
+        const list = data.studies || []
+        setStudies(list)
+        if (list.length > 0) {
+          setActiveStudy(prev => prev ? (list.find(s => s.study_id === prev.study_id) || list[0]) : (list.find(s => s.status === 'active') || list[0]))
         }
       })
       .catch(() => {})
@@ -49,6 +65,8 @@ export function AppStateProvider({ children }) {
       wiki, setWiki,
       activeKB, switchKB,
       kbList, setKbList,
+      studies, setStudies,
+      activeStudy, setActiveStudy,
     }}>
       {children}
     </Ctx.Provider>

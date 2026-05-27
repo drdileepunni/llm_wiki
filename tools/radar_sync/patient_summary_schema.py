@@ -20,6 +20,7 @@ class ActiveProblem(BaseModel):
     management: str
     current_state: str
     plan_changing_event: str | None = None
+    cause: str | None = None
 
 
 class PatientSummary(BaseModel):
@@ -35,8 +36,9 @@ def summary_to_text(s: dict) -> str:
     lines = [s.get("admission_narrative", "")]
     lines.append("\nActive Problems:")
     for p in s.get("problems", []):
+        cause_suffix = f" (secondary to: {p['cause']})" if p.get("cause") else ""
         lines.append(
-            f"  {p['name']} [{p['status']}]: {p['presenting_features']} → "
+            f"  {p['name']}{cause_suffix} [{p['status']}]: {p['presenting_features']} → "
             f"{p['workup']} → {p['management']} → {p['current_state']}"
         )
         if p.get("plan_changing_event"):

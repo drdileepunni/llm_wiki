@@ -32,6 +32,7 @@ const primaryNav = [
   { to: '/viva',       label: 'Viva',       icon: UserGroupIcon },
   { to: '/validation', label: 'Validation', icon: BeakerIcon },
   { to: '/study',      label: 'Study',      icon: ChartBarIcon },
+  { to: '/fn-review',  label: 'FN Review',  icon: ExclamationTriangleIcon },
   { to: '/cds-replay', label: 'CDS Replay', icon: FilmIcon },
 ]
 

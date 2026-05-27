@@ -36,6 +36,36 @@ _ALERT_COOLDOWN_H = 8   # minimum hours between repeat alerts for same problem
 
 _NEXT_CHECK_HOURS = {"vital": 1, "lab": 6, "io": 1}
 
+# ── Treatment response buffers ────────────────────────────────────────────────
+# If a plan note is written within this window AFTER the triggering data,
+# the intervention cannot yet have had time to take effect.
+# being_addressed=True is enforced; treatment-inadequate override is blocked.
+
+# Default buffer per next_check type (hours)
+_RESPONSE_BUFFER_H: dict[str, int] = {"vital": 1, "lab": 4, "io": 1}
+
+# Keyword → buffer override (hours), checked against problem name (lowercase).
+# Listed longest-match-first so more specific keywords win.
+_KEYWORD_BUFFER_H: list[tuple[str, int]] = [
+    ("antimicrobial", 8),
+    ("antibiotic",    8),
+    ("transfus",      6),
+    ("haemoglobin",   6),
+    ("hemoglobin",    6),
+    ("bicarbonate",   3),
+    ("nahco3",        3),
+    ("acidosis",      2),
+    ("alkalosis",     2),
+    ("respiratory",   2),
+    ("ventilat",      2),
+    ("vent",          2),
+    ("abg",           2),
+    ("vasopressor",   1),
+    ("noradrenalin",  1),
+    ("norepinephrin", 1),
+    ("vasopressin",   1),
+]
+
 _SYSTEM = """You are a senior ICU clinician reviewing the current problem list for a patient.
 
 You will receive:
@@ -121,7 +151,57 @@ IMPORTANT RULES:
   so clinicians can see exactly which note the reasoning came from.
   Example: if note [2] said "RRT initiated" and you used that as evidence, set
   cited_note_indices: [2]. If the note contradicted the summary, still cite it.
-- Call set_all_assessments ONCE after reviewing all problems."""
+- Call set_all_assessments ONCE after reviewing all problems.
+
+SCREENER FLAG — NEW PROBLEM DETECTION:
+If the user message contains a "== SCREENER FLAG ==" section, the Pass 1 screener
+detected something not yet in the tracked problem list. You must:
+1. Check whether the flagged finding maps to any existing tracked problem (semantic match,
+   not just string match). Examples: "elevated blood pressure" → "Hypertension";
+   "worsening hypoxemia" → "Acute Respiratory Desaturation" if already tracked.
+2. If it matches an existing problem: assess it under that existing name — do NOT create a duplicate.
+3. If it is genuinely new (no semantic overlap with any current problem): create a new problem
+   entry using a precise clinical name (e.g. "Hypoxemia", "Acute Respiratory Failure").
+   Apply normal alert rules — alert if worsening/critical and not being addressed.
+
+TIMING RULE — Treatment response buffer:
+When a worsening or critical problem has a plan note documented within the buffer window
+of the triggering data, the intervention has not had adequate time to show effect.
+In this case you MUST:
+  • Set being_addressed = True
+  • Do NOT apply the treatment-inadequate override
+  • Do NOT alert — set a next_check to monitor the expected response instead
+
+Response buffer by intervention / problem type:
+  • Ventilator adjustment / ABG / pH / acidosis / alkalosis / respiratory: 2 hours
+  • Bicarbonate infusion: 3 hours
+  • General lab (default): 4 hours
+  • Blood transfusion / haemoglobin: 6 hours
+  • Antibiotics / antimicrobials: 8 hours
+  • Vasopressor titration / hemodynamic vitals: 1 hour
+  • Urine output / fluid balance (IO): 1 hour
+
+If the pre-fetched TIMING CONTEXT section flags a problem with a DIRECTIVE, honour it
+unconditionally — it has already done the timestamp arithmetic for you.
+
+CAUSAL / SECONDARY PROBLEMS:
+The user message may include:
+  1. A CO-EXISTING PROBLEM STATUSES block listing all tracked problems with their current
+     clinical_status and being_addressed flags.
+  2. A "cause" annotation on a problem — e.g. "AKI (secondary to: Septic Shock)".
+
+When a problem is marked secondary (has a cause), apply this reasoning:
+- If the primary driver (the cause) is being_addressed=True and its clinical_status is
+  NOT "critical" or "worsening", the secondary problem should NOT generate an independent
+  alert solely because its own parameters remain abnormal.
+  Rationale: secondary organ dysfunction (AKI, coagulopathy, thrombocytopaenia) lags
+  behind the primary problem by 24-72h. Treating the cause IS the treatment.
+- Exception — DO alert for the secondary problem if ANY of the following are present
+  regardless of the primary driver's status:
+    • A rapid step-change worsening (e.g. creatinine rises >50% from last snapshot)
+    • A value in a life-threatening range (K+ ≥ 6.0, pH < 7.20, bicarb < 12)
+    • A clinical sign requiring independent intervention (RRT indication, dialysis)
+- If the primary driver is NOT being_addressed, assess the secondary problem normally."""
 
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -619,6 +699,47 @@ def _upsert_problem(
     )
 
 
+# ── Co-existing problem statuses (Option B) ───────────────────────────────────
+
+def _build_coexisting_block(cpmrn: str, encounter: int, db: Any) -> str:
+    """
+    Pull the current assessment state for ALL tracked problems for this patient
+    and format as a context block. Injected into the user_msg so the LLM can
+    reason about causal relationships — e.g. AKI secondary to Septic Shock that
+    is already being_addressed should NOT re-alert for AKI.
+    """
+    docs = list(db["patient_problems"].find(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"problem_name": 1, "clinical_status": 1, "being_addressed": 1,
+         "addressed_evidence": 1, "last_alerted_at": 1},
+    ))
+    if not docs:
+        return ""
+
+    lines: list[str] = [
+        "== CO-EXISTING PROBLEM STATUSES ==",
+        "Current assessment of all tracked problems for this patient.",
+        "Use this to reason about causal relationships — e.g. if AKI is secondary to",
+        "Septic Shock and Septic Shock is being_addressed, do NOT alert for AKI solely",
+        "because creatinine is elevated (renal recovery lags 24-72h behind haemodynamic recovery).",
+        "",
+    ]
+    for doc in docs:
+        last_alert = doc.get("last_alerted_at")
+        last_alert_str = last_alert.strftime("%Y-%m-%d %H:%M UTC") if isinstance(last_alert, datetime) else "never"
+        being_addressed = doc.get("being_addressed", False)
+        lines.append(
+            f"  {doc['problem_name']}: {doc.get('clinical_status', '?').upper()}"
+            f" | being_addressed={being_addressed}"
+            f" | last_alerted={last_alert_str}"
+        )
+        evidence = doc.get("addressed_evidence", "")
+        if evidence and being_addressed:
+            lines.append(f"    Plan evidence: {evidence[:150]}")
+
+    return "\n".join(lines)
+
+
 # ── Clinical context rules (MongoDB-backed) ───────────────────────────────────
 
 def _get_clinical_context_overrides(problems: list[dict], db: Any) -> str:
@@ -657,12 +778,114 @@ def _get_clinical_context_overrides(problems: list[dict], db: Any) -> str:
 
 # ── Pre-fetch helpers (Fix 4: collapse 3-5 rounds → 1-2) ─────────────────────
 
+def _buffer_hours_for_problem(problem_name: str, nc_type: str) -> int:
+    """Return the appropriate treatment response buffer (hours) for a problem."""
+    name_lower = problem_name.lower()
+    for keyword, hours in _KEYWORD_BUFFER_H:
+        if keyword in name_lower:
+            return hours
+    return _RESPONSE_BUFFER_H.get(nc_type, 4)
+
+
+def _compute_timing_context(
+    problems: list[dict],
+    session_chunks: list,
+    snapshot_at: datetime,
+    cpmrn: str,
+    encounter: int,
+    db: Any,
+) -> str:
+    """
+    For each worsening/critical problem, compute the gap between the triggering
+    snapshot and the most recent plan note. If within the response buffer, emit
+    a DIRECTIVE telling the model not to apply the treatment-inadequate override.
+    """
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+
+    def _utc(t: datetime) -> datetime:
+        return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
+
+    sections: list[str] = []
+
+    for prob in problems:
+        if prob.get("status", "stable") not in ("worsening", "critical"):
+            continue
+
+        name = prob.get("name", "")
+
+        stored  = db["patient_problems"].find_one(
+            {"CPMRN": cpmrn, "encounter": encounter, "problem_name": name},
+            {"next_check": 1},
+        )
+        nc_type = ((stored or {}).get("next_check") or {}).get("type", "lab")
+        buf_h   = _buffer_hours_for_problem(name, nc_type)
+
+        # Query notes for this specific problem to get the most recent plan note
+        try:
+            from tools.radar_sync.query_notes import query_patient_notes_with_chunks
+            start_idx = len(session_chunks)
+            _, new_chunks = query_patient_notes_with_chunks(
+                cpmrn, encounter,
+                f"{name} management plan treatment response",
+                start_index=start_idx,
+            )
+            session_chunks.extend(new_chunks)
+        except Exception:
+            logger.exception("timing_context: note query failed for '%s' %s", name, cpmrn)
+            new_chunks = []
+
+        valid = [c for c in new_chunks if isinstance(getattr(c, "note_time", None), datetime)]
+        if not valid:
+            continue
+
+        most_recent = max(valid, key=lambda c: _utc(c.note_time))
+        note_time   = _utc(most_recent.note_time)
+        gap_min     = (note_time - snapshot_at).total_seconds() / 60
+
+        if note_time >= snapshot_at and gap_min <= buf_h * 60:
+            remaining_min = int(buf_h * 60 - gap_min)
+            sections.append(
+                f"⚠ {name}\n"
+                f"  Triggering data (snapshot): {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                f"  Plan note written:          {note_time.strftime('%Y-%m-%d %H:%M UTC')}"
+                f" (+{int(gap_min)} min after data)\n"
+                f"  Response buffer:            {buf_h}h — {remaining_min} min remaining\n"
+                f"  DIRECTIVE: Plan is a direct response to this deterioration.\n"
+                f"  → being_addressed = True\n"
+                f"  → Do NOT apply treatment-inadequate override\n"
+                f"  → Do NOT alert — set next_check to monitor expected response"
+            )
+        elif note_time < snapshot_at:
+            stale_min = int((snapshot_at - note_time).total_seconds() / 60)
+            sections.append(
+                f"ℹ {name}\n"
+                f"  Plan note written:          {note_time.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                f"  Triggering data (snapshot): {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}"
+                f" (+{stale_min} min after note)\n"
+                f"  → Plan predates this deterioration by {stale_min} min."
+                f" Assess whether it accounts for the current data."
+            )
+
+    if not sections:
+        return ""
+
+    header = [
+        "== TIMING CONTEXT ==",
+        "Pre-computed gap between triggering data and most recent plan note per problem.",
+        "DIRECTIVE lines must be honoured unconditionally.",
+        "",
+    ]
+    return "\n".join(header + sections)
+
+
 def _build_prefetch_block(
     cpmrn: str,
     encounter: int,
     problems: list[dict],
     db: Any,
     session_chunks: list,
+    snapshot_at: datetime | None = None,
 ) -> str:
     """
     Pre-fetch all data the model is likely to need and return it as a formatted
@@ -725,6 +948,18 @@ def _build_prefetch_block(
     except Exception:
         logger.exception("prefetch: IO fetch failed for %s enc=%d", cpmrn, encounter)
 
+    # 4. Timing context — must appear last so note indices from (2) are already registered
+    if snapshot_at is not None:
+        try:
+            timing_block = _compute_timing_context(
+                problems, session_chunks, snapshot_at, cpmrn, encounter, db,
+            )
+            if timing_block:
+                lines.append(timing_block)
+                lines.append("")
+        except Exception:
+            logger.exception("prefetch: timing context failed for %s enc=%d", cpmrn, encounter)
+
     return "\n".join(lines)
 
 
@@ -778,6 +1013,7 @@ def track_problems(
     encounter: int,
     structured_summary: dict,
     snapshot_at: datetime,
+    screener_flag: str = "",
 ) -> dict:
     """
     Run the problem tracker ReAct loop for one patient.
@@ -814,7 +1050,9 @@ def track_problems(
 
     # ── Fix 4: Pre-fetch all data and inject into first message ──────────────
     try:
-        prefetch_block = _build_prefetch_block(cpmrn, encounter, problems, db, session_chunks)
+        prefetch_block = _build_prefetch_block(
+            cpmrn, encounter, problems, db, session_chunks, snapshot_at=snapshot_at,
+        )
     except Exception:
         logger.exception("problem_tracker: prefetch failed for %s enc=%d — continuing without", cpmrn, encounter)
         prefetch_block = ""
@@ -837,8 +1075,9 @@ def track_problems(
     new_names = [p["name"] for p in problems if p["name"] not in stored_names]
 
     problem_block = "\n".join(
-        f"  {i+1}. {p['name']} [{p.get('status','?').upper()}]\n"
-        f"     Current state: {p.get('current_state', 'not specified')}\n"
+        f"  {i+1}. {p['name']} [{p.get('status','?').upper()}]"
+        + (f" (secondary to: {p['cause']})" if p.get("cause") else "")
+        + f"\n     Current state: {p.get('current_state', 'not specified')}\n"
         f"     Management: {p.get('management', 'not specified')}"
         for i, p in enumerate(problems)
     )
@@ -850,14 +1089,30 @@ def track_problems(
 
     context_overrides = _get_clinical_context_overrides(problems, db)
 
+    try:
+        coexisting_block = _build_coexisting_block(cpmrn, encounter, db)
+    except Exception:
+        logger.exception("problem_tracker: coexisting block failed for %s enc=%d", cpmrn, encounter)
+        coexisting_block = ""
+
+    screener_block = (
+        "== SCREENER FLAG ==\n"
+        f"The Pass 1 screener flagged: \"{screener_flag}\"\n"
+        "Before creating a new problem for this finding, check whether it maps to an\n"
+        "existing tracked problem (semantic match). Only create a new problem if there\n"
+        "is no overlap with any problem already in the list above.\n"
+    ) if screener_flag else ""
+
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
         + (f"CLINICAL CONTEXT RULES FOR THIS PATIENT:\n{context_overrides}\n\n"
            if context_overrides else "")
+        + (f"{coexisting_block}\n\n" if coexisting_block else "")
         + (f"{prefetch_block}\n\n" if prefetch_block else "")
         + (f"{fingerprint_block}\n\n" if fingerprint_block else "")
         + f"Current problems from summary:\n{problem_block}\n{new_block}\n\n"
+        + (f"{screener_block}\n" if screener_block else "")
         + "Review each problem. The pre-fetched context above is your primary source — "
         + "only call tools for data not listed there. Call set_all_assessments when done."
     )

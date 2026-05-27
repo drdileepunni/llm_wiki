@@ -278,9 +278,51 @@ class GeminiLLMClient:
                 response_mime_type="application/json",
                 response_schema=schema,
                 max_output_tokens=max_tokens,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",         threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",        threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT",  threshold="BLOCK_NONE"),
+                ],
             ),
         )
-        return _json.loads(raw.text)
+        text = raw.text
+        if not text:
+            finish_reason = None
+            if raw.candidates:
+                finish_reason = getattr(raw.candidates[0], "finish_reason", None)
+            raise ValueError(
+                f"generate_json: Gemini returned empty response "
+                f"(finish_reason={finish_reason})"
+            )
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            # Response was truncated (max_tokens hit mid-JSON). Try to salvage by
+            # truncating at the last complete key-value pair and closing the object.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "generate_json: truncated JSON response (len=%d) — attempting repair", len(text)
+            )
+            # Strip trailing incomplete token and close the object
+            text_stripped = text.rstrip()
+            # Remove trailing comma or partial string/value
+            import re as _re
+            text_stripped = _re.sub(r',\s*"[^"]*$', "", text_stripped)  # trailing incomplete key
+            text_stripped = _re.sub(r',\s*$', "", text_stripped)         # trailing comma
+            if not text_stripped.endswith("}"):
+                text_stripped += '"}'  # close unclosed string + object
+            try:
+                return _json.loads(text_stripped)
+            except _json.JSONDecodeError:
+                # Final fallback: close with just }
+                try:
+                    return _json.loads(text_stripped.rstrip('"') + "}")
+                except _json.JSONDecodeError:
+                    raise ValueError(
+                        f"generate_json: could not repair truncated JSON response. "
+                        f"Increase max_tokens (current text length={len(text)})"
+                    )
 
     def create_message(
         self,

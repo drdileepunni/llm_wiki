@@ -16,6 +16,37 @@ logger = logging.getLogger(__name__)
 
 _SUMMARY_MODEL = "gemini-3.1-flash-lite"
 
+# ── Blood-gas lab filter ──────────────────────────────────────────────────────
+# ABG/VBG panels contain electrolytes (Na, K, Cl, Glucose, Creatinine, etc.)
+# measured by point-of-care i-STAT — these values are unreliable for clinical
+# decisions and must not reach the LLM.  Only the gas-specific fields are kept.
+_BLOOD_GAS_PANEL_KW = ("gas panel", "abg", "vbg", "arterial blood gas",
+                        "venous blood gas", "blood gas")
+
+# Whitelist: only these attributes are kept from blood-gas panels (case-insensitive substring match)
+_BLOOD_GAS_KEEP_ATTRS = ("ph", "pao2", "paco2", "bicarb", "hco3",
+                          "lactic", "lactate", "be", "base excess", "cso2",
+                          "spo2", "fio2")
+
+
+def _is_blood_gas_panel(panel_name: str) -> bool:
+    name_lc = panel_name.lower()
+    return any(kw in name_lc for kw in _BLOOD_GAS_PANEL_KW)
+
+
+def _filter_lab_attrs(panel_name: str, attrs: dict) -> list[tuple[str, dict]]:
+    """Return (key, val) pairs from attrs, dropping disallowed fields for gas panels."""
+    valued = [(k, v) for k, v in attrs.items()
+              if isinstance(v, dict) and v.get("value") not in (None, "")]
+    if not _is_blood_gas_panel(panel_name):
+        return valued
+    # Blood-gas panel: only keep whitelisted attributes
+    return [
+        (k, v) for k, v in valued
+        if any(keep in k.lower() for keep in _BLOOD_GAS_KEEP_ATTRS)
+    ]
+
+
 # ── Timezone helper ───────────────────────────────────────────────────────────
 
 from datetime import timedelta
@@ -85,8 +116,7 @@ def _format_labs_full(chart: dict) -> str:
         name  = doc.get("name", "")
         ts    = _to_ist(doc.get("reportedAt"))
         attrs = doc.get("attributes") or {}
-        valued = [(k, v) for k, v in attrs.items()
-                  if isinstance(v, dict) and v.get("value") not in (None, "")]
+        valued = _filter_lab_attrs(name, attrs)
         vals  = ", ".join(
             f"{k}={v.get('value')} {v.get('unit', '')}".strip()
             for k, v in valued[:8]
@@ -155,8 +185,7 @@ def _format_delta(delta: dict) -> str:
             name  = lab.get("name", "")
             ts    = _to_ist(lab.get("reportedAt"))
             attrs = lab.get("attributes") or {}
-            valued = [(k, v) for k, v in attrs.items()
-                      if isinstance(v, dict) and v.get("value") not in (None, "")]
+            valued = _filter_lab_attrs(name, attrs)
             vals  = ", ".join(
                 f"{k}={v.get('value')} {v.get('unit', '')}".strip()
                 for k, v in valued[:6]
@@ -188,6 +217,114 @@ def _format_delta(delta: dict) -> str:
     return "\n".join(lines) if lines else "(no new events)"
 
 
+# ── Flagged vital abnormality extractor ──────────────────────────────────────
+
+# Map Netra abnormal_list type strings → human-readable name + severity hint
+_VITAL_DISPLAY: dict[str, str] = {
+    "SPO2":  "SpO2 (oxygen saturation)",
+    "HR":    "Heart rate",
+    "SBP":   "Systolic BP",
+    "DBP":   "Diastolic BP",
+    "MAP":   "Mean arterial pressure",
+    "RR":    "Respiratory rate",
+    "TEMP":  "Temperature",
+    "CVP":   "CVP",
+}
+
+# Thresholds for severity labels (type → (critical_lo, critical_hi, warn_lo, warn_hi))
+_VITAL_THRESHOLDS: dict[str, tuple] = {
+    "SPO2": (88,  None, 92,  None),   # critical <88, warn <92
+    "HR":   (None, 150, None, 130),   # critical >150, warn >130; also low end handled below
+    "SBP":  (None, 200, None, 180),
+    "MAP":  (50,  None, 65,  None),
+    "RR":   (None, 30,  None, 25),
+    "TEMP": (None, 39.5, None, 38.5),
+}
+
+def _severity_label(vtype: str, value: float) -> str:
+    thresholds = _VITAL_THRESHOLDS.get(vtype.upper())
+    if not thresholds:
+        return "ABNORMAL"
+    crit_lo, crit_hi, warn_lo, warn_hi = thresholds
+    if (crit_lo is not None and value < crit_lo) or (crit_hi is not None and value > crit_hi):
+        return "CRITICAL"
+    return "WARNING"
+
+
+def _extract_flagged_abnormalities(chart: dict | None, delta: dict | None) -> str:
+    """
+    Scan chart vitals and delta new_vitals for entries with abnormal_list populated.
+    Return a formatted block of the most recent flagged reading per vital type
+    within the last 24 hours, or "" if nothing is flagged.
+
+    Used to inject a mandatory section into both initial and update prompts so the
+    LLM cannot silently omit an acute vital deterioration from the problem list.
+    """
+    import pandas as pd
+    from datetime import timezone as _tz
+
+    now_utc = __import__("datetime").datetime.now(_tz.utc)
+    cutoff  = now_utc - timedelta(hours=24)
+
+    # Collect (timestamp_str, vtype, value) from all sources, most recent readings first
+    seen: dict[str, tuple] = {}  # vtype → (ts_ist, value, severity)
+
+    def _process_vitals(vitals: list) -> None:
+        for v in vitals:
+            if not isinstance(v, dict):
+                continue
+            abnormals = v.get("abnormal_list") or []
+            if not abnormals:
+                continue
+            # Parse the vital timestamp and apply 24h recency filter
+            ts_raw = v.get("timestamp")
+            try:
+                ts_dt = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+                if ts_dt < cutoff:
+                    continue  # too old — skip
+            except Exception:
+                pass  # unparseable timestamp — include it anyway
+            ts_ist = _to_ist(ts_raw)
+            for ab in abnormals:
+                if not isinstance(ab, dict):
+                    continue
+                vtype = (ab.get("type") or "").upper()
+                raw_val = ab.get("value")
+                if not vtype or raw_val is None:
+                    continue
+                try:
+                    val = float(raw_val)
+                except (TypeError, ValueError):
+                    continue
+                severity = _severity_label(vtype, val)
+                # Keep the most recent reading per type (vitals are newest-first)
+                if vtype not in seen:
+                    seen[vtype] = (ts_ist, val, severity)
+
+    if chart:
+        _process_vitals(chart.get("vitals") or [])
+    if delta:
+        _process_vitals(delta.get("new_vitals") or [])
+
+    if not seen:
+        return ""
+
+    lines = [
+        "⚠ FLAGGED VITAL ABNORMALITIES — MANDATORY PROBLEM EXTRACTION",
+        "The monitoring system has flagged the following vital sign breaches.",
+        "Every item below MUST appear as a problem in your output — do not omit any.",
+        "If a vital abnormality is secondary to another listed problem (e.g. desaturation",
+        "secondary to pneumonia, or tachycardia secondary to sepsis), set cause accordingly.",
+        "",
+    ]
+    for vtype, (ts_ist, val, severity) in seen.items():
+        display = _VITAL_DISPLAY.get(vtype, vtype)
+        unit = "%" if vtype == "SPO2" else ("°C" if vtype == "TEMP" else "")
+        lines.append(f"  [{severity}] {display} = {val}{unit}  (at {ts_ist})")
+
+    return "\n".join(lines)
+
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
@@ -196,7 +333,20 @@ _SYSTEM = (
     "Be factual — do not invent findings not present in the data."
 )
 
+_PROBLEM_FIELDS = """For each active clinical problem include:
+- name: concise problem name (e.g. "Septic shock", "AKI", "Desaturation")
+- status: one of critical / worsening / stable / improving / resolved
+- presenting_features: how it first appeared with specific values
+- workup: investigations done and key results
+- management: current treatment with drug names and doses
+- current_state: latest status with specific numbers
+- plan_changing_event: if a specific investigation result or event changed the care plan, describe it; otherwise null
+- cause: if this problem is SECONDARY to another active problem, name the primary driver (e.g. "desaturation secondary to pulmonary oedema" → cause: "Pulmonary oedema"; "AKI secondary to Septic Shock" → cause: "Septic Shock"). Only set when there is an explicit causal relationship; otherwise null"""
+
+
 def _initial_prompt(cpmrn: str, delta: dict, chart: dict | None) -> str:
+    flagged = _extract_flagged_abnormalities(chart, delta)
+
     if chart:
         context = f"""DEMOGRAPHICS: {_format_demographics(chart)}
 
@@ -213,20 +363,15 @@ CLINICAL NOTES:
     else:
         context = f"CLINICAL DATA:\n{_format_delta(delta)}"
 
-    return f"""Patient CPMRN: {cpmrn}
+    flagged_block = f"\n{flagged}\n" if flagged else ""
 
+    return f"""Patient CPMRN: {cpmrn}
+{flagged_block}
 {context}
 
 Write a structured problem-oriented ICU summary.
 
-For each active clinical problem include:
-- name: concise problem name (e.g. "Septic shock", "AKI")
-- status: one of critical / worsening / stable / improving / resolved
-- presenting_features: how it first appeared with specific values
-- workup: investigations done and key results
-- management: current treatment with drug names and doses
-- current_state: latest status with specific numbers
-- plan_changing_event: if a specific investigation result or event changed the care plan, describe it; otherwise null
+{_PROBLEM_FIELDS}
 
 admission_narrative: one sentence — age, sex, PMH, presenting complaint.
 resolved_problems: list of strings for problems that have resolved.
@@ -234,8 +379,9 @@ narrative: a 4-6 sentence paragraph covering the full picture (this is the human
 suggested_actions: list of 3-5 specific, actionable clinical suggestions for the most critical active problems — e.g. "Start vancomycin 25 mg/kg IV q12h for MRSA coverage", "Check serum lactate and repeat in 2h", "Noradrenaline 0.1 mcg/kg/min — consider uptitration if MAP <65". Be specific with drug names, doses, and routes. Do not suggest actions already reflected in current management."""
 
 
-def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict) -> str:
+def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict, chart: dict | None = None) -> str:
     delta_text = _format_delta(delta)
+    flagged = _extract_flagged_abnormalities(chart, delta)
     existing_narrative = existing_summary.get("narrative", "") if isinstance(existing_summary, dict) else existing_summary
 
     # Enumerate current problem names so the model reuses them exactly
@@ -249,8 +395,10 @@ def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict) -> str:
     else:
         names_instruction = ""
 
-    return f"""Patient CPMRN: {cpmrn}
+    flagged_block = f"\n{flagged}\n" if flagged else ""
 
+    return f"""Patient CPMRN: {cpmrn}
+{flagged_block}
 CURRENT SUMMARY:
 {existing_narrative}
 {names_instruction}
@@ -263,8 +411,12 @@ Rules:
 - Keep all existing problems; update their current_state with new numbers
 - Use the EXACT same problem name strings listed above — never rename or create synonyms (e.g. do not add "Respiratory Failure" if "Acute Respiratory Failure" already exists)
 - If a problem has resolved or significantly improved, move it to resolved_problems
-- Add new problems ONLY if a genuinely NEW clinical issue emerged that is not already listed
+- For every item in the ⚠ FLAGGED VITAL ABNORMALITIES block above: it MUST appear as a problem.
+  If an existing problem already covers it (e.g. flagged tachycardia is part of "Septic shock"),
+  update that problem's current_state to include the vital value — do NOT create a duplicate.
+  Only create a new problem if no existing problem already accounts for the flagged vital.
 - Set plan_changing_event if a new investigation result changed the management plan
+- Set cause if a problem is secondary to another active problem (e.g. AKI caused by Septic Shock → cause: "Septic Shock"); otherwise leave null
 - Do not lose historical context (initial presentation, key prior results)
 - narrative: updated 4-6 sentence paragraph covering the current picture
 - suggested_actions: 3-5 specific actionable suggestions based on new events (drug names, doses, routes, specific labs). Do not repeat actions already in current management."""
@@ -292,7 +444,7 @@ def update_summary(existing_summary: str | dict, delta: dict, cpmrn: str, chart:
     if not seed_text.strip():
         prompt = _initial_prompt(cpmrn, delta, chart)
     else:
-        prompt = _update_prompt(cpmrn, seed_dict, delta)
+        prompt = _update_prompt(cpmrn, seed_dict, delta, chart)
 
     return _call_gemini_structured(prompt)
 

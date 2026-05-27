@@ -1090,10 +1090,45 @@ export async function deleteContextRule(ruleId) {
 }
 
 
+// ── Study management ──────────────────────────────────────────────────────────
+
+export async function listStudies() {
+  const res = await fetch(`${BASE}/study/studies`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createStudy(name, start_dt, end_dt = null) {
+  const res = await fetch(`${BASE}/study/studies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, start_dt, end_dt }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateStudy(studyId, patch) {
+  const res = await fetch(`${BASE}/study/studies/${studyId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteStudy(studyId) {
+  const res = await fetch(`${BASE}/study/studies/${studyId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── Study / Adjudication ──────────────────────────────────────────────────────
 
-export async function getStudyQueue() {
-  const res = await fetch(`${BASE}/study/queue`)
+export async function getStudyQueue(studyId = null) {
+  const url = studyId ? `${BASE}/study/queue?study_id=${studyId}` : `${BASE}/study/queue`
+  const res = await fetch(url)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -1108,14 +1143,21 @@ export async function submitAdjudication(alertId, verdict, explainabilityRating,
   const res = await fetch(`${BASE}/study/adjudicate/${alertId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ verdict, explainability_rating: explainabilityRating, reviewer_notes: reviewerNotes }),
+    body: JSON.stringify({ verdict, explainability_rating: explainabilityRating ?? null, reviewer_notes: reviewerNotes }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
-export async function getStudyMetrics() {
-  const res = await fetch(`${BASE}/study/metrics`)
+export async function dismissStudyAlert(alertId) {
+  const res = await fetch(`${BASE}/study/dismiss/${alertId}`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStudyMetrics(studyId = null) {
+  const url = studyId ? `${BASE}/study/metrics?study_id=${studyId}` : `${BASE}/study/metrics`
+  const res = await fetch(url)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -1134,6 +1176,36 @@ export async function getStudyCosts(n = 48) {
 
 export async function getStudyCostSummary() {
   const res = await fetch(`${BASE}/study/costs/summary`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getFnQueue(studyId = null) {
+  const url = studyId ? `${BASE}/study/fn-queue?study_id=${studyId}` : `${BASE}/study/fn-queue`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getFnRecord(recordId, source) {
+  const res = await fetch(`${BASE}/study/fn-record/${recordId}?source=${source}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function submitFnAdjudication(recordId, source, verdict, excusalReason = '', reviewerNotes = '') {
+  const res = await fetch(`${BASE}/study/fn-adjudicate/${recordId}?source=${source}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verdict, excusal_reason: excusalReason, reviewer_notes: reviewerNotes }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getFnMetrics(studyId = null) {
+  const url = studyId ? `${BASE}/study/fn-metrics?study_id=${studyId}` : `${BASE}/study/fn-metrics`
+  const res = await fetch(url)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

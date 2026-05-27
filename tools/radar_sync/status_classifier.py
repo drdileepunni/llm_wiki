@@ -347,6 +347,9 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
         "cr": ["creatinine", "cr"],
         "wbc": ["total count", "wbc", "white blood cell"],
         "plt": ["platelets", "plt"],
+        # ABG panels store lactate as "Lactic" not "Lactate" — alias both directions
+        "lactate": ["lactic", "lactate"],
+        "lactic":  ["lactic", "lactate"],
     }
     aliases = _ATTR_ALIASES.get(search, [search])
 

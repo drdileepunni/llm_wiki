@@ -180,7 +180,10 @@ function RunList({ selectedRunId, onSelectRun, onSelectPatient, selectedPatientI
                         >
                           <div className="flex items-center justify-between gap-1">
                             <span className="text-xs font-medium truncate">
-                              {p.unit} {p.bed}
+                              {p.mode === 'scheduler'
+                                ? <span className="text-[10px] text-cyan-600 mr-1">⚙</span>
+                                : null}
+                              {p.unit !== '—' ? `${p.unit} ${p.bed}` : p.cpmrn}
                             </span>
                             <span className="text-[10px] text-yellow-500 font-mono flex-shrink-0">
                               {fmtUsd(p.cost_usd)}
@@ -628,6 +631,339 @@ function OutputTab({ entry }) {
   )
 }
 
+// ── Scheduler (MongoDB) tab components ───────────────────────────────────────
+
+const STEP_META = {
+  pass1_screener:    { label: 'Pass 1 · Screener',         color: 'border-yellow-500',  num: 'Pass 1' },
+  status_classifier: { label: 'Pass 2a · Status Classifier', color: 'border-blue-500',   num: 'Pass 2a' },
+  problem_tracker:   { label: 'Pass 2b · Problem Tracker',   color: 'border-purple-500', num: 'Pass 2b' },
+}
+
+function ToolCallCard({ call, result }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="bg-gray-800/60 rounded-lg overflow-hidden mb-1.5">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-left"
+      >
+        <span className="text-[10px] font-mono text-green-400 bg-green-900/30 px-1.5 py-0.5 rounded flex-shrink-0">
+          {call.name}
+        </span>
+        {call.args && Object.keys(call.args).length > 0 && (
+          <span className="text-[10px] text-gray-500 truncate">
+            {Object.entries(call.args).map(([k, v]) =>
+              `${k}: ${typeof v === 'string' ? v.slice(0, 40) : JSON.stringify(v).slice(0, 40)}`
+            ).join(' · ')}
+          </span>
+        )}
+        <span className="ml-auto text-gray-600 flex-shrink-0">
+          {open ? '▲' : '▼'}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-2 border-t border-gray-700/50">
+          {call.args && (
+            <div className="mb-2">
+              <div className="text-[10px] uppercase tracking-widest text-gray-600 mt-2 mb-1">Args</div>
+              <pre className="text-[10px] text-gray-400 whitespace-pre-wrap break-all leading-relaxed max-h-48 overflow-y-auto">
+                {JSON.stringify(call.args, null, 2)}
+              </pre>
+            </div>
+          )}
+          {result && (
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-1">Result</div>
+              <pre className="text-[10px] text-gray-400 whitespace-pre-wrap break-all leading-relaxed max-h-48 overflow-y-auto">
+                {typeof result === 'string' ? result : JSON.stringify(result, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SchedStepCard({ stepKey, doc }) {
+  const meta = STEP_META[stepKey] || { label: stepKey, color: 'border-gray-500', num: stepKey }
+  const tt   = doc.total_tokens || {}
+  const cost = (tt.in || 0) * 0.075 / 1e6 + (tt.out || 0) * 0.30 / 1e6 + (tt.thinking || 0) * 3.5 / 1e6
+
+  return (
+    <StepCard
+      number={meta.num}
+      title={meta.label}
+      color={meta.color}
+      cost={cost}
+      tokens={{ input_tokens: tt.in, output_tokens: tt.out }}
+      defaultOpen
+    >
+      {/* Rounds */}
+      {(doc.rounds || []).map((round, ri) => (
+        <div key={ri} className="mb-3">
+          {doc.total_rounds > 1 && (
+            <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">
+              Round {round.round + 1} of {doc.total_rounds}
+              {round.duration_ms && (
+                <span className="ml-2 text-gray-700">{round.duration_ms}ms</span>
+              )}
+            </div>
+          )}
+
+          {/* Thinking */}
+          {round.thinking?.length > 0 && (
+            <div className="mb-2">
+              {round.thinking.map((t, ti) => (
+                <div key={ti} className="text-xs text-purple-300/80 bg-purple-900/20 rounded px-3 py-2 mb-1 italic leading-relaxed">
+                  💭 {t}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Tool calls */}
+          {round.tool_calls?.map((call, ci) => (
+            <ToolCallCard
+              key={ci}
+              call={call}
+              result={round.tool_results?.find(r => r.name === call.name)?.result}
+            />
+          ))}
+
+          {/* Text output */}
+          {round.text?.length > 0 && round.text.map((t, ti) => (
+            <p key={ti} className="text-xs text-gray-300 bg-gray-800/40 rounded px-3 py-2 mb-1 leading-relaxed">{t}</p>
+          ))}
+        </div>
+      ))}
+
+      {/* Final output */}
+      {doc.final_output && (
+        <div className="mt-2 border-t border-gray-700/50 pt-2">
+          <div className="text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Decision</div>
+          {stepKey === 'pass1_screener' && (
+            <div className="space-y-1">
+              <div className="flex gap-2 text-xs">
+                <span className="text-gray-500">Full analysis needed:</span>
+                <span className={doc.final_output.needs_full_analysis ? 'text-orange-400 font-bold' : 'text-green-400'}>
+                  {doc.final_output.needs_full_analysis ? 'YES' : 'No'}
+                </span>
+                <span className="text-gray-600 ml-2">next run in {doc.final_output.next_run_hours}h</span>
+              </div>
+              {doc.final_output.flag_reason && (
+                <p className="text-xs text-orange-300/80 bg-orange-900/20 rounded px-3 py-2 leading-relaxed">
+                  {doc.final_output.flag_reason}
+                </p>
+              )}
+            </div>
+          )}
+          {(stepKey === 'status_classifier' || stepKey === 'problem_tracker') && (
+            <div className="space-y-1.5">
+              {(doc.final_output.assessments || []).map((a, i) => {
+                const [name, status, shouldAlert] = Array.isArray(a) ? a : [a.problem_name, a.clinical_status, a.should_alert]
+                return (
+                  <div key={i} className="flex items-center gap-2 text-xs">
+                    <span className={`px-2 py-0.5 rounded font-medium text-[10px] uppercase ${STATUS_COLOR[status] || 'bg-gray-700 text-gray-400'}`}>
+                      {status}
+                    </span>
+                    <span className="text-gray-300">{name}</span>
+                    {shouldAlert && <span className="text-red-400 text-[10px] ml-auto">🔔 alerted</span>}
+                  </div>
+                )
+              })}
+              {doc.final_output.alerts_suppressed?.length > 0 && (
+                <div className="text-[10px] text-gray-500 mt-1">
+                  Suppressed: {doc.final_output.alerts_suppressed.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </StepCard>
+  )
+}
+
+function SchedThoughtStreamTab({ entry }) {
+  const steps = entry.steps || {}
+  return (
+    <div className="flex flex-col gap-5 px-6 py-5 overflow-y-auto h-full">
+      {_SCHED_STEPS_JS.map(key => steps[key] ? (
+        <SchedStepCard key={key} stepKey={key} doc={steps[key]} />
+      ) : null)}
+      {Object.keys(steps).length === 0 && (
+        <p className="text-gray-500 text-sm">No step data found for this run.</p>
+      )}
+    </div>
+  )
+}
+
+const _SCHED_STEPS_JS = ['pass1_screener', 'status_classifier', 'problem_tracker']
+
+function SchedInputsTab({ entry }) {
+  const ctx = entry.context || {}
+  const ss  = ctx.structured_summary || {}
+  const lw  = ctx.lightweight_summary || {}
+
+  return (
+    <div className="flex flex-col gap-4 px-6 py-5 overflow-y-auto h-full">
+      <div className="bg-gray-800 rounded-lg px-4 py-3">
+        <div className="text-white font-semibold">{ss.admission_narrative || '—'}</div>
+        <div className="flex flex-wrap gap-4 mt-2 text-xs text-gray-400">
+          <span>CPMRN: <span className="text-white font-mono">{entry.meta?.cpmrn}</span></span>
+          <span>Mode: <span className="text-white">scheduler</span></span>
+          {lw.overall_trajectory && (
+            <span>Trajectory: <span className={`font-medium ${lw.overall_trajectory === 'worsening' ? 'text-red-400' : lw.overall_trajectory === 'improving' ? 'text-green-400' : 'text-yellow-400'}`}>
+              {lw.overall_trajectory}
+            </span></span>
+          )}
+          {lw.sensitivity_mode && (
+            <span>Sensitivity: <span className="text-white">{lw.sensitivity_mode}</span></span>
+          )}
+        </div>
+      </div>
+
+      {ss.problems?.length > 0 && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Active Problems</h3>
+          <div className="flex flex-col gap-2">
+            {ss.problems.map((p, i) => (
+              <div key={i} className={`rounded-lg px-4 py-3 ${STATUS_COLOR[p.status] || 'bg-gray-800/60 text-gray-300'}`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-sm font-semibold">{p.name}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide ${STATUS_COLOR[p.status] || 'bg-gray-700 text-gray-400'}`}>
+                    {p.status}
+                  </span>
+                </div>
+                {p.current_state && <p className="text-xs opacity-80">{p.current_state}</p>}
+                {p.management && <p className="text-xs opacity-60 mt-0.5">Rx: {p.management}</p>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {ss.narrative && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Clinical Narrative</h3>
+          <p className="text-xs text-gray-300 bg-gray-800/50 rounded px-3 py-2 leading-relaxed">{ss.narrative}</p>
+        </section>
+      )}
+
+      {lw.pass1_reason && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Pass 1 Flag Reason</h3>
+          <p className="text-xs text-orange-300 bg-orange-900/20 rounded px-3 py-2 leading-relaxed">{lw.pass1_reason}</p>
+        </section>
+      )}
+    </div>
+  )
+}
+
+function SchedOutputTab({ entry }) {
+  const steps  = entry.steps || {}
+  const pt     = steps.problem_tracker || {}
+  const sc     = steps.status_classifier || {}
+  const p1     = steps.pass1_screener || {}
+  const tokens = entry.tokens || {}
+  const costs  = entry.costs || {}
+
+  const allAssessments = [
+    ...(pt.final_output?.assessments || []),
+    ...(sc.final_output?.assessments || []),
+  ]
+
+  return (
+    <div className="flex flex-col gap-4 px-6 py-5 overflow-y-auto h-full">
+      {allAssessments.length > 0 && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Problem Assessments</h3>
+          <div className="space-y-2">
+            {allAssessments.map((a, i) => {
+              const name   = Array.isArray(a) ? a[0] : a.problem_name
+              const status = Array.isArray(a) ? a[1] : a.clinical_status
+              const alert  = Array.isArray(a) ? a[2] : a.should_alert
+              return (
+                <div key={i} className={`rounded-lg px-4 py-3 ${STATUS_COLOR[status] || 'bg-gray-800/60 text-gray-300'}`}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold">{name}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase ${STATUS_COLOR[status] || 'bg-gray-700 text-gray-400'}`}>{status}</span>
+                    {alert && <span className="ml-auto text-red-400 text-xs">🔔 alerted</span>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
+      {pt.final_output?.alerts_sent?.length > 0 && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Alerts Sent</h3>
+          {pt.final_output.alerts_sent.map((a, i) => (
+            <div key={i} className="text-xs text-red-300 bg-red-900/20 rounded px-3 py-1.5 mb-1">🔔 {a}</div>
+          ))}
+        </section>
+      )}
+
+      {p1.final_output?.flag_reason && (
+        <section>
+          <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Pass 1 Trigger</h3>
+          <p className="text-xs text-orange-300 bg-orange-900/20 rounded px-3 py-2 leading-relaxed">
+            {p1.final_output.flag_reason}
+          </p>
+        </section>
+      )}
+
+      <section>
+        <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-2">Token & Cost Breakdown</h3>
+        <div className="bg-gray-800 rounded-lg overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-700">
+                <th className="text-left px-4 py-2 text-gray-500 font-medium">Step</th>
+                <th className="text-right px-4 py-2 text-gray-500 font-medium">In</th>
+                <th className="text-right px-4 py-2 text-gray-500 font-medium">Out</th>
+                <th className="text-right px-4 py-2 text-gray-500 font-medium">Thinking</th>
+                <th className="text-right px-4 py-2 text-gray-500 font-medium">Cost (est.)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {_SCHED_STEPS_JS.map(key => {
+                const s  = steps[key]
+                if (!s) return null
+                const tt = s.total_tokens || {}
+                const c  = (tt.in||0)*0.075/1e6 + (tt.out||0)*0.30/1e6 + (tt.thinking||0)*3.5/1e6
+                const meta = STEP_META[key] || {}
+                return (
+                  <tr key={key} className="border-b border-gray-700/50">
+                    <td className="px-4 py-2 text-gray-300">{meta.label || key}</td>
+                    <td className="px-4 py-2 text-right text-gray-400 font-mono">{fmtTokens(tt.in)}</td>
+                    <td className="px-4 py-2 text-right text-gray-400 font-mono">{fmtTokens(tt.out)}</td>
+                    <td className="px-4 py-2 text-right text-purple-400 font-mono">{fmtTokens(tt.thinking)}</td>
+                    <td className="px-4 py-2 text-right text-yellow-400 font-mono">{fmtUsd(c)}</td>
+                  </tr>
+                )
+              })}
+              <tr className="bg-gray-700/30">
+                <td className="px-4 py-2 text-white font-semibold">Total</td>
+                <td className="px-4 py-2 text-right text-white font-mono">{fmtTokens(tokens.in)}</td>
+                <td className="px-4 py-2 text-right text-white font-mono">{fmtTokens(tokens.out)}</td>
+                <td className="px-4 py-2 text-right text-purple-300 font-mono">{fmtTokens(tokens.thinking)}</td>
+                <td className="px-4 py-2 text-right text-yellow-300 font-mono font-bold">{fmtUsd(costs.total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[10px] text-gray-600 mt-1 px-1">
+          Thinking tokens priced at $3.50/1M · Input $0.075/1M · Output $0.30/1M
+        </p>
+      </section>
+    </div>
+  )
+}
+
 // ── Patient detail panel ──────────────────────────────────────────────────────
 
 function PatientDetail({ runId }) {
@@ -695,9 +1031,9 @@ function PatientDetail({ runId }) {
 
       {/* Tab content */}
       <div className="flex-1 overflow-hidden">
-        {tab === 'inputs' && <InputsTab entry={entry} />}
-        {tab === 'stream' && <ThoughtStreamTab entry={entry} />}
-        {tab === 'output' && <OutputTab entry={entry} />}
+        {tab === 'inputs' && (entry.source === 'mongodb' ? <SchedInputsTab entry={entry} /> : <InputsTab entry={entry} />)}
+        {tab === 'stream' && (entry.source === 'mongodb' ? <SchedThoughtStreamTab entry={entry} /> : <ThoughtStreamTab entry={entry} />)}
+        {tab === 'output' && (entry.source === 'mongodb' ? <SchedOutputTab entry={entry} /> : <OutputTab entry={entry} />)}
       </div>
     </div>
   )

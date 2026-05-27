@@ -182,7 +182,7 @@ def _run_live_pipeline(
             status["delta_gate"] = "skipped"
             db.snapshot_schedule.update_one(
                 {"CPMRN": cpmrn, "encounter": encounter},
-                {"$set": {"next_run_at": now + timedelta(hours=4)}},
+                {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
             )
             new_structured = ctx.get("structured_summary") or {}
             _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
@@ -227,12 +227,19 @@ def _run_live_pipeline(
             {"$set": {"lightweight_summary": pass1.lightweight_summary}},
         )
 
-        # Update cadence fields
+        # Update cadence fields — anchor to snapshot_at (cycle start) so
+        # next_run_at lands on a clean scheduler tick even if the pipeline
+        # finishes 10-15 min into the hour.
+        #
+        # Pass 1 always re-runs every hour regardless of outcome.
+        # The delta gate (free) is the real gatekeeper for truly unchanged patients.
+        # pass1.next_run_hours is preserved in status for observability but not
+        # used to delay the next Pass 1 check.
         db.snapshot_schedule.update_one(
             {"CPMRN": cpmrn, "encounter": encounter},
             {"$set": {
-                "last_llm_run_at": now,
-                "next_run_at":     now + timedelta(hours=pass1.next_run_hours),
+                "last_llm_run_at": snapshot_at,
+                "next_run_at":     _next_run_at(snapshot_at, 1),
             }},
         )
 
@@ -281,7 +288,8 @@ def _run_live_pipeline(
     # Step 5: problem tracker — manages persistent problem list + targeted alerts
     try:
         from tools.radar_sync.problem_tracker import track_problems
-        tracker_result = track_problems(cpmrn, encounter, new_structured, snapshot_at)
+        screener_flag = pass1.flag_reason if pass1 is not None else ""
+        tracker_result = track_problems(cpmrn, encounter, new_structured, snapshot_at, screener_flag=screener_flag)
         status["problem_tracker"] = tracker_result
         logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)
     except Exception:
@@ -292,6 +300,25 @@ def _run_live_pipeline(
     _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
 
     return status
+
+
+def _next_run_at(base: datetime, hours: int) -> datetime:
+    """
+    Compute next_run_at anchored to the scheduler's hourly tick boundary.
+
+    Problem: if `base` is mid-pipeline (e.g. 12:10 UTC) and hours=1, naively
+    `base + 1h = 13:10` — which the 13:00 tick skips, so the patient doesn't
+    run until 14:00 (effectively 2h cadence instead of 1h).
+
+    Fix: snap the target down to the nearest whole hour.
+      12:10 + 1h → 13:10 → truncate → 13:00  (caught by 13:00 tick)
+      12:10 + 4h → 16:10 → truncate → 16:00  (caught by 16:00 tick)
+
+    Uses `snapshot_at` (passed as base) so the whole batch in a cycle
+    shares the same anchor, not `now` which drifts patient-by-patient.
+    """
+    target = base + timedelta(hours=hours)
+    return target.replace(minute=0, second=0, microsecond=0)
 
 
 def _run_fn_detector_step(
@@ -397,14 +424,47 @@ def _collect_all():
                         _last_run_results.append({"cpmrn": cpmrn, "status": "skipped_discharged"})
                         continue
 
-                # Idempotency guard — skip if a snapshot already exists within last 50 min
+                # Idempotency guard — skip snapshot collection if a fresh one exists.
+                # But still run the pipeline if it hasn't run against this snapshot yet
+                # (e.g. snapshot was collected via the API but pipeline never fired).
                 cutoff = datetime.now(timezone.utc) - timedelta(minutes=50)
                 recent = db.snapshots.find_one(
                     {"CPMRN": cpmrn, "encounter": encounter, "snapshot_at": {"$gte": cutoff}}
                 )
                 if recent:
-                    logger.info("scheduler: skipping %s enc=%d — snapshot exists within 50 min", cpmrn, encounter)
-                    _last_run_results.append({"cpmrn": cpmrn, "status": "skipped_duplicate"})
+                    sched_doc = db.snapshot_schedule.find_one(
+                        {"CPMRN": cpmrn, "encounter": encounter}
+                    ) or {}
+                    last_llm = sched_doc.get("last_llm_run_at")
+                    snap_ts  = recent["snapshot_at"]
+                    if isinstance(snap_ts, datetime) and snap_ts.tzinfo is None:
+                        snap_ts = snap_ts.replace(tzinfo=timezone.utc)
+                    if isinstance(last_llm, datetime):
+                        if last_llm.tzinfo is None:
+                            last_llm = last_llm.replace(tzinfo=timezone.utc)
+                    pipeline_ran = isinstance(last_llm, datetime) and last_llm >= snap_ts
+                    if pipeline_ran:
+                        logger.info(
+                            "scheduler: skipping %s enc=%d — snapshot and pipeline both fresh",
+                            cpmrn, encounter,
+                        )
+                        _last_run_results.append({"cpmrn": cpmrn, "status": "skipped_duplicate"})
+                        continue
+                    # Snapshot exists but pipeline hasn't run against it yet — run pipeline only
+                    logger.info(
+                        "scheduler: %s enc=%d — fresh snapshot exists but pipeline not yet run, running pipeline",
+                        cpmrn, encounter,
+                    )
+                    pipeline_status = _run_live_pipeline(
+                        cpmrn, encounter, recent["chart"], snap_ts, db
+                    )
+                    _last_run_results.append({
+                        "cpmrn": cpmrn, "status": "pipeline_on_existing_snapshot",
+                        "pipeline": pipeline_status,
+                    })
+                    logger.info(
+                        "scheduler: pipeline done for %s enc=%d — %s", cpmrn, encounter, pipeline_status,
+                    )
                     continue
 
                 result = collect(cpmrn=cpmrn, encounter=encounter)
@@ -494,6 +554,27 @@ def start_scheduler():
     threading.Thread(target=_try_start, daemon=True, name="scheduler-init").start()
 
 
+def _run_study_jobs():
+    """Run SBAR + task sync, LLM matching, FP candidacy, and metrics. Called 10 min after each hourly snapshot."""
+    try:
+        from backend.services.emr.db import get_db
+        from tools.radar_sync.study_sbar_syncer import sync_sbars
+        from tools.radar_sync.study_task_syncer import sync_tasks
+        from tools.radar_sync.study_matcher import run_llm_matching
+        from tools.radar_sync.study_metrics import compute_metrics
+        db = get_db()
+        sbar_sync_result = sync_sbars(db)
+        task_sync_result = sync_tasks(db)
+        match_result     = run_llm_matching(db)
+        metrics_result   = compute_metrics(db)
+        logger.info(
+            "study_jobs: sbar_sync=%s  task_sync=%s  matching=%s  metrics=%s",
+            sbar_sync_result, task_sync_result, match_result, metrics_result,
+        )
+    except Exception:
+        logger.exception("study_jobs: crashed")
+
+
 def _boot_scheduler():
     global _scheduler
 
@@ -508,8 +589,15 @@ def _boot_scheduler():
         name="Hourly chart snapshot collection",
         replace_existing=True,
     )
+    _scheduler.add_job(
+        _run_study_jobs,
+        trigger=CronTrigger(minute=10),  # 10 min after snapshot so alerts exist before matching
+        id="hourly_study_jobs",
+        name="Hourly study matcher + metrics",
+        replace_existing=True,
+    )
     _scheduler.start()
-    logger.info("APScheduler started (PID %d) — hourly snapshot collection active", os.getpid())
+    logger.info("APScheduler started (PID %d) — hourly snapshot + study jobs active", os.getpid())
 
 
 def stop_scheduler():

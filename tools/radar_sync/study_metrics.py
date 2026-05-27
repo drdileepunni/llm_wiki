@@ -2,12 +2,14 @@
 Study Metrics Calculator — computes rolling TP/FP/FN/TN and derived statistics.
 
 Runs hourly after the matcher. Reads study_alerts, study_sbar_import,
-study_adjudications, and snapshots. Writes one doc to study_metrics_snapshots.
+study_task_import, study_adjudications, and snapshots. Writes one doc to
+study_metrics_snapshots.
 
 2×2 definitions:
   TP = study_alerts where match_status IN ("matched", "tp_confirmed")
   FP = study_alerts where match_status = "fp_confirmed"  (adjudicated Inappropriate)
-  FN = study_sbar_import where match_status = "confirmed_fn"
+  FN = (study_sbar_import confirmed_fn) + (study_task_import confirmed_fn)
+       deduplicated tasks are excluded from the FN count
   TN = total patient-hours monitored  −  (TP + FP + FN)
 
 Secondary metrics:
@@ -21,6 +23,10 @@ import logging
 import statistics
 from datetime import datetime, timezone, timedelta
 from typing import Any
+
+# Snapshots before this timestamp are excluded from the TN denominator.
+# Study formally started May 26 2026 07:00 EST = 11:00 UTC.
+STUDY_START_UTC = datetime(2026, 5, 26, 11, 0, 0, tzinfo=timezone.utc)
 
 logger = logging.getLogger(__name__)
 
@@ -41,25 +47,41 @@ def _wilson_ci(count: int, total: int) -> tuple[float, float]:
     return (max(0.0, round(centre - margin, 4)), min(1.0, round(centre + margin, 4)))
 
 
-def compute_metrics(db: Any) -> dict:
+def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datetime | None = None) -> dict:
     """Compute rolling study metrics and write a snapshot. Returns summary dict."""
     now = datetime.now(timezone.utc)
+    effective_end = end_dt if end_dt else now
 
     alerts_col      = db["study_alerts"]
     sbars_col       = db["study_sbar_import"]
+    tasks_col       = db["study_task_import"]
     adj_col         = db["study_adjudications"]
     suppressed_col  = db["study_suppressed_events"]
     snapshots_col   = db["study_metrics_snapshots"]
     patient_snaps   = db["snapshots"]
 
-    # ── TP / FP / FN counts ───────────────────────────────────────────────────
-    tp = alerts_col.count_documents({"match_status": {"$in": ["matched", "tp_confirmed"]}})
-    fp = alerts_col.count_documents({"match_status": "fp_confirmed"})
-    fn = sbars_col.count_documents({"match_status": "confirmed_fn"})
+    alert_time_q = {"alerted_at": {"$gte": start_dt, "$lte": effective_end}}
+    sbar_time_q  = {"create_date_time": {"$gte": start_dt, "$lte": effective_end}}
+    task_time_q  = {"task_visible_at": {"$gte": start_dt, "$lte": effective_end}}
+    snap_time_q  = {"snapshot_at": {"$gte": start_dt, "$lte": effective_end}}
 
-    # ── TN — total monitored patient-hours minus events ───────────────────────
-    # Each snapshot = one patient-hour. We use this as the denominator proxy.
-    total_patient_hours = patient_snaps.count_documents({})
+    # ── TP / FP / FN counts ───────────────────────────────────────────────────
+    tp = alerts_col.count_documents({"match_status": {"$in": ["matched", "tp_confirmed"]}, **alert_time_q})
+    fp = alerts_col.count_documents({"match_status": "fp_confirmed", **alert_time_q})
+    # SBAR FNs: unreviewed + true miss only.
+    # Cooldown misses are NOT counted — the system detected the event but cooldown
+    # suppressed the alert, so it is not a true system failure.
+    _fn_statuses = ["confirmed_fn", "fn_reviewed_miss"]
+    fn_sbar = sbars_col.count_documents({"match_status": {"$in": _fn_statuses}, **sbar_time_q})
+    # Task FNs: deduplicated tasks are excluded (already counted via a SBAR)
+    fn_task = tasks_col.count_documents({"match_status": {"$in": _fn_statuses}, **task_time_q})
+    fn = fn_sbar + fn_task
+    excluded_downtime      = sbars_col.count_documents({"match_status": "excluded_downtime"})
+    task_excluded_downtime = tasks_col.count_documents({"match_status": "excluded_downtime"})
+    task_deduplicated      = tasks_col.count_documents({"match_status": "deduplicated"})
+
+    # ── TN — snapshots within study window, minus confirmed events ────────────
+    total_patient_hours = patient_snaps.count_documents(snap_time_q)
     tn = max(0, total_patient_hours - tp - fp - fn)
 
     total = tp + fp + fn + tn
@@ -142,6 +164,7 @@ def compute_metrics(db: Any) -> dict:
     pending_adj = alerts_col.count_documents({"match_status": "fp_candidate"})
     alerts_total = alerts_col.count_documents({})
     sbars_total  = sbars_col.count_documents({})
+    tasks_total  = tasks_col.count_documents({})
 
     snapshot = {
         "computed_at":              now,
@@ -149,6 +172,8 @@ def compute_metrics(db: Any) -> dict:
         "tp":                       tp,
         "fp":                       fp,
         "fn":                       fn,
+        "fn_sbar":                  fn_sbar,
+        "fn_task":                  fn_task,
         "tn":                       tn,
         "total_patient_hours":      total_patient_hours,
         # Metrics
@@ -178,12 +203,18 @@ def compute_metrics(db: Any) -> dict:
         # Totals
         "alerts_total":             alerts_total,
         "sbars_total":              sbars_total,
+        "tasks_total":              tasks_total,
+        "excluded_downtime":        excluded_downtime,
+        "task_excluded_downtime":   task_excluded_downtime,
+        "task_deduplicated":        task_deduplicated,
     }
 
     snapshots_col.insert_one(snapshot)
     logger.info(
-        "study_metrics: TP=%d FP=%d FN=%d TN=%d  sens=%s spec=%s f1=%s  pending_adj=%d",
-        tp, fp, fn, tn, sensitivity, specificity, f1, pending_adj,
+        "study_metrics: TP=%d FP=%d FN=%d (sbar=%d task=%d) TN=%d  sens=%s spec=%s f1=%s  "
+        "pending_adj=%d  excluded_downtime=%d  task_dedup=%d",
+        tp, fp, fn, fn_sbar, fn_task, tn, sensitivity, specificity, f1,
+        pending_adj, excluded_downtime, task_deduplicated,
     )
 
     return {"metrics": "ok", "tp": tp, "fp": fp, "fn": fn, "tn": tn, "f1": f1}

@@ -21,6 +21,7 @@ import Mopup from './pages/Mopup'
 import CdsReplay from './pages/CdsReplay'
 import Settings from './pages/Settings'
 import Study from './pages/Study'
+import FnReview from './pages/FnReview'
 import Traces from './pages/Traces'
 
 export default function App() {
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="cds-replay" element={<CdsReplay />} />
             <Route path="settings" element={<Settings />} />
             <Route path="study" element={<Study />} />
+            <Route path="fn-review" element={<FnReview />} />
             <Route path="traces" element={<Traces />} />
           </Route>
         </Routes>

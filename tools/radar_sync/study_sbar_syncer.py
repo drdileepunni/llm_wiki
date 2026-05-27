@@ -1,8 +1,8 @@
 """
-Study SBAR Syncer — pulls High-urgency SBARs from BigQuery into MongoDB.
+Study SBAR Syncer — pulls High- and Medium-urgency SBARs from BigQuery into MongoDB.
 
 Runs hourly as part of the study pipeline. Fetches the last 8 hours of
-High-urgency SBARs (documents/vitals/summary/intake-output modules only)
+High- and Medium-urgency SBARs (documents/vitals/summary/intake-output modules only)
 and upserts them into study_sbar_import. Sets window_expires_at = 8h after
 SBAR creation, after which unmatched SBARs become confirmed false negatives.
 """
@@ -35,7 +35,7 @@ SELECT
   reviewer_name,
   action
 FROM `{_BQ_TABLE}`
-WHERE urgency = 'High'
+WHERE urgency IN ('High', 'Medium')
   AND module IN ({", ".join(f"'{m}'" for m in _RELEVANT_MODULES)})
   AND create_date_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {_LOOKBACK_HOURS} HOUR)
 """
