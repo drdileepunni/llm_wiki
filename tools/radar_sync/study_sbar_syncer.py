@@ -41,23 +41,25 @@ WHERE urgency IN ('High', 'Medium')
 """
 
 
-def _get_bq_client():
-    """Return a BigQuery client using Application Default Credentials."""
-    from google.cloud import bigquery
-    return bigquery.Client(project=_BQ_PROJECT)
-
-
 def sync_sbars(db: Any) -> dict:
     """
     Pull High-urgency SBARs from BigQuery and upsert into study_sbar_import.
     Returns a summary dict for the scheduler log.
     """
+    import sys
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    for _p in [str(_root / "app"), str(_root)]:
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    from backend.services.bq_client import get_bq_client, parse_bq_dt
+
     col = db["study_sbar_import"]
     now = datetime.now(timezone.utc)
 
     try:
-        bq = _get_bq_client()
-        rows = list(bq.query(_QUERY).result())
+        rows = get_bq_client().execute_select(_QUERY)
     except Exception:
         logger.exception("study_sbar_syncer: BigQuery query failed")
         return {"sbar_sync": "error", "upserted": 0, "skipped": 0}
@@ -75,9 +77,7 @@ def sync_sbars(db: Any) -> dict:
         except (TypeError, ValueError):
             encounter = 1
 
-        create_dt = row["create_date_time"]
-        if isinstance(create_dt, datetime) and create_dt.tzinfo is None:
-            create_dt = create_dt.replace(tzinfo=timezone.utc)
+        create_dt = parse_bq_dt(row["create_date_time"])
 
         window_expires_at = create_dt + timedelta(hours=_WINDOW_HOURS) if create_dt else now + timedelta(hours=_WINDOW_HOURS)
 

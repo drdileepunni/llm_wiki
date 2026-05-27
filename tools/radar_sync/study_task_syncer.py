@@ -40,22 +40,25 @@ WHERE title = 'Review Abnormal Vitals'
 """
 
 
-def _get_bq_client():
-    from google.cloud import bigquery
-    return bigquery.Client(project=_BQ_PROJECT)
-
-
 def sync_tasks(db: Any) -> dict:
     """
     Pull abnormal-vital escalation tasks from BigQuery and upsert into study_task_import.
     Returns a summary dict for the scheduler log.
     """
+    import sys
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    for _p in [str(_root / "app"), str(_root)]:
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    from backend.services.bq_client import get_bq_client, parse_bq_dt
+
     col = db["study_task_import"]
     now = datetime.now(timezone.utc)
 
     try:
-        bq   = _get_bq_client()
-        rows = list(bq.query(_QUERY).result())
+        rows = get_bq_client().execute_select(_QUERY)
     except Exception:
         logger.exception("study_task_syncer: BigQuery query failed")
         return {"task_sync": "error", "upserted": 0, "skipped": 0}
@@ -72,9 +75,7 @@ def sync_tasks(db: Any) -> dict:
         except (TypeError, ValueError):
             encounter = 1
 
-        visible_at = row["task_visible_at"]
-        if isinstance(visible_at, datetime) and visible_at.tzinfo is None:
-            visible_at = visible_at.replace(tzinfo=timezone.utc)
+        visible_at = parse_bq_dt(row["task_visible_at"])
 
         window_expires_at = (
             visible_at + timedelta(hours=_WINDOW_HOURS)
