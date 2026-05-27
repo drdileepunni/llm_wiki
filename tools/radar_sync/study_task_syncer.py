@@ -1,5 +1,5 @@
 """
-Study Task Syncer — pulls abnormal-vital escalation tasks from BigQuery into MongoDB.
+Study Task Syncer — pulls abnormal-vital escalation tasks from BigQuery into cds_study.study_task_import.
 
 Runs hourly alongside the SBAR syncer. Fetches non-recurring "Review Abnormal Vitals"
 tasks from the last 8 hours and upserts them into study_task_import. Sets
@@ -42,7 +42,7 @@ WHERE title = 'Review Abnormal Vitals'
 
 def sync_tasks(db: Any) -> dict:
     """
-    Pull abnormal-vital escalation tasks from BigQuery and upsert into study_task_import.
+    Pull abnormal-vital escalation tasks from BigQuery and upsert into cds_study.study_task_import.
     Returns a summary dict for the scheduler log.
     """
     import sys
@@ -53,8 +53,9 @@ def sync_tasks(db: Any) -> dict:
             sys.path.insert(0, _p)
 
     from backend.services.bq_client import get_bq_client, parse_bq_dt
+    from backend.services.bq_store import get_bq_store
 
-    col = db["study_task_import"]
+    bq_store = get_bq_store()
     now = datetime.now(timezone.utc)
 
     try:
@@ -76,7 +77,6 @@ def sync_tasks(db: Any) -> dict:
             encounter = 1
 
         visible_at = parse_bq_dt(row["task_visible_at"])
-
         window_expires_at = (
             visible_at + timedelta(hours=_WINDOW_HOURS)
             if visible_at
@@ -84,36 +84,26 @@ def sync_tasks(db: Any) -> dict:
         )
 
         doc = {
-            "task_id":          task_id,
-            "CPMRN":            row["cpmrn"] or "",
-            "encounter":        encounter,
-            "hospital_name":    row["hospital_name"] or "",
-            "unit_name":        row["unit_name"] or "",
-            "title":            row["title"] or "",
-            "issues":           row["description"] or "",  # maps to SBAR issues for LLM matching
-            "priority":         row["priority"] or "",
-            "status":           row["status"] or "",
-            "task_visible_at":  visible_at,
+            "task_id":           task_id,
+            "CPMRN":             row["cpmrn"] or "",
+            "encounter":         encounter,
+            "hospital_name":     row["hospital_name"] or "",
+            "unit_name":         row["unit_name"] or "",
+            "title":             row["title"] or "",
+            "issues":            row["description"] or "",  # maps to SBAR issues for LLM matching
+            "priority":          row["priority"] or "",
+            "status":            row["status"] or "",
+            "task_visible_at":   visible_at,
             "window_expires_at": window_expires_at,
+            "match_status":      "pending",
         }
 
-        result = col.update_one(
-            {"task_id": task_id},
-            {
-                "$setOnInsert": {
-                    **doc,
-                    "match_status":     "pending",
-                    "matched_alert_id": None,
-                    "synced_at":        now,
-                }
-            },
-            upsert=True,
-        )
-        if result.upserted_id:
+        inserted = bq_store.upsert_task(doc)
+        if inserted:
             upserted += 1
             logger.debug("study_task_syncer: new task %s CPMRN=%s", task_id, doc["CPMRN"])
         else:
-            skipped += 1  # already exists — don't overwrite match_status
+            skipped += 1  # already exists — match_status preserved
 
     logger.info(
         "study_task_syncer: %d new tasks upserted, %d already present",

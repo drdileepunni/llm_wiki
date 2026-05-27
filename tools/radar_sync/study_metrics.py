@@ -3,10 +3,10 @@ Study Metrics Calculator — computes rolling TP/FP/FN/TN and derived statistics
 
 Runs hourly after the matcher. Reads study_alerts, study_sbar_import,
 study_task_import, study_adjudications, and snapshots. Writes one doc to
-study_metrics_snapshots.
+study_metrics_snapshots (BigQuery).
 
 2×2 definitions:
-  TP = study_alerts where match_status = "tp_confirmed"  (human-adjudicated only)
+  TP = study_alerts where match_status IN ("matched", "tp_confirmed")
   FP = study_alerts where match_status = "fp_confirmed"  (adjudicated Inappropriate)
   FN = (study_sbar_import confirmed_fn) + (study_task_import confirmed_fn)
        deduplicated tasks are excluded from the FN count
@@ -48,42 +48,43 @@ def _wilson_ci(count: int, total: int) -> tuple[float, float]:
 
 
 def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datetime | None = None) -> dict:
-    """Compute rolling study metrics and write a snapshot. Returns summary dict."""
-    now = datetime.now(timezone.utc)
+    """Compute rolling study metrics and write a snapshot. Returns summary dict.
+    db is the GCS database, used only for patient snapshots (hourly monitoring TN count).
+    """
+    import sys
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    for _p in [str(_root / "app"), str(_root)]:
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    from backend.services.bq_store import get_bq_store
+    bq_store = get_bq_store()
+
+    now          = datetime.now(timezone.utc)
     effective_end = end_dt if end_dt else now
 
-    alerts_col      = db["study_alerts"]
-    sbars_col       = db["study_sbar_import"]
-    tasks_col       = db["study_task_import"]
-    adj_col         = db["study_adjudications"]
-    suppressed_col  = db["study_suppressed_events"]
-    snapshots_col   = db["study_metrics_snapshots"]
-    patient_snaps   = db["snapshots"]
-
-    alert_time_q = {"alerted_at": {"$gte": start_dt, "$lte": effective_end}}
-    sbar_time_q  = {"create_date_time": {"$gte": start_dt, "$lte": effective_end}}
-    task_time_q  = {"task_visible_at": {"$gte": start_dt, "$lte": effective_end}}
-    snap_time_q  = {"snapshot_at": {"$gte": start_dt, "$lte": effective_end}}
+    alert_time_q = {"alerted_at":        {"$gte": start_dt, "$lte": effective_end}}
+    sbar_time_q  = {"create_date_time":  {"$gte": start_dt, "$lte": effective_end}}
+    task_time_q  = {"task_visible_at":   {"$gte": start_dt, "$lte": effective_end}}
+    snap_time_q  = {"snapshot_at":       {"$gte": start_dt, "$lte": effective_end}}
 
     # ── TP / FP / FN counts ───────────────────────────────────────────────────
-    tp = alerts_col.count_documents({"match_status": "tp_confirmed", **alert_time_q})
-    fp = alerts_col.count_documents({"match_status": "fp_confirmed", **alert_time_q})
-    # SBAR FNs: unreviewed + true miss only.
-    # Cooldown misses are NOT counted — the system detected the event but cooldown
-    # suppressed the alert, so it is not a true system failure.
+    tp = bq_store.count_alerts({"match_status": "tp_confirmed", **alert_time_q})
+    fp = bq_store.count_alerts({"match_status": "fp_confirmed", **alert_time_q})
+
     _fn_statuses = ["confirmed_fn", "fn_reviewed_miss"]
-    fn_sbar = sbars_col.count_documents({"match_status": {"$in": _fn_statuses}, **sbar_time_q})
-    # Task FNs: deduplicated tasks are excluded (already counted via a SBAR)
-    fn_task = tasks_col.count_documents({"match_status": {"$in": _fn_statuses}, **task_time_q})
+    fn_sbar = bq_store.count_sbars({"match_status": {"$in": _fn_statuses}, **sbar_time_q})
+    fn_task = bq_store.count_tasks({"match_status": {"$in": _fn_statuses}, **task_time_q})
     fn = fn_sbar + fn_task
-    excluded_downtime      = sbars_col.count_documents({"match_status": "excluded_downtime"})
-    task_excluded_downtime = tasks_col.count_documents({"match_status": "excluded_downtime"})
-    task_deduplicated      = tasks_col.count_documents({"match_status": "deduplicated"})
+    excluded_downtime      = bq_store.count_sbars({"match_status": "excluded_downtime"})
+    task_excluded_downtime = bq_store.count_tasks({"match_status": "excluded_downtime"})
+    task_deduplicated      = bq_store.count_tasks({"match_status": "deduplicated"})
 
-    # ── TN — snapshots within study window, minus confirmed events ────────────
-    total_patient_hours = patient_snaps.count_documents(snap_time_q)
+    # ── TN — patient snapshots within study window, minus confirmed events ─────
+    # GCS-backed snapshot count (each hourly snapshot per patient = 1 patient-hour)
+    total_patient_hours = db["snapshots"].count_documents(snap_time_q)
     tn = max(0, total_patient_hours - tp - fp - fn)
-
     total = tp + fp + fn + tn
 
     # ── Derived metrics ───────────────────────────────────────────────────────
@@ -102,16 +103,13 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
     ppv_ci   = _wilson_ci(tp, tp + fp)
 
     # ── Lead time (minutes) for matched TPs ───────────────────────────────────
-    matched_alerts = list(alerts_col.find(
-        {"match_status": "tp_confirmed", "matched_sbar_id": {"$exists": True}},
-        {"matched_sbar_id": 1, "alerted_at": 1},
-    ))
-
+    matched_alerts   = bq_store.find_matched_alerts_with_sbar()
     lead_times_min: list[float] = []
     for alert in matched_alerts:
-        sbar = sbars_col.find_one({"sbar_id": alert["matched_sbar_id"]}, {"create_date_time": 1})
-        if not sbar:
+        sbar_rows  = bq_store.find_sbars({"sbar_id": alert["matched_sbar_id"]})
+        if not sbar_rows:
             continue
+        sbar       = sbar_rows[0]
         alerted_at = alert.get("alerted_at")
         create_dt  = sbar.get("create_date_time")
         if not alerted_at or not create_dt:
@@ -120,7 +118,7 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
             alerted_at = alerted_at.replace(tzinfo=timezone.utc)
         if isinstance(create_dt, datetime) and create_dt.tzinfo is None:
             create_dt = create_dt.replace(tzinfo=timezone.utc)
-        lead_min = (create_dt - alerted_at).total_seconds() / 60  # positive = alert before SBAR
+        lead_min = (create_dt - alerted_at).total_seconds() / 60
         lead_times_min.append(round(lead_min, 1))
 
     lead_time_median = round(statistics.median(lead_times_min), 1) if lead_times_min else None
@@ -132,27 +130,27 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
         lead_time_iqr = round(q3 - q1, 1)
 
     # ── Suppression analysis ──────────────────────────────────────────────────
-    suppressed_total = suppressed_col.count_documents({})
+    suppressed_docs  = bq_store.find_suppressed({})
+    suppressed_total = len(suppressed_docs)
     suppressed_with_sbar = 0
-    if suppressed_total > 0:
-        for sup in suppressed_col.find({}, {"CPMRN": 1, "encounter": 1, "suppressed_at": 1}):
-            sup_at = sup.get("suppressed_at")
-            if not sup_at:
-                continue
-            if isinstance(sup_at, datetime) and sup_at.tzinfo is None:
-                sup_at = sup_at.replace(tzinfo=timezone.utc)
-            window_start = sup_at - timedelta(hours=_MATCH_WINDOW_BEFORE)
-            window_end   = sup_at + timedelta(hours=_MATCH_WINDOW_AFTER)
-            has_sbar = sbars_col.count_documents({
-                "CPMRN":            sup["CPMRN"],
-                "encounter":        sup["encounter"],
-                "create_date_time": {"$gte": window_start, "$lte": window_end},
-            }) > 0
-            if has_sbar:
-                suppressed_with_sbar += 1
+    for sup in suppressed_docs:
+        sup_at = sup.get("suppressed_at")
+        if not sup_at:
+            continue
+        if isinstance(sup_at, datetime) and sup_at.tzinfo is None:
+            sup_at = sup_at.replace(tzinfo=timezone.utc)
+        window_start = sup_at - timedelta(hours=_MATCH_WINDOW_BEFORE)
+        window_end   = sup_at + timedelta(hours=_MATCH_WINDOW_AFTER)
+        has_sbar = bq_store.count_sbars({
+            "CPMRN":            sup["CPMRN"],
+            "encounter":        sup["encounter"],
+            "create_date_time": {"$gte": window_start, "$lte": window_end},
+        }) > 0
+        if has_sbar:
+            suppressed_with_sbar += 1
 
     # ── Explainability ratings ─────────────────────────────────────────────────
-    adj_docs = list(adj_col.find({}, {"verdict": 1, "explainability_rating": 1}))
+    adj_docs            = bq_store.find_adjudications()
     adj_total           = len(adj_docs)
     expl_clear          = sum(1 for a in adj_docs if a.get("explainability_rating") == 1)
     expl_partial        = sum(1 for a in adj_docs if a.get("explainability_rating") == 2)
@@ -161,10 +159,10 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
     adj_inappropriate   = sum(1 for a in adj_docs if a.get("verdict") == "Inappropriate")
 
     # ── Pending adjudication queue depth ─────────────────────────────────────
-    pending_adj = alerts_col.count_documents({"match_status": "fp_candidate"})
-    alerts_total = alerts_col.count_documents({})
-    sbars_total  = sbars_col.count_documents({})
-    tasks_total  = tasks_col.count_documents({})
+    pending_adj  = bq_store.count_alerts({"match_status": "fp_candidate"})
+    alerts_total = bq_store.count_alerts({})
+    sbars_total  = bq_store.count_sbars({})
+    tasks_total  = bq_store.count_tasks({})
 
     snapshot = {
         "computed_at":              now,
@@ -209,7 +207,7 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
         "task_deduplicated":        task_deduplicated,
     }
 
-    snapshots_col.insert_one(snapshot)
+    bq_store.insert_metrics_snapshot(snapshot)
     logger.info(
         "study_metrics: TP=%d FP=%d FN=%d (sbar=%d task=%d) TN=%d  sens=%s spec=%s f1=%s  "
         "pending_adj=%d  excluded_downtime=%d  task_dedup=%d",

@@ -1,20 +1,18 @@
 """
 BigQuery client via Cloud Run proxy.
 
-Instead of calling BigQuery directly (which requires google-cloud-bigquery and
-explicit ADC / BQ IAM roles), this routes all queries through the shared Cloud
-Run BigQuery service using an identity token obtained from ADC (Workload Identity
-in Cloud Run/GCE, or `gcloud auth application-default login` locally).
+Routes all queries through the shared Cloud Run BigQuery service using an
+identity token obtained via Workload Identity (Cloud Run/GCE) or ADC
+(gcloud auth application-default login for local dev).
 
-The calling service only needs roles/run.invoker on the proxy service; BigQuery
-IAM is managed centrally on the proxy's service account.
+The calling service only needs roles/run.invoker on the proxy service;
+BigQuery IAM is managed centrally on the proxy's service account.
 
 Usage
 -----
     from backend.services.bq_client import get_bq_client
 
     rows = get_bq_client().execute_select("SELECT ... FROM `project.dataset.table`")
-    # rows is a list[dict] — field access is identical to google.cloud.bigquery Row objects
 """
 from __future__ import annotations
 
@@ -24,7 +22,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
-from google.auth import default
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 
@@ -35,8 +32,8 @@ _BQ_PROJECT = "prod-tech-project1-bv479-zo027"
 
 def _parse_dt(value: Any) -> datetime | None:
     """
-    Parse a value that may be a datetime (from direct BQ client) or a string
-    (from the Cloud Run JSON proxy). Always returns a UTC-aware datetime or None.
+    Parse a value that may be a datetime or an ISO string (from the Cloud Run
+    JSON proxy). Always returns a UTC-aware datetime or None.
     """
     if value is None:
         return None
@@ -56,17 +53,6 @@ class ProdBigQueryClient:
         self.project_id  = project_id
 
     def _get_identity_token(self) -> str:
-        # Prefer an explicit SA key file (local dev with invoker key)
-        sa_path = os.environ.get("BQ_INVOKER_SA_KEY")
-        if sa_path:
-            from google.oauth2 import service_account as _sa
-            creds = _sa.IDTokenCredentials.from_service_account_file(
-                sa_path, target_audience=self.service_url
-            )
-            creds.refresh(Request())
-            return creds.token
-        # Cloud Run / GCE: Workload Identity via ADC
-        credentials, _ = default()
         return id_token.fetch_id_token(Request(), self.service_url)
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> dict:

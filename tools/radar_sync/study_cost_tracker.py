@@ -125,7 +125,14 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
     }
 
     try:
-        db["pipeline_run_costs"].insert_one(doc.copy())
+        import sys
+        from pathlib import Path
+        _root = Path(__file__).resolve().parents[2]
+        for _p in [str(_root / "app"), str(_root)]:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+        from backend.services.bq_store import get_bq_store
+        get_bq_store().insert_run_cost(doc)
         logger.info(
             "cost_tracker: run %s — %d traces, %d patients, total $%.4f USD "
             "(in=%d, out=%d, thinking=%d)",

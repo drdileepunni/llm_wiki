@@ -1,5 +1,5 @@
 """
-Study SBAR Syncer — pulls High- and Medium-urgency SBARs from BigQuery into MongoDB.
+Study SBAR Syncer — pulls High- and Medium-urgency SBARs from BigQuery into cds_study.study_sbar_import.
 
 Runs hourly as part of the study pipeline. Fetches the last 8 hours of
 High- and Medium-urgency SBARs (documents/vitals/summary/intake-output modules only)
@@ -43,7 +43,7 @@ WHERE urgency IN ('High', 'Medium')
 
 def sync_sbars(db: Any) -> dict:
     """
-    Pull High-urgency SBARs from BigQuery and upsert into study_sbar_import.
+    Pull High-urgency SBARs from BigQuery and upsert into cds_study.study_sbar_import.
     Returns a summary dict for the scheduler log.
     """
     import sys
@@ -54,8 +54,9 @@ def sync_sbars(db: Any) -> dict:
             sys.path.insert(0, _p)
 
     from backend.services.bq_client import get_bq_client, parse_bq_dt
+    from backend.services.bq_store import get_bq_store
 
-    col = db["study_sbar_import"]
+    bq_store = get_bq_store()
     now = datetime.now(timezone.utc)
 
     try:
@@ -71,49 +72,37 @@ def sync_sbars(db: Any) -> dict:
             skipped += 1
             continue
 
-        # Parse encounter — BigQuery stores it as STRING "1", "2", etc.
         try:
             encounter = int(row["encounter_str"] or 1)
         except (TypeError, ValueError):
             encounter = 1
 
         create_dt = parse_bq_dt(row["create_date_time"])
-
         window_expires_at = create_dt + timedelta(hours=_WINDOW_HOURS) if create_dt else now + timedelta(hours=_WINDOW_HOURS)
 
         doc = {
-            "sbar_id":          sbar_id,
-            "CPMRN":            row["cpmrn"] or "",
-            "encounter":        encounter,
-            "hospital_name":    row["hospital_name"] or "",
-            "unit_name":        row["unit_name"] or "",
-            "urgency":          row["urgency"] or "High",
-            "issues":           row["issues"] or "",
-            "module":           row["module"] or "",
-            "create_date_time": create_dt,
-            "is_reviewed":      row["is_reviewed"] or False,
-            "reviewer_name":    row["reviewer_name"] or "",
-            "action":           row["action"] or "",
+            "sbar_id":           sbar_id,
+            "CPMRN":             row["cpmrn"] or "",
+            "encounter":         encounter,
+            "hospital_name":     row["hospital_name"] or "",
+            "unit_name":         row["unit_name"] or "",
+            "urgency":           row["urgency"] or "High",
+            "issues":            row["issues"] or "",
+            "module":            row["module"] or "",
+            "create_date_time":  create_dt,
+            "is_reviewed":       row["is_reviewed"] or False,
+            "reviewer_name":     row["reviewer_name"] or "",
+            "action":            row["action"] or "",
             "window_expires_at": window_expires_at,
+            "match_status":      "pending",
         }
 
-        result = col.update_one(
-            {"sbar_id": sbar_id},
-            {
-                "$setOnInsert": {
-                    **doc,
-                    "match_status":    "pending",
-                    "matched_alert_id": None,
-                    "synced_at":       now,
-                }
-            },
-            upsert=True,
-        )
-        if result.upserted_id:
+        inserted = bq_store.upsert_sbar(doc)
+        if inserted:
             upserted += 1
             logger.debug("study_sbar_syncer: new SBAR %s CPMRN=%s", sbar_id, doc["CPMRN"])
         else:
-            skipped += 1  # already exists — don't overwrite match_status
+            skipped += 1  # already exists — match_status preserved
 
     logger.info(
         "study_sbar_syncer: %d new SBARs upserted, %d already present",

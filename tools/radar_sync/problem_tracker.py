@@ -1268,21 +1268,20 @@ def track_problems(
         # Immutable alert record — written only when the alert actually fires.
         if alerted:
             try:
-                db["study_alerts"].insert_one({
-                    "CPMRN":             cpmrn,
-                    "encounter":         encounter,
-                    "problem_name":      problem_name,
-                    "clinical_status":   assessment.get("clinical_status"),
-                    "alert_reason":      assessment.get("alert_reason", ""),
-                    "addressed_evidence": assessment.get("addressed_evidence", ""),
-                    "cited_notes":       assessment.get("cited_notes", []),
-                    "suggestions":       assessment.get("suggestions", []),
-                    "alerted_at":        now,
-                    # match lifecycle — updated by study_matcher
-                    "match_status":         "pending",
-                    "matched_sbar_id":      None,
-                    "llm_match_confidence": None,
-                    "llm_match_reasoning":  None,
+                import sys as _sys
+                from pathlib import Path as _Path
+                _root = _Path(__file__).resolve().parents[2]
+                for _p in [str(_root / "app"), str(_root)]:
+                    if _p not in _sys.path:
+                        _sys.path.insert(0, _p)
+                from backend.services.bq_store import get_bq_store
+                get_bq_store().insert_alert({
+                    "CPMRN":        cpmrn,
+                    "encounter":    encounter,
+                    "problem_name": problem_name,
+                    "alert_reason": assessment.get("alert_reason", ""),
+                    "alerted_at":   now,
+                    "match_status": "pending",
                 })
             except Exception:
                 logger.exception("problem_tracker: study_alerts write failed for '%s' %s", problem_name, cpmrn)
@@ -1297,13 +1296,19 @@ def track_problems(
             and not assessment.get("should_alert", False)
         ):
             try:
-                db["study_suppressed_events"].insert_one({
-                    "CPMRN":             cpmrn,
-                    "encounter":         encounter,
-                    "problem_name":      problem_name,
-                    "clinical_status":   clinical_status_val,
-                    "addressed_evidence": assessment.get("addressed_evidence", ""),
-                    "suppressed_at":     now,
+                import sys as _sys
+                from pathlib import Path as _Path
+                _root = _Path(__file__).resolve().parents[2]
+                for _p in [str(_root / "app"), str(_root)]:
+                    if _p not in _sys.path:
+                        _sys.path.insert(0, _p)
+                from backend.services.bq_store import get_bq_store
+                get_bq_store().insert_suppressed_event({
+                    "CPMRN":              cpmrn,
+                    "encounter":          encounter,
+                    "problem_name":       problem_name,
+                    "suppressed_at":      now,
+                    "suppression_reason": "being_addressed",
                 })
             except Exception:
                 logger.exception("problem_tracker: study_suppressed_events write failed for '%s' %s", problem_name, cpmrn)

@@ -1,26 +1,26 @@
-"""MongoDB-backed cache for per-patient FAISS note indexes (replaces GCS cache)."""
+"""GCS-backed cache for per-patient FAISS note indexes."""
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-
-import bson
 
 if TYPE_CHECKING:
     from .admission_loader import AdmissionStore
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
+
+_PREFIX = "note_indexes"
 
 
-def _get_collection():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "app"))
-    from backend.services.emr.db import get_db
-    return get_db()["note_indexes"]
+def _bucket():
+    from google.cloud import storage
+    bucket_name = os.environ.get("GCS_BUCKET", "cds-pipeline-ops")
+    return storage.Client().bucket(bucket_name)
 
 
 def compute_notes_hash(chart: dict) -> str:
@@ -36,58 +36,75 @@ def compute_notes_hash(chart: dict) -> str:
 
 
 def get_stored_notes_hash(admission_id: str) -> str | None:
-    """Return the notes_hash stored with the last index, or None if not present."""
-    col = _get_collection()
-    doc = col.find_one({"admission_id": admission_id}, {"notes_hash": 1})
-    return doc.get("notes_hash") if doc else None
+    """Return the notes_hash stored with the last index, or None."""
+    blob = _bucket().blob(f"{_PREFIX}/{admission_id}.json")
+    if not blob.exists():
+        return None
+    try:
+        meta = json.loads(blob.download_as_text())
+        return meta.get("notes_hash")
+    except Exception:
+        return None
 
 
 def index_exists(admission_id: str) -> bool:
-    col = _get_collection()
-    return col.count_documents({"admission_id": admission_id}, limit=1) > 0
+    return _bucket().blob(f"{_PREFIX}/{admission_id}.faiss").exists()
 
 
 def save_index(store: "AdmissionStore", admission_id: str, notes_hash: str | None = None) -> None:
-    """Serialize FAISS index + chunks into MongoDB note_indexes collection."""
+    """Serialise FAISS index + chunks to GCS."""
     if store.vector_index is None:
-        logger.warning("save_index: no vector_index on store for %s, skipping", admission_id)
+        log.warning("save_index: no vector_index on store for %s, skipping", admission_id)
         return
     import faiss
-    index_bytes = faiss.serialize_index(store.vector_index)
+    import numpy as np
+
+    bucket = _bucket()
+
+    # Binary FAISS index
+    index_bytes = bytes(faiss.serialize_index(store.vector_index))
+    bucket.blob(f"{_PREFIX}/{admission_id}.faiss").upload_from_string(
+        index_bytes, content_type="application/octet-stream"
+    )
+
+    # JSON metadata + chunks
     chunks_data = [dataclasses.asdict(c) for c in store.text_chunks]
-    col = _get_collection()
-    fields = {
+    meta = {
         "admission_id": admission_id,
-        "index_bytes":  bson.Binary(bytes(index_bytes)),
         "chunks":       chunks_data,
-        "indexed_at":   datetime.now(timezone.utc),
+        "indexed_at":   datetime.now(timezone.utc).isoformat(),
         "note_count":   len(store.text_chunks),
     }
     if notes_hash is not None:
-        fields["notes_hash"] = notes_hash
-    col.update_one(
-        {"admission_id": admission_id},
-        {"$set": fields},
-        upsert=True,
+        meta["notes_hash"] = notes_hash
+    bucket.blob(f"{_PREFIX}/{admission_id}.json").upload_from_string(
+        json.dumps(meta), content_type="application/json"
     )
-    logger.info("save_index: saved %d chunks for %s", len(store.text_chunks), admission_id)
+    log.info("save_index: saved %d chunks for %s", len(store.text_chunks), admission_id)
 
 
 def load_index(store: "AdmissionStore", admission_id: str) -> bool:
-    """Load FAISS index + chunks from MongoDB into store. Returns True on success."""
+    """Load FAISS index + chunks from GCS into store. Returns True on success."""
     from .chunk import Chunk
     import faiss
-    col = _get_collection()
-    doc = col.find_one({"admission_id": admission_id})
-    if not doc:
+    import numpy as np
+
+    bucket = _bucket()
+    faiss_blob = bucket.blob(f"{_PREFIX}/{admission_id}.faiss")
+    meta_blob  = bucket.blob(f"{_PREFIX}/{admission_id}.json")
+
+    if not faiss_blob.exists():
         return False
     try:
-        import numpy as np
-        raw = bytes(doc["index_bytes"])
-        store.vector_index = faiss.deserialize_index(np.frombuffer(raw, dtype=np.uint8))
-        store.text_chunks  = [Chunk(**c) for c in doc.get("chunks", [])]
-        logger.info("load_index: loaded %d chunks for %s", len(store.text_chunks), admission_id)
+        raw_bytes = faiss_blob.download_as_bytes()
+        store.vector_index = faiss.deserialize_index(np.frombuffer(raw_bytes, dtype=np.uint8))
+        if meta_blob.exists():
+            meta = json.loads(meta_blob.download_as_text())
+            store.text_chunks = [Chunk(**c) for c in meta.get("chunks", [])]
+        else:
+            store.text_chunks = []
+        log.info("load_index: loaded %d chunks for %s", len(store.text_chunks), admission_id)
         return True
     except Exception:
-        logger.exception("load_index: failed for %s", admission_id)
+        log.exception("load_index: failed for %s", admission_id)
         return False

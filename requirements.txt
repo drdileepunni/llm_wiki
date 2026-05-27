@@ -1,0 +1,14 @@
+flask
+gunicorn
+google-cloud-storage
+google-cloud-bigquery
+google-auth
+google-generativeai
+anthropic
+faiss-cpu
+numpy
+pydantic
+requests
+httpx
+python-dotenv
+apscheduler
