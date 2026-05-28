@@ -3,13 +3,12 @@ study_cost_tracker.py — LLM cost calculation per pipeline run.
 
 Called at the end of each hourly scheduler run. Reads pipeline_traces
 documents that were created during the run, aggregates token counts by
-step/model, applies Gemini 2.5 Flash pricing, and writes one doc to
+step/model, applies Gemini 3.1 Flash-Lite pricing, and writes one doc to
 pipeline_run_costs.
 
-Gemini 2.5 Flash pricing (as of May 2025, USD per 1M tokens):
-  Input (prompts ≤200K ctx):   $0.075
-  Output — non-thinking:       $0.30
-  Output — thinking:           $3.50   ← thinking_tokens split tracked separately
+Gemini 3.1 Flash-Lite pricing (USD per 1M tokens):
+  Input:                       $0.25
+  Output (incl. thinking):     $1.50   ← thinking tokens billed at same output rate
 
 Collection: pipeline_run_costs
 {
@@ -23,8 +22,8 @@ Collection: pipeline_run_costs
     ...
   },
   totals: {input_tokens, output_tokens, thinking_tokens, cost_usd},
-  model: "gemini-2.5-flash",
-  pricing: {input_per_1m, output_per_1m, thinking_per_1m},
+  model: "gemini-3.1-flash-lite",
+  pricing: {input_per_1m, output_per_1m},
 }
 """
 from __future__ import annotations

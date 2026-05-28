@@ -17,7 +17,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_CLASSIFIER_MODEL = "gemini-3.1-flash-lite"  # reasoning model with thinking
+_CLASSIFIER_MODEL = "gemini-2.5-flash"  # reasoning model with thinking
 _MAX_TOOL_ROUNDS  = 8                   # max tool calls before forcing final answer
 _THINKING_BUDGET  = 8000               # tokens for Gemini thinking
 
@@ -213,10 +213,11 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
         return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2, Temp"
 
     db = get_db()
-    snaps = list(db.snapshots.find(
+    snaps = db.snapshots.find(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.vitals": 1, "snapshot_at": 1},
-    ).sort("snapshot_at", -1).limit(n * 3))  # fetch more, may deduplicate
+    )
+    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[: n * 3]
 
     seen_ts = set()
     rows = []
@@ -333,10 +334,11 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
 
     n = min(max(n, 1), 12)
     db = get_db()
-    snaps = list(db.snapshots.find(
+    snaps = db.snapshots.find(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.documents": 1, "snapshot_at": 1},
-    ).sort("snapshot_at", -1).limit(n * 4))
+    )
+    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[: n * 4]
 
     search = lab_name.lower()
     # Lab attribute aliases for common short names

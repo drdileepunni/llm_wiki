@@ -27,7 +27,7 @@ steps:
       - "--timeout=3600"
       - "--min-instances=0"
       - "--max-instances=1"
-      - "--set-env-vars=GCS_BUCKET=patientview-cds-pipeline-ops,MODEL=gemini-2.0-flash-lite,REASONING_MODEL=gemini-2.0-flash-lite,WIKI_ROOT=/app"
+      - "--set-env-vars=GCS_BUCKET=patientview-cds-pipeline-ops,MODEL=gemini-2.0-flash-lite,REASONING_MODEL=gemini-2.0-flash-lite,WIKI_ROOT=/app,RADAR_READ_URL=https://firebase-chatbot-request-this-api-857959705392.asia-south1.run.app"
       - "--set-secrets=GOOGLE_API_KEY=GEMINI_API_KEY:latest,RADAR_READ_SERVICE_ACCOUNT=RADAR_READ_SERVICE_ACCOUNT:latest,PRODTECH_BQ_SA_KEY=PRODTECH_BQ_SA_KEY:latest"
 
 images:

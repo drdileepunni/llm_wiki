@@ -296,7 +296,7 @@ class GCSCollection:
         blobs  = sorted(
             self._bucket.list_blobs(prefix=prefix),
             key=lambda b: b.name,
-            reverse=(sort and sort[0][1] == -1),
+            reverse=bool(sort and sort[0][1] == -1),
         )
         for blob in blobs:
             if not blob.name.endswith(".json"):

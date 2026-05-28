@@ -256,14 +256,28 @@ class BQStudyStore:
         store.update_alert_status(alert_id, "matched", matched_sbar_id="...")
     """
 
-    def __init__(self, project: str = _PROJECT, dataset: str = _DATASET):
-        self._project = project
-        self._dataset = dataset
-        self._client  = bigquery.Client(project=project)
+    def __init__(self, project: str = _PROJECT, dataset: str = _DATASET, location: str = "asia-south1"):
+        self._project  = project
+        self._dataset  = dataset
+        self._location = location
+        self._client   = bigquery.Client(project=project)
         self._tables_ensured: set[str] = set()
+        self._ensure_dataset()
 
     def _fqn(self, table: str) -> str:
         return f"`{self._project}.{self._dataset}.{table}`"
+
+    def _ensure_dataset(self):
+        """Create the dataset in asia-south1 if it doesn't exist."""
+        from google.cloud.bigquery import Dataset, DatasetReference
+        ref = DatasetReference(self._project, self._dataset)
+        try:
+            self._client.get_dataset(ref)
+        except Exception:
+            ds = Dataset(ref)
+            ds.location = self._location
+            self._client.create_dataset(ds, exists_ok=True)
+            log.info("bq_store: created dataset %s.%s in %s", self._project, self._dataset, self._location)
 
     def _ensure_table(self, table: str):
         if table in self._tables_ensured:
@@ -273,7 +287,8 @@ class BQStudyStore:
             log.warning("bq_store: no DDL for table %s — skipping ensure", table)
             return
         try:
-            self._client.query(ddl).result()
+            job_cfg = bigquery.QueryJobConfig(default_dataset=f"{self._project}.{self._dataset}")
+            self._client.query(ddl, job_config=job_cfg, location=self._location).result()
             log.info("bq_store: ensured table %s.%s", self._dataset, table)
             self._tables_ensured.add(table)
         except Exception:
@@ -283,7 +298,7 @@ class BQStudyStore:
         """Execute a SELECT and return rows as list of dicts."""
         job_config = bigquery.QueryJobConfig(query_parameters=params or [])
         try:
-            rows = self._client.query(sql, job_config=job_config).result()
+            rows = self._client.query(sql, job_config=job_config, location=self._location).result()
             return [dict(row) for row in rows]
         except Exception:
             log.exception("bq_store: query failed\n%s", sql)
@@ -293,7 +308,7 @@ class BQStudyStore:
         """Execute a DML (INSERT/UPDATE/MERGE) and return affected row count."""
         job_config = bigquery.QueryJobConfig(query_parameters=params or [])
         try:
-            job = self._client.query(sql, job_config=job_config)
+            job = self._client.query(sql, job_config=job_config, location=self._location)
             job.result()
             return job.num_dml_affected_rows or 0
         except Exception:

@@ -382,6 +382,8 @@ def run_fn_detector(
 
     Returns a summary dict for the scheduler result entry.
     """
+    if isinstance(snapshot_at, str):
+        snapshot_at = datetime.fromisoformat(snapshot_at.replace("Z", "+00:00"))
     now = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
     alerts_sent: list[str]      = []
     detections_total: list[str] = []

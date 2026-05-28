@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone, timedelta
+from typing import Any
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,21 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_dt(v) -> "datetime | None":
+    """Coerce None / ISO-string / datetime → tz-aware datetime (UTC). Returns None if unparseable."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
 
 _scheduler: BackgroundScheduler | None = None
 _last_run_at: datetime | None = None
@@ -128,14 +144,8 @@ def _run_live_pipeline(
         # Prefer last_llm_run_at over last_snapshot_at for delta cutoff
         last_llm_run_at_raw = sched_doc.get("last_llm_run_at")
         last_snapshot_ts    = ctx.get("last_snapshot_at")
-        if isinstance(last_llm_run_at_raw, datetime):
-            last_ts = last_llm_run_at_raw
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-        else:
-            last_ts = last_snapshot_ts
-            if isinstance(last_ts, datetime) and last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
+        # GCS stores datetimes as ISO strings — coerce both with _coerce_dt
+        last_ts = _coerce_dt(last_llm_run_at_raw) or _coerce_dt(last_snapshot_ts)
 
         delta = extract_delta(chart, last_ts)
         status["delta"] = {
@@ -151,10 +161,8 @@ def _run_live_pipeline(
         return status
 
     # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
-    next_run_at = sched_doc.get("next_run_at")
-    if isinstance(next_run_at, datetime):
-        if next_run_at.tzinfo is None:
-            next_run_at = next_run_at.replace(tzinfo=timezone.utc)
+    next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
+    if next_run_at is not None:
         if now < next_run_at:
             logger.info(
                 "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
@@ -167,10 +175,8 @@ def _run_live_pipeline(
             return status
 
     # ── Gate 2: Delta gate — skip LLM if nothing new since last analysis ─────
-    last_llm_run_at = last_llm_run_at_raw
-    if isinstance(last_llm_run_at, datetime):
-        if last_llm_run_at.tzinfo is None:
-            last_llm_run_at = last_llm_run_at.replace(tzinfo=timezone.utc)
+    last_llm_run_at = _coerce_dt(last_llm_run_at_raw)
+    if last_llm_run_at is not None:
         has_new_data = any([
             delta.get("new_vitals"), delta.get("new_labs"), delta.get("new_notes"),
         ])
@@ -302,7 +308,7 @@ def _run_live_pipeline(
     return status
 
 
-def _next_run_at(base: datetime, hours: int) -> datetime:
+def _next_run_at(base, hours: int) -> datetime:
     """
     Compute next_run_at anchored to the scheduler's hourly tick boundary.
 
@@ -317,6 +323,10 @@ def _next_run_at(base: datetime, hours: int) -> datetime:
     Uses `snapshot_at` (passed as base) so the whole batch in a cycle
     shares the same anchor, not `now` which drifts patient-by-patient.
     """
+    if isinstance(base, str):
+        base = datetime.fromisoformat(base.replace("Z", "+00:00"))
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
     target = base + timedelta(hours=hours)
     return target.replace(minute=0, second=0, microsecond=0)
 
@@ -340,7 +350,8 @@ def _run_fn_detector_step(
         status["fn_detector"] = {"error": "exception"}
 
 
-def _collect_all():
+def _collect_all(max_patients: int | None = None):
+    """Run one full pipeline cycle. Pass max_patients to limit for local testing."""
     global _last_run_at, _last_run_results
     _last_run_at = datetime.now(timezone.utc)
     _last_run_results = []
@@ -403,7 +414,10 @@ def _collect_all():
 
         # Reload patient list — now includes freshly enrolled patients
         patients = list(db.snapshot_schedule.find({"active": True}))
-        logger.info("scheduler: collecting %d active patient(s)", len(patients))
+        if max_patients is not None:
+            patients = patients[:max_patients]
+        logger.info("scheduler: collecting %d active patient(s)%s", len(patients),
+                    f" (limited to {max_patients})" if max_patients is not None else "")
 
         for p in patients:
             cpmrn     = p["CPMRN"]

@@ -29,7 +29,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TRACKER_MODEL    = "gemini-3.1-flash-lite"
+_TRACKER_MODEL    = "gemini-2.5-flash"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H = 8   # minimum hours between repeat alerts for same problem
@@ -152,6 +152,9 @@ IMPORTANT RULES:
   Example: if note [2] said "RRT initiated" and you used that as evidence, set
   cited_note_indices: [2]. If the note contradicted the summary, still cite it.
 - Call set_all_assessments ONCE after reviewing all problems.
+- For reasoning_fingerprint: write 3-5 sentences in first person covering what data you checked,
+  what you found, your alert decision (alerted / suppressed — reason / no alert — stable), and
+  what specific data would change this assessment next run. Do NOT nest it — it is a plain string.
 
 SCREENER FLAG — NEW PROBLEM DETECTION:
 If the user message contains a "== SCREENER FLAG ==" section, the Pass 1 screener
@@ -290,48 +293,18 @@ _SET_ALL_TOOL = {
                             "description": "Specific actionable suggestions if alerting",
                         },
                         "reasoning_fingerprint": {
-                            "type": "object",
+                            "type": "string",
                             "description": (
-                                "Compact reasoning record stored so the NEXT hourly run can update "
-                                "rather than re-derive this assessment from scratch. "
-                                "For reasoning_chain: write 3-5 sentences in first person tracing "
-                                "your steps — what data you checked, what you found, what clinical "
-                                "factors you weighed, and why you reached this conclusion. "
-                                "Do NOT just restate the verdict. Future runs read this to avoid "
-                                "re-deriving your logic."
+                                "3-5 sentence first-person reasoning chain for the NEXT hourly run to "
+                                "read instead of re-deriving from scratch. Cover: (1) what data you "
+                                "checked (vitals/labs/notes), (2) what you found, (3) your alert "
+                                "decision and why (alerted / suppressed — reason / no alert — stable), "
+                                "(4) what specific data would change this assessment next run. "
+                                "Example: 'I checked Cr trend (1.2→1.5→1.8 over 12h) and searched "
+                                "notes — no nephrology plan found. Alert suppressed by 8h cooldown "
+                                "expiring at 22:03. Would alert if Cr rises further or cooldown expires "
+                                "with no new plan.'"
                             ),
-                            "properties": {
-                                "reasoning_chain": {
-                                    "type": "string",
-                                    "description": (
-                                        "3-5 sentence first-person narrative of reasoning steps. "
-                                        "Example: 'I checked the Cr trend and found 1.2→1.5→1.8 mg/dL "
-                                        "over 12h. I searched notes for nephrology or fluid management "
-                                        "and found none in the last 12h. The patient is on NSAIDs "
-                                        "which is a compounding factor. I suppressed the alert as the "
-                                        "8h cooldown is active but the trajectory remains concerning.'"
-                                    ),
-                                },
-                                "key_evidence": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Specific data points that anchored this decision (3-5 items)",
-                                },
-                                "alert_status": {
-                                    "type": "string",
-                                    "description": "e.g. 'alerted', 'suppressed — 8h cooldown', 'no alert — stable'",
-                                },
-                                "watch_conditions": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "What new data would change this assessment. "
-                                        "Be specific — e.g. 'new note documenting K+ management', "
-                                        "'Cr plateau or improvement', 'cooldown expires at 22:03'"
-                                    ),
-                                },
-                            },
-                            "required": ["reasoning_chain", "key_evidence", "alert_status", "watch_conditions"],
                         },
                         "next_check": {
                             "type": "object",
@@ -658,15 +631,18 @@ def _upsert_problem(
         "cited_notes":        assessment.get("cited_notes", []),
     }
 
-    # Write reasoning fingerprint if provided by model
-    raw_fp = assessment.get("reasoning_fingerprint") or {}
+    # Write reasoning fingerprint if provided by model.
+    # New format: plain string. Old format (dict) kept for backward compat with stored docs.
+    raw_fp = assessment.get("reasoning_fingerprint")
     stored_fingerprint: dict | None = None
-    if raw_fp.get("reasoning_chain"):
+    if isinstance(raw_fp, str) and raw_fp.strip():
+        stored_fingerprint = {"anchored_at": now, "reasoning_chain": raw_fp.strip()}
+    elif isinstance(raw_fp, dict) and raw_fp.get("reasoning_chain"):
         stored_fingerprint = {
-            "anchored_at":    now,
-            "reasoning_chain": raw_fp.get("reasoning_chain", ""),
-            "key_evidence":    raw_fp.get("key_evidence") or [],
-            "alert_status":    raw_fp.get("alert_status", ""),
+            "anchored_at":      now,
+            "reasoning_chain":  raw_fp.get("reasoning_chain", ""),
+            "key_evidence":     raw_fp.get("key_evidence") or [],
+            "alert_status":     raw_fp.get("alert_status", ""),
             "watch_conditions": raw_fp.get("watch_conditions") or [],
         }
 
@@ -800,6 +776,8 @@ def _compute_timing_context(
     snapshot and the most recent plan note. If within the response buffer, emit
     a DIRECTIVE telling the model not to apply the treatment-inadequate override.
     """
+    if isinstance(snapshot_at, str):
+        snapshot_at = datetime.fromisoformat(snapshot_at.replace("Z", "+00:00"))
     if snapshot_at.tzinfo is None:
         snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
 
@@ -993,11 +971,16 @@ def _build_fingerprint_block(cpmrn: str, encounter: int, db: Any) -> str:
         last_at = doc.get("last_assessed_at")
         last_at_str = last_at.strftime("%Y-%m-%d %H:%M UTC") if isinstance(last_at, datetime) else "unknown"
         lines.append(f"Problem: {doc['problem_name']}  (assessed: {last_at_str})")
-        lines.append(f"  Reasoning: {fp.get('reasoning_chain', '(none)')}")
+        # reasoning_fingerprint is now a plain string; old docs may still have dict format
+        reasoning = fp.get("reasoning_chain", "(none)")
+        lines.append(f"  Reasoning: {reasoning}")
+        # Legacy dict fields — only present in old-format stored fingerprints
         ev = fp.get("key_evidence") or []
         if ev:
             lines.append(f"  Key evidence: {ev}")
-        lines.append(f"  Alert status: {fp.get('alert_status', '(none)')}")
+        alert_status = fp.get("alert_status", "")
+        if alert_status:
+            lines.append(f"  Alert status: {alert_status}")
         wc = fp.get("watch_conditions") or []
         if wc:
             lines.append(f"  Watch conditions: {wc}")
@@ -1033,6 +1016,12 @@ def track_problems(
     from backend.services.llm_client import GeminiLLMClient
     from backend.services.emr.db import get_db
     from tools.radar_sync.react_tracer import ReActTracer
+
+    # Coerce snapshot_at to datetime (GCS returns ISO strings from JSON)
+    if isinstance(snapshot_at, str):
+        snapshot_at = datetime.fromisoformat(snapshot_at.replace("Z", "+00:00"))
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
 
     db     = get_db()
     client = GeminiLLMClient(api_key=GOOGLE_API_KEY, model=_TRACKER_MODEL)
@@ -1128,7 +1117,7 @@ def track_problems(
                 messages=messages,
                 tools=_TOOLS,
                 system=_SYSTEM,
-                max_tokens=6144,
+                max_tokens=16000,  # must exceed thinking_budget (8000) + tool call output
                 force_tool=force,
                 thinking_budget=_THINKING_BUDGET,
             )
@@ -1189,7 +1178,7 @@ def track_problems(
                 logger.info(
                     "problem_tracker: assessments for %s: %s",
                     cpmrn,
-                    [(a["problem_name"], a.get("clinical_status"), a.get("should_alert")) for a in final_assessments],
+                    [(a.get("problem_name"), a.get("clinical_status"), a.get("should_alert")) for a in final_assessments if a.get("problem_name")],
                 )
                 tool_results.append({
                     "type": "tool_result", "name": tc.name, "id": tc.id,

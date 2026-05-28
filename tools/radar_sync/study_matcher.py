@@ -35,7 +35,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-_MATCH_MODEL          = "gemini-3.1-flash-lite"
+_MATCH_MODEL          = "gemini-2.5-flash"
 _MATCH_THRESHOLD      = 0.70   # minimum confidence to confirm a match
 _FP_CANDIDATE_DELAY_H = 2      # hours after alert before it becomes fp_candidate
 _ALERT_WINDOW_BEFORE  = 6      # hours before SBAR creation an alert can match

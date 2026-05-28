@@ -6,9 +6,11 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 ANTHROPIC_API_KEY      = os.getenv("ANTHROPIC_API_KEY", "")
 GOOGLE_API_KEY         = os.getenv("GOOGLE_API_KEY", "")
+
 # PRODTECH_BQ_SA_KEY: JSON string of the prod-tech SA key, loaded from Secret Manager on Cloud Run.
 # For local dev: export PRODTECH_BQ_SA_KEY="$(cat /path/to/prodtech_sa_key.json)"
 PRODTECH_BQ_SA_KEY     = os.getenv("PRODTECH_BQ_SA_KEY", "")
+
 BROWSERBASE_API_KEY    = os.getenv("BROWSERBASE_API_KEY", "")
 BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
 OLLAMA_API_KEY         = os.getenv("OLLAMA_API_KEY", "")

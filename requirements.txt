@@ -4,9 +4,11 @@ google-cloud-storage
 google-cloud-bigquery
 google-auth
 google-generativeai
+google-genai
 anthropic
 faiss-cpu
 numpy
+pandas
 pydantic
 requests
 httpx

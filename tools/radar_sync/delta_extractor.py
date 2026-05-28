@@ -22,7 +22,7 @@ def _parse_ts(ts_val: Any) -> datetime | None:
         return None
 
 
-def extract_delta(chart: dict, last_snapshot_at: datetime | None) -> dict:
+def extract_delta(chart: dict, last_snapshot_at: datetime | str | None) -> dict:
     """
     Compare the chart against last_snapshot_at and return only the new events.
 
@@ -35,7 +35,8 @@ def extract_delta(chart: dict, last_snapshot_at: datetime | None) -> dict:
             "io_last_24h": {...},     # total intake/output ml in last 24h window
         }
     """
-    cutoff = last_snapshot_at
+    # GCS stores timestamps as ISO strings — coerce to datetime before comparing
+    cutoff = _parse_ts(last_snapshot_at)
 
     return {
         "new_vitals":   _new_vitals(chart, cutoff),
