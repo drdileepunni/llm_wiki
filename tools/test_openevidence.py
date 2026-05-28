@@ -245,7 +245,7 @@ def check_relevance(text: str, gap_title: str, gap_sections: list[str]) -> tuple
 
     client = genai.Client(api_key=GOOGLE_API_KEY)
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite",
         contents=(
             f'Gap: "{gap_title}"\nMissing: {", ".join(gap_sections)}\n\n'
             f"Article: OpenEvidence result\nAbstract: {text[:1500]}\n\n"

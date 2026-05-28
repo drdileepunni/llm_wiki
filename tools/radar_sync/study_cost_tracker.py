@@ -35,20 +35,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Gemini 2.5 Flash pricing (USD per 1M tokens) ─────────────────────────────
-_MODEL               = "gemini-2.5-flash"
-_PRICE_INPUT_PER_1M  = 0.075   # prompt tokens
-_PRICE_OUTPUT_PER_1M = 0.30    # non-thinking output tokens
-_PRICE_THINK_PER_1M  = 3.50    # thinking tokens
+# ── Gemini 3.1 Flash-Lite pricing (USD per 1M tokens) ────────────────────────
+# Thinking tokens are charged at the same output rate (included in output price)
+_MODEL               = "gemini-3.1-flash-lite"
+_PRICE_INPUT_PER_1M  = 0.25   # prompt tokens
+_PRICE_OUTPUT_PER_1M = 1.50   # output tokens (thinking tokens billed at same rate)
 
 
 def _cost(input_tok: int, output_tok: int, thinking_tok: int) -> float:
     """Return total cost in USD for a token count triple."""
-    non_think_out = max(0, output_tok - thinking_tok)
     return (
-        input_tok    / 1_000_000 * _PRICE_INPUT_PER_1M  +
-        non_think_out / 1_000_000 * _PRICE_OUTPUT_PER_1M +
-        thinking_tok  / 1_000_000 * _PRICE_THINK_PER_1M
+        input_tok                    / 1_000_000 * _PRICE_INPUT_PER_1M  +
+        (output_tok + thinking_tok)  / 1_000_000 * _PRICE_OUTPUT_PER_1M
     )
 
 
@@ -119,8 +117,7 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
         "model":   _MODEL,
         "pricing": {
             "input_per_1m":    _PRICE_INPUT_PER_1M,
-            "output_per_1m":   _PRICE_OUTPUT_PER_1M,
-            "thinking_per_1m": _PRICE_THINK_PER_1M,
+            "output_per_1m":   _PRICE_OUTPUT_PER_1M,  # thinking billed at same rate
         },
     }
 

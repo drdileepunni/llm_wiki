@@ -157,7 +157,7 @@ Use an empty events array for notes with no discrete events.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-flash-lite",
             contents=[prompt],
             config=config,
         )

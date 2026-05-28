@@ -258,7 +258,7 @@ def _run_live_pipeline(
         _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
         return status
 
-    # ── Step 4b: status classifier — Pass 2 reasoning (gemini-2.5-flash + thinking) ──
+    # ── Step 4b: status classifier — Pass 2 reasoning (gemini-3.1-flash-lite + thinking) ──
     try:
         from tools.radar_sync.status_classifier import classify_statuses
         new_structured = classify_statuses(cpmrn, encounter, new_structured)

@@ -5,7 +5,7 @@ problem list in MongoDB and fires targeted alerts.
 Flow (runs once per patient per hourly scheduler cycle, replacing the CDS gate):
   1. Load current structured_summary.problems[] from summary_updater output
   2. Load stored patient_problems[] from MongoDB
-  3. Run a single ReAct reasoning session (gemini-2.5-flash with thinking)
+  3. Run a single ReAct reasoning session (gemini-3.1-flash-lite with thinking)
      — model has tools to query vitals, labs, notes, and stored problem state
      — model calls set_all_assessments() once when done
   4. Upsert patient_problems[] in MongoDB
@@ -29,7 +29,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TRACKER_MODEL    = "gemini-2.5-flash"
+_TRACKER_MODEL    = "gemini-3.1-flash-lite"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H = 8   # minimum hours between repeat alerts for same problem
