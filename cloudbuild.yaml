@@ -3,13 +3,13 @@ steps:
     args:
       - build
       - "-t"
-      - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$COMMIT_SHA"
+      - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$BUILD_ID"
       - "."
 
   - name: "gcr.io/cloud-builders/docker"
     args:
       - push
-      - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$COMMIT_SHA"
+      - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$BUILD_ID"
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
@@ -17,7 +17,7 @@ steps:
       - run
       - deploy
       - cds-pipeline
-      - "--image=asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$COMMIT_SHA"
+      - "--image=asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$BUILD_ID"
       - "--region=asia-south1"
       - "--platform=managed"
       - "--no-allow-unauthenticated"
@@ -27,11 +27,11 @@ steps:
       - "--timeout=3600"
       - "--min-instances=0"
       - "--max-instances=1"
-      - "--set-env-vars=GCS_BUCKET=cds-pipeline-ops,BQ_SERVICE_URL=https://bigquery-service-971880579407.us-central1.run.app,MODEL=gemini-2.0-flash-lite,REASONING_MODEL=gemini-2.0-flash-lite,WIKI_ROOT=/app"
-      - "--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest,RADAR_READ_SERVICE_ACCOUNT=RADAR_READ_SERVICE_ACCOUNT:latest"
+      - "--set-env-vars=GCS_BUCKET=patientview-cds-pipeline-ops,MODEL=gemini-2.0-flash-lite,REASONING_MODEL=gemini-2.0-flash-lite,WIKI_ROOT=/app"
+      - "--set-secrets=GOOGLE_API_KEY=GEMINI_API_KEY:latest,RADAR_READ_SERVICE_ACCOUNT=RADAR_READ_SERVICE_ACCOUNT:latest,PRODTECH_BQ_SA_KEY=PRODTECH_BQ_SA_KEY:latest"
 
 images:
-  - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$COMMIT_SHA"
+  - "asia-south1-docker.pkg.dev/$PROJECT_ID/cds-pipeline/cds-pipeline:$BUILD_ID"
 
 options:
   logging: CLOUD_LOGGING_ONLY

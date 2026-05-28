@@ -3,8 +3,8 @@
 # Usage: ./scripts/setup_gcs_bucket.sh
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-prod-tech-project1-bv479-zo027}"
-BUCKET="${GCS_BUCKET:-cds-pipeline-ops}"
+PROJECT_ID="${PROJECT_ID:-patientview-9uxml}"
+BUCKET="${GCS_BUCKET:-patientview-cds-pipeline-ops}"
 REGION="${REGION:-asia-south1}"
 
 echo "Creating bucket gs://$BUCKET in $REGION ..."

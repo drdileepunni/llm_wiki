@@ -18,7 +18,7 @@ gcloud scheduler jobs create http cds-pipeline-hourly \
   --oidc-service-account-email="$SCHEDULER_SA_EMAIL" \
   --oidc-token-audience="$SERVICE_URL" \
   --time-zone="Asia/Kolkata" \
-  --attempt-deadline=3600s
+  --attempt-deadline=1800s
 
 echo "Cloud Scheduler job 'cds-pipeline-hourly' created."
 echo "Trigger URL: ${SERVICE_URL}/trigger"

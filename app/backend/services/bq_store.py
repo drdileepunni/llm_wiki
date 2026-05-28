@@ -25,7 +25,7 @@ from google.cloud import bigquery
 
 log = logging.getLogger(__name__)
 
-_PROJECT = "prod-tech-project1-bv479-zo027"
+_PROJECT = "patientview-9uxml"
 _DATASET = "cds_study"
 _LOCATION = "asia-south1"
 

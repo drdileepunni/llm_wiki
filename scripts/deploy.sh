@@ -3,7 +3,7 @@
 # Usage: ./scripts/deploy.sh
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-prod-tech-project1-bv479-zo027}"
+PROJECT_ID="${PROJECT_ID:-patientview-9uxml}"
 REGION="${REGION:-asia-south1}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
