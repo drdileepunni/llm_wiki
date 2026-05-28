@@ -6,7 +6,7 @@ study_task_import, study_adjudications, and snapshots. Writes one doc to
 study_metrics_snapshots.
 
 2×2 definitions:
-  TP = study_alerts where match_status IN ("matched", "tp_confirmed")
+  TP = study_alerts where match_status = "tp_confirmed"  (human-adjudicated only)
   FP = study_alerts where match_status = "fp_confirmed"  (adjudicated Inappropriate)
   FN = (study_sbar_import confirmed_fn) + (study_task_import confirmed_fn)
        deduplicated tasks are excluded from the FN count
@@ -66,7 +66,7 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
     snap_time_q  = {"snapshot_at": {"$gte": start_dt, "$lte": effective_end}}
 
     # ── TP / FP / FN counts ───────────────────────────────────────────────────
-    tp = alerts_col.count_documents({"match_status": {"$in": ["matched", "tp_confirmed"]}, **alert_time_q})
+    tp = alerts_col.count_documents({"match_status": "tp_confirmed", **alert_time_q})
     fp = alerts_col.count_documents({"match_status": "fp_confirmed", **alert_time_q})
     # SBAR FNs: unreviewed + true miss only.
     # Cooldown misses are NOT counted — the system detected the event but cooldown
@@ -103,7 +103,7 @@ def compute_metrics(db: Any, start_dt: datetime = STUDY_START_UTC, end_dt: datet
 
     # ── Lead time (minutes) for matched TPs ───────────────────────────────────
     matched_alerts = list(alerts_col.find(
-        {"match_status": {"$in": ["matched", "tp_confirmed"]}, "matched_sbar_id": {"$exists": True}},
+        {"match_status": "tp_confirmed", "matched_sbar_id": {"$exists": True}},
         {"matched_sbar_id": 1, "alerted_at": 1},
     ))
 

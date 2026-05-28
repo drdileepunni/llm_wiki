@@ -237,7 +237,7 @@ def adjudicate(alert_id: str, req: AdjudicationRequest):
     )
 
     logger.info(
-        "study_router: adjudicated alert %s → %s (expl=%d)",
+        "study_router: adjudicated alert %s → %s (expl=%s)",
         alert_id, req.verdict, req.explainability_rating,
     )
 
@@ -314,7 +314,7 @@ def get_metrics(study_id: Optional[str] = None):
     sbar_col     = _col("study_sbar_import")
     task_col     = _col("study_task_import")
 
-    tp      = alerts_col.count_documents({"match_status": {"$in": ["matched", "tp_confirmed"]}, **alert_time_q})
+    tp      = alerts_col.count_documents({"match_status": "tp_confirmed",                       **alert_time_q})
     fp      = alerts_col.count_documents({"match_status": "fp_confirmed",                       **alert_time_q})
     fn_sbar = sbar_col.count_documents(  {"match_status": {"$in": _fn_statuses},                **sbar_time_q})
     fn_task = task_col.count_documents(  {"match_status": {"$in": _fn_statuses},                **task_time_q})
