@@ -528,6 +528,13 @@ def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: An
     if not doc:
         return False
     last = doc.get("last_alerted_at")
+    if last is None:
+        return False
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except ValueError:
+            return False
     if not isinstance(last, datetime):
         return False
     if last.tzinfo is None:
