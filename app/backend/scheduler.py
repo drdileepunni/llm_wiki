@@ -364,53 +364,54 @@ def _collect_all(max_patients: int | None = None):
         db = get_db()
 
         # ── Step 0: auto-enroll new admissions ────────────────────────────────
-        # Derive monitored workspaces from app_settings (primary) and from any
-        # workspace already present in snapshot_schedule (backward compat).
-        ws_config = db["app_settings"].find_one({"_id": "monitored_workspaces"})
-        configured_ws: list[str] = (ws_config or {}).get("workspaces", [])
-        scheduled_ws: list[str] = db.snapshot_schedule.distinct(
-            "workspace", {"workspace": {"$exists": True, "$ne": None}}
-        )
-        all_workspaces: list[str] = list(dict.fromkeys(configured_ws + scheduled_ws))  # ordered, deduped
-
-        # Fetch admitted patients for every monitored workspace.
-        # admitted_by_workspace[ws] = set of (CPMRN, encounter) tuples, or None on error.
+        # Skipped when max_patients is set (local testing) — avoids downloading
+        # all snapshot_schedule blobs before the limit is applied.
         admitted_by_workspace: dict[str, set | None] = {}
-        for ws in all_workspaces:
-            try:
-                admitted = get_admitted_patients(ws)
-                admitted_by_workspace[ws] = {(a["CPMRN"], a["encounter"]) for a in admitted}
-                logger.info("scheduler: workspace %s — %d admitted patient(s)", ws, len(admitted))
+        if max_patients is None:
+            ws_config = db["app_settings"].find_one({"_id": "monitored_workspaces"})
+            configured_ws: list[str] = (ws_config or {}).get("workspaces", [])
+            scheduled_ws: list[str] = db.snapshot_schedule.distinct(
+                "workspace", {"workspace": {"$exists": True, "$ne": None}}
+            )
+            all_workspaces: list[str] = list(dict.fromkeys(configured_ws + scheduled_ws))  # ordered, deduped
 
-                # Enroll any patient not already active in snapshot_schedule
-                enrolled = 0
-                for patient in admitted:
-                    cpmrn    = patient["CPMRN"]
-                    encounter = patient["encounter"]
-                    existing = db.snapshot_schedule.find_one(
-                        {"CPMRN": cpmrn, "encounter": encounter}
-                    )
-                    if existing is None:
-                        db.snapshot_schedule.insert_one({
-                            "CPMRN":             cpmrn,
-                            "encounter":         encounter,
-                            "workspace":         ws,
-                            "active":            True,
-                            "added_at":          datetime.now(timezone.utc),
-                            "last_collected_at": None,
-                            "last_error":        None,
-                        })
-                        enrolled += 1
-                        logger.info(
-                            "scheduler: auto-enrolled %s enc=%d from workspace %s",
-                            cpmrn, encounter, ws,
+            # Fetch admitted patients for every monitored workspace.
+            # admitted_by_workspace[ws] = set of (CPMRN, encounter) tuples, or None on error.
+            for ws in all_workspaces:
+                try:
+                    admitted = get_admitted_patients(ws)
+                    admitted_by_workspace[ws] = {(a["CPMRN"], a["encounter"]) for a in admitted}
+                    logger.info("scheduler: workspace %s — %d admitted patient(s)", ws, len(admitted))
+
+                    # Enroll any patient not already active in snapshot_schedule
+                    enrolled = 0
+                    for patient in admitted:
+                        cpmrn    = patient["CPMRN"]
+                        encounter = patient["encounter"]
+                        existing = db.snapshot_schedule.find_one(
+                            {"CPMRN": cpmrn, "encounter": encounter}
                         )
-                if enrolled:
-                    logger.info("scheduler: workspace %s — enrolled %d new patient(s)", ws, enrolled)
+                        if existing is None:
+                            db.snapshot_schedule.insert_one({
+                                "CPMRN":             cpmrn,
+                                "encounter":         encounter,
+                                "workspace":         ws,
+                                "active":            True,
+                                "added_at":          datetime.now(timezone.utc),
+                                "last_collected_at": None,
+                                "last_error":        None,
+                            })
+                            enrolled += 1
+                            logger.info(
+                                "scheduler: auto-enrolled %s enc=%d from workspace %s",
+                                cpmrn, encounter, ws,
+                            )
+                    if enrolled:
+                        logger.info("scheduler: workspace %s — enrolled %d new patient(s)", ws, enrolled)
 
-            except Exception:
-                logger.exception("scheduler: could not fetch admitted patients for workspace %s", ws)
-                admitted_by_workspace[ws] = None  # None = couldn't check; don't skip or deactivate
+                except Exception:
+                    logger.exception("scheduler: could not fetch admitted patients for workspace %s", ws)
+                    admitted_by_workspace[ws] = None  # None = couldn't check; don't skip or deactivate
 
         # Reload patient list — now includes freshly enrolled patients
         patients = list(db.snapshot_schedule.find({"active": True}))

@@ -162,24 +162,16 @@ def _format_problem_payload(
         lines.append(f"*Why alerting:*  {alert_reason}")
         lines.append("")
 
-    # ── Note citations ────────────────────────────────────────────────────────
-    cited_notes: list[dict] = assessment.get("cited_notes") or []
-    if cited_notes:
-        lines.append("*Evidence from notes:*")
-        for c in cited_notes[:3]:   # cap at 3 to keep card readable
-            ts        = c.get("timestamp", "")
-            note_type = c.get("note_type", "Note")
-            author    = c.get("author", "")
-            quote     = c.get("quote", "").strip()
-            meta = f"📄 {note_type}"
-            if author:
-                meta += f"  |  {author}"
-            if ts:
-                meta += f"  |  {ts}"
-            lines.append(meta)
-            if quote:
-                display_quote = quote[:160] + ("…" if len(quote) > 160 else "")
-                lines.append(f'_"{display_quote}"_')
+    # ── Model reasoning ───────────────────────────────────────────────────────
+    fp = assessment.get("reasoning_fingerprint")
+    if isinstance(fp, dict):
+        reasoning = fp.get("reasoning_chain", "")
+    elif isinstance(fp, str):
+        reasoning = fp
+    else:
+        reasoning = ""
+    if reasoning:
+        lines.append(f"*Model reasoning:*  _{reasoning}_")
         lines.append("")
 
     # ── Suggested actions ─────────────────────────────────────────────────────

@@ -128,6 +128,19 @@ IMPORTANT RULES:
   if get_vital_trend returns "Unknown vital" or "No … readings found", do NOT conclude worsening
   based on notes alone — mark as stable with addressed_evidence="vital data unavailable in
   snapshots — cannot confirm worsening" and should_alert=False
+- VITAL SIGN ALERT FLOORS — for hemodynamic and respiratory problems, do NOT set
+  clinical_status="worsening" or "critical" and do NOT alert unless the CURRENT value
+  (most recent reading) crosses the relevant floor:
+    • Hypotension / low MAP:  MAP < 65 mmHg  OR  systolic BP < 90 mmHg
+    • Tachycardia:            HR > 120 bpm
+    • Bradycardia:            HR < 40 bpm
+    • Hypertension:           systolic BP > 180 mmHg
+    • Hypoxia / low SpO2:     SpO2 < 92% (not a drop from 99% to 96%)
+    • Tachypnoea:             RR > 28 breaths/min
+    • Fever:                  Temp > 38.5 °C
+  A drop from the patient's baseline is NOT sufficient on its own. The absolute value
+  must cross the floor above. If the current value is above the floor (e.g. MAP 67 after
+  a transient dip to 64), classify as stable or improving — do NOT alert.
 - If the structured_summary marks a problem as "resolved":
   • You may keep it "resolved" or downgrade to "stable" if you see lingering concerns.
   • You may NOT upgrade to "worsening" or "critical" unless you have OBJECTIVE data (vital trend
