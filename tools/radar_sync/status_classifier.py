@@ -390,8 +390,6 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
                             seen_ts.add(ts_raw)
                             rows.append((ts_raw, attr_key, val, unit))
                             break
-        if len(rows) >= n:
-            break
 
     if not rows:
         return f"No '{lab_name}' values found in stored snapshots."

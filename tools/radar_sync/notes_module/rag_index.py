@@ -73,6 +73,27 @@ def _chunk_text(text: str, target: int = CHUNK_TOKEN_TARGET, overlap: int = CHUN
     return chunks
 
 
+def _dedup_note_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    """
+    Drop near-identical chunks caused by copy-pasted progress note summaries.
+    Applied at build time so duplicates are never embedded or stored in the FAISS index.
+    Fingerprint = first 250 chars of HTML-stripped, lowercased, whitespace-collapsed text.
+    """
+    import re
+    seen: set[str] = set()
+    out = []
+    for c in chunks:
+        normalized = re.sub(r'\s+', ' ', re.sub(r'&\w+;', ' ', c.text.lower())).strip()
+        fp = normalized[:250]
+        if fp not in seen:
+            seen.add(fp)
+            out.append(c)
+    dropped = len(chunks) - len(out)
+    if dropped:
+        logger.debug("build_note_chunks: dedup dropped %d duplicate chunk(s)", dropped)
+    return out
+
+
 def build_note_chunks(store: Any) -> list[Chunk]:
     """Build Chunk list from store.dfs['notes'] DataFrame."""
     notes_df = store.dfs.get("notes")
@@ -96,7 +117,7 @@ def build_note_chunks(store: Any) -> list[Chunk]:
                 note_type=note_type,
                 author=author,
             ))
-    return chunks_out
+    return _dedup_note_chunks(chunks_out)
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────

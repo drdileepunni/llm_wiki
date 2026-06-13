@@ -151,6 +151,34 @@ IMPORTANT RULES:
     • SpO2 86% → 88% → 87%: flat/worsening below floor — alert
     • MAP 58 → 63 → 66: recovering through floor — do NOT alert
     • MAP 58 → 60 → 59: flat below floor — alert
+- SUBJECTIVE SYMPTOM RULE — do NOT set clinical_status="worsening" or "critical" and
+  do NOT alert for problems whose primary evidence is a patient-reported symptom (pain,
+  nausea, dizziness, fatigue, reported breathlessness, reported chest tightness) without
+  corroborating objective evidence. "Patient reports severe pain", "patient complains of
+  nausea", or "patient feels breathless" alone is NOT sufficient to alert. Objective
+  evidence means at least ONE of:
+    • A validated numeric score meeting a documented threshold (e.g. NRS/VAS pain score
+      ≥ 7/10 explicitly recorded)
+    • A physiological correlate that itself breaches the VITAL SIGN ALERT FLOORS above
+      (new tachycardia, hypotension, hypoxia, etc.) AND is plausibly caused by the symptom
+    • An imaging or lab finding showing objective worsening of the underlying cause
+  If none of the above are present, classify the symptom-based problem as stable and set
+  should_alert=False. The adequacy of the current treatment plan is the clinician's call —
+  do NOT alert purely because you judge the prescribed analgesic or antiemetic insufficient.
+- TEMPORAL AWARENESS — notes must always be evaluated relative to the snapshot time.
+  A note written on Day X that says "patient experienced episodes today" refers to events
+  on Day X, not the current assessment date.
+  Rules:
+    • Always check the timestamp of each cited note against the snapshot time (shown at the
+      top of the user message). If the most recent note about a problem is > 8 hours before
+      the snapshot time, state: "No fresh documentation for this assessment window."
+    • Do NOT treat prior-day "today" language as evidence of current activity. A Jun 12
+      note saying "two episodes today" means two episodes on Jun 12 — not Jun 13.
+    • If all available notes about a problem are from a prior calendar day AND objective
+      vitals/labs are stable or improving, classify as stable — do not alert.
+    • Copy-pasted summaries (same text appearing under multiple authors or timestamps)
+      count as ONE piece of evidence, not independent corroboration. Do not amplify
+      confidence because the same event is described in several notes.
 - If the structured_summary marks a problem as "resolved":
   • You may keep it "resolved" or downgrade to "stable" if you see lingering concerns.
   • You may NOT upgrade to "worsening" or "critical" unless you have OBJECTIVE data (vital trend
@@ -1122,6 +1150,58 @@ def track_problems(
         "is no overlap with any problem already in the list above.\n"
     ) if screener_flag else ""
 
+    # ── Lab alert rules — dynamic system prompt injection ─────────────────────
+    # Load all rules from GCS, filter to labs present in this patient's prefetch
+    # data, and append as a LAB ALERT FLOORS block to the system prompt.
+    try:
+        from tools.radar_sync.lab_alert_rules import (
+            filter_rules_for_patient as _filter_lab_rules,
+            format_prompt_block as _format_lab_block,
+            load_rules as _load_lab_rules,
+        )
+        _all_lab_rules = _load_lab_rules(db)
+        _patient_lab_rules = _filter_lab_rules(_all_lab_rules, prefetch_block)
+        _lab_alert_block = _format_lab_block(_patient_lab_rules)
+        if _patient_lab_rules:
+            logger.info(
+                "problem_tracker: lab_alert_rules — %d/%d rules matched for %s enc=%d (%s)",
+                len(_patient_lab_rules), len(_all_lab_rules),
+                cpmrn, encounter,
+                ", ".join(r.get("lab", "?") for r in _patient_lab_rules),
+            )
+    except Exception:
+        logger.exception("problem_tracker: lab_alert_rules injection failed for %s enc=%d", cpmrn, encounter)
+        _lab_alert_block = ""
+
+    # ── Symptom alert rules — dynamic system prompt injection ─────────────────
+    # Load per-symptom objective criteria from GCS, filter to problems this patient
+    # actually has, and append as a SYMPTOM ALERT CRITERIA block.
+    try:
+        from tools.radar_sync.symptom_alert_rules import (
+            filter_rules_for_patient as _filter_symptom_rules,
+            format_prompt_block as _format_symptom_block,
+            load_rules as _load_symptom_rules,
+        )
+        _all_symptom_rules = _load_symptom_rules(db)
+        _patient_symptom_rules = _filter_symptom_rules(_all_symptom_rules, problems)
+        _symptom_alert_block = _format_symptom_block(_patient_symptom_rules)
+        if _patient_symptom_rules:
+            logger.info(
+                "problem_tracker: symptom_alert_rules — %d/%d rules matched for %s enc=%d (%s)",
+                len(_patient_symptom_rules), len(_all_symptom_rules),
+                cpmrn, encounter,
+                ", ".join(r.get("problem", "?") for r in _patient_symptom_rules),
+            )
+    except Exception:
+        logger.exception("problem_tracker: symptom_alert_rules injection failed for %s enc=%d", cpmrn, encounter)
+        _symptom_alert_block = ""
+
+    system_prompt = (
+        _SYSTEM
+        + ("\n\n" + _lab_alert_block if _lab_alert_block else "")
+        + ("\n\n" + _symptom_alert_block if _symptom_alert_block else "")
+    )
+
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
@@ -1146,7 +1226,7 @@ def track_problems(
             resp = client.create_message(
                 messages=messages,
                 tools=_TOOLS,
-                system=_SYSTEM,
+                system=system_prompt,
                 max_tokens=16000,  # must exceed thinking_budget (8000) + tool call output
                 force_tool=force,
                 thinking_budget=_THINKING_BUDGET,
@@ -1241,14 +1321,17 @@ def track_problems(
         tracer.save(final_output={"error": "no_assessments"})
         return {"problem_tracker": "no_assessments"}
 
+    # Phase 1 — evaluate eligibility, upsert all problems, collect what needs alerting.
+    # Alerting is deferred so all problems for this patient go in one batched message.
+    to_alert: list[tuple[dict, str]] = []   # (assessment, alert_id)
+
     for assessment in final_assessments:
         problem_name = assessment.get("problem_name", "")
         should_alert = assessment.get("should_alert", False)
-        alerted = False
+        will_alert   = False
+        alert_id     = ""
 
         if should_alert:
-            # Hard gate: never alert for stable / improving / resolved problems.
-            # The model should already honour this, but enforce it here as a safety net.
             clinical_status = assessment.get("clinical_status", "stable")
             if clinical_status not in ("worsening", "critical"):
                 alerts_suppressed.append(problem_name)
@@ -1257,79 +1340,22 @@ def track_problems(
                     "(status=%s — only worsening/critical may alert)",
                     problem_name, cpmrn, encounter, clinical_status,
                 )
-                should_alert = False
             elif _should_suppress_alert(cpmrn, encounter, problem_name, db):
                 alerts_suppressed.append(problem_name)
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d (cooldown)",
                     problem_name, cpmrn, encounter,
                 )
-                should_alert = False
             else:
-                # Fire Google Chat alert — rich rating card via chat-microservice
-                # when alert_recipients is configured; legacy incoming-webhook
-                # text alert as fallback.
-                alert_id = str(_uuid4())
-                try:
-                    from tools.radar_sync.chat_card_sender import (
-                        get_alert_recipients,
-                        send_alert_cards,
-                    )
-                    recipients = get_alert_recipients(db)
-                    if recipients:
-                        sent = send_alert_cards(
-                            cpmrn, encounter, assessment, structured_summary,
-                            alert_id, recipients,
-                        )
-                        if sent:
-                            alerts_sent.append(problem_name)
-                            alerted = True
-                            logger.info(
-                                "problem_tracker: alert card sent for '%s' %s enc=%d (alert_id=%s)",
-                                problem_name, cpmrn, encounter, alert_id,
-                            )
-                    else:
-                        from tools.radar_sync.gchat_notifier import send_problem_alert
-                        cfg = db["app_settings"].find_one({"_id": "gchat_webhook"})
-                        if cfg and cfg.get("enabled") and cfg.get("url"):
-                            sent = send_problem_alert(
-                                cpmrn, encounter, assessment, structured_summary, cfg["url"],
-                            )
-                            if sent:
-                                alerts_sent.append(problem_name)
-                                alerted = True
-                                logger.info("problem_tracker: alert sent for '%s' %s enc=%d", problem_name, cpmrn, encounter)
-                except Exception:
-                    logger.exception("problem_tracker: gchat alert failed for '%s' %s enc=%d", problem_name, cpmrn, encounter)
+                alert_id   = str(_uuid4())
+                will_alert = True
+                to_alert.append((assessment, alert_id))
+                alerts_sent.append(problem_name)
 
-        _upsert_problem(cpmrn, encounter, assessment, now, alerted, db)
-
-        # ── Study data capture ────────────────────────────────────────────────
-        # Immutable alert record — written only when the alert actually fires.
-        if alerted:
-            try:
-                import sys as _sys
-                from pathlib import Path as _Path
-                _root = _Path(__file__).resolve().parents[2]
-                for _p in [str(_root / "app"), str(_root)]:
-                    if _p not in _sys.path:
-                        _sys.path.insert(0, _p)
-                from backend.services.bq_store import get_bq_store
-                get_bq_store().insert_alert({
-                    "alert_id":     alert_id,
-                    "CPMRN":        cpmrn,
-                    "encounter":    encounter,
-                    "problem_name": problem_name,
-                    "alert_reason": assessment.get("alert_reason", ""),
-                    "alerted_at":   now,
-                    "match_status": "pending",
-                })
-            except Exception:
-                logger.exception("problem_tracker: study_alerts write failed for '%s' %s", problem_name, cpmrn)
+        _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db)
 
         # Suppression record — worsening/critical problems where the model
         # found a documented plan and therefore did NOT alert.
-        # Used for the "being addressed" suppression rate secondary endpoint.
         clinical_status_val = assessment.get("clinical_status", "stable")
         if (
             clinical_status_val in ("worsening", "critical")
@@ -1353,6 +1379,58 @@ def track_problems(
                 })
             except Exception:
                 logger.exception("problem_tracker: study_suppressed_events write failed for '%s' %s", problem_name, cpmrn)
+
+    # Phase 2 — send one batched message for all alerting problems.
+    if to_alert:
+        try:
+            from tools.radar_sync.chat_card_sender import (
+                get_alert_recipients,
+                send_batch_alert_cards,
+            )
+            recipients = get_alert_recipients(db)
+            if recipients:
+                sent = send_batch_alert_cards(
+                    cpmrn, encounter, to_alert, structured_summary, recipients,
+                )
+                if sent:
+                    logger.info(
+                        "problem_tracker: batch alert sent for %s enc=%d — %s",
+                        cpmrn, encounter, [p for p, _ in [(a.get("problem_name"), aid) for a, aid in to_alert]],
+                    )
+            else:
+                # Legacy webhook fallback — still batched into one text message
+                from tools.radar_sync.gchat_notifier import send_problem_alert
+                cfg = db["app_settings"].find_one({"_id": "gchat_webhook"})
+                if cfg and cfg.get("enabled") and cfg.get("url"):
+                    for assessment, _ in to_alert:
+                        send_problem_alert(
+                            cpmrn, encounter, assessment, structured_summary, cfg["url"],
+                        )
+        except Exception:
+            logger.exception("problem_tracker: batch alert failed for %s enc=%d", cpmrn, encounter)
+
+        # BQ study records — one per problem, written after send attempt
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _root = _Path(__file__).resolve().parents[2]
+            for _p in [str(_root / "app"), str(_root)]:
+                if _p not in _sys.path:
+                    _sys.path.insert(0, _p)
+            from backend.services.bq_store import get_bq_store
+            bq = get_bq_store()
+            for assessment, alert_id in to_alert:
+                bq.insert_alert({
+                    "alert_id":     alert_id,
+                    "CPMRN":        cpmrn,
+                    "encounter":    encounter,
+                    "problem_name": assessment.get("problem_name", ""),
+                    "alert_reason": assessment.get("alert_reason", ""),
+                    "alerted_at":   now,
+                    "match_status": "pending",
+                })
+        except Exception:
+            logger.exception("problem_tracker: study_alerts BQ write failed for %s", cpmrn)
 
     tracer.save(final_output={
         "assessments": [(a["problem_name"], a.get("clinical_status"), a.get("should_alert")) for a in final_assessments],

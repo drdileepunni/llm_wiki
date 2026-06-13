@@ -2,9 +2,32 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _dedup_chunks(chunks: list) -> list:
+    """
+    Drop near-identical chunks caused by copy-pasted progress note summaries.
+    Keeps the first occurrence of each fingerprint (earliest retrieval rank).
+    Fingerprint = first 250 chars of HTML-stripped, lowercased, whitespace-collapsed text.
+    """
+    seen: set[str] = set()
+    out = []
+    dropped = 0
+    for c in chunks:
+        normalized = re.sub(r'\s+', ' ', re.sub(r'&\w+;', ' ', c.text.lower())).strip()
+        fp = normalized[:250]
+        if fp not in seen:
+            seen.add(fp)
+            out.append(c)
+        else:
+            dropped += 1
+    if dropped:
+        logger.debug("query_notes: dedup dropped %d duplicate chunk(s)", dropped)
+    return out
 
 
 def _load_store(cpmrn: str, encounter: int):
@@ -55,7 +78,7 @@ def query_patient_notes_with_chunks(
     if store is None:
         return err, []
 
-    chunks = retrieve(store, question, k=k)
+    chunks = _dedup_chunks(retrieve(store, question, k=k))
     if not chunks:
         return "No relevant notes found.", []
 
