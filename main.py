@@ -84,7 +84,9 @@ def alert_feedback():
     from backend.services.bq_store import get_bq_store
     store = get_bq_store()
 
-    # Enrich with patient context from study_alerts (best effort)
+    # Validate alert_id against study_alerts.  If it doesn't match a real alert
+    # row, the click came from a stale or test card — reject it rather than
+    # polluting the feedback table with a fake ID.
     cpmrn, encounter, problem_name = "", None, ""
     try:
         rows = store.find_alerts({"alert_id": alert_id})
@@ -92,6 +94,20 @@ def alert_feedback():
             cpmrn = rows[0].get("CPMRN", "")
             encounter = rows[0].get("encounter")
             problem_name = rows[0].get("problem_name", "")
+        else:
+            logging.warning(
+                "alert-feedback: alert_id=%r not found in study_alerts — "
+                "rejecting feedback from stale/test card",
+                alert_id,
+            )
+            return jsonify({
+                "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                    "message": {"text": (
+                        "⚠️ This alert card is outdated and can no longer accept feedback. "
+                        "Please rate from the current alert card."
+                    )}
+                }}}
+            })
     except Exception:
         logging.exception("alert-feedback: study_alerts lookup failed for %s", alert_id)
 

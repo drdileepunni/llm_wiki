@@ -273,6 +273,8 @@ def _extract_flagged_abnormalities(chart: dict | None, delta: dict | None) -> st
         for v in vitals:
             if not isinstance(v, dict):
                 continue
+            if v.get("isVerified") is not True:
+                continue  # never use unverified vitals for clinical recommendations
             abnormals = v.get("abnormal_list") or []
             if not abnormals:
                 continue

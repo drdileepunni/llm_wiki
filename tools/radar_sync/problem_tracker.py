@@ -142,6 +142,15 @@ IMPORTANT RULES:
   A drop from the patient's baseline is NOT sufficient on its own. The absolute value
   must cross the floor above. If the current value is above the floor (e.g. MAP 67 after
   a transient dip to 64), classify as stable or improving — do NOT alert.
+- TREND DIRECTION RULE — even if the current value is still below the floor, do NOT
+  alert if the vital is clearly recovering (most recent reading is better than the prior
+  reading and trending toward normal). In that case classify as improving and set a
+  next_check to confirm recovery. Only alert if the vital is below the floor AND the
+  trend is flat or worsening. Examples:
+    • SpO2 86% → 91%: trending up, do NOT alert — set next_check SpO2
+    • SpO2 86% → 88% → 87%: flat/worsening below floor — alert
+    • MAP 58 → 63 → 66: recovering through floor — do NOT alert
+    • MAP 58 → 60 → 59: flat below floor — alert
 - If the structured_summary marks a problem as "resolved":
   • You may keep it "resolved" or downgrade to "stable" if you see lingering concerns.
   • You may NOT upgrade to "worsening" or "critical" unless you have OBJECTIVE data (vital trend

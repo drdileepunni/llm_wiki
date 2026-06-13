@@ -74,21 +74,19 @@ def get_admitted_patients(workspace: str = "1A") -> list[dict]:
 
 def _filter_vitals(vitals: list[dict]) -> list[dict]:
     """
-    Keep only vitals that are clinically trustworthy:
-      - isVerified=True  (clinician confirmed), OR
-      - abnormal_list is non-empty (Netra flagged an alarm, clinician hasn't reviewed yet)
+    Keep only clinician-verified vitals (isVerified=True).
 
-    This drops the large volume of routine unverified Netra camera captures that
-    have no abnormal flags, keeping MongoDB lean and the LLM context clean.
+    Unverified camera captures — even those flagged as abnormal by Netra — are
+    excluded because they may be artefacts and should not drive clinical recommendations.
     """
     kept, dropped = [], 0
     for v in vitals:
-        if v.get("isVerified") is True or bool(v.get("abnormal_list")):
+        if v.get("isVerified") is True:
             kept.append(v)
         else:
             dropped += 1
     if dropped:
-        logger.debug("_filter_vitals: dropped %d unverified/non-abnormal vitals", dropped)
+        logger.debug("_filter_vitals: dropped %d unverified vitals", dropped)
     return kept
 
 
