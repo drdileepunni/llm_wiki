@@ -9,7 +9,7 @@ _APP_DIR = Path(__file__).resolve().parent / "app"
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +29,105 @@ def trigger():
     from app.backend.scheduler import _collect_all
     _collect_all()
     return jsonify({"status": "done"})
+
+
+@app.route("/alert-feedback", methods=["POST"])
+def alert_feedback():
+    """
+    Receive a Google Chat button-click event relayed by the chat-microservice.
+
+    The alert card's Submit button carries parameters (action_id = alert_id,
+    cb_token) and form inputs (rating 1-5, optional feedback_text). Stores the
+    rating in cds_study.study_alert_feedback and returns a hostAppDataAction
+    that updates the card in place.
+    """
+    import os
+
+    event = request.get_json(silent=True) or {}
+    common = event.get("commonEventObject", {}) or {}
+    parameters = common.get("parameters", {}) or {}
+    form_inputs = common.get("formInputs", {}) or {}
+
+    expected_token = os.getenv("ALERT_FEEDBACK_TOKEN", "")
+    if not expected_token or parameters.get("cb_token") != expected_token:
+        logging.warning("alert-feedback: rejected request with bad/missing cb_token")
+        return jsonify({"error": "unauthorized"}), 401
+
+    def form_value(name):
+        values = form_inputs.get(name, {}).get("stringInputs", {}).get("value", [])
+        return values[0].strip() if values else ""
+
+    chat_event = event.get("chat", {}) or {}
+    user = chat_event.get("user", {}) or {}
+    user_email = user.get("email", "unknown")
+    user_display = user.get("displayName", "unknown")
+    payload = chat_event.get("buttonClickedPayload", {}) or {}
+    message = payload.get("message", {}) or {}
+    space_name = (payload.get("space", {}) or {}).get("name", "")
+
+    alert_id = parameters.get("action_id", "")
+    rating = form_value("rating")
+    note = form_value("feedback_text")
+
+    if not rating:
+        return jsonify({
+            "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                "message": {"text": f"⚠️ {user_display}, please select a rating (1–5) before submitting."}
+            }}}
+        })
+
+    logging.info(
+        "alert-feedback: alert_id=%s rated %s/5 by %s (note=%r)",
+        alert_id, rating, user_email, note,
+    )
+
+    from backend.services.bq_store import get_bq_store
+    store = get_bq_store()
+
+    # Enrich with patient context from study_alerts (best effort)
+    cpmrn, encounter, problem_name = "", None, ""
+    try:
+        rows = store.find_alerts({"alert_id": alert_id})
+        if rows:
+            cpmrn = rows[0].get("CPMRN", "")
+            encounter = rows[0].get("encounter")
+            problem_name = rows[0].get("problem_name", "")
+    except Exception:
+        logging.exception("alert-feedback: study_alerts lookup failed for %s", alert_id)
+
+    try:
+        store.insert_alert_feedback({
+            "alert_id": alert_id,
+            "CPMRN": cpmrn,
+            "encounter": encounter,
+            "problem_name": problem_name,
+            "rating": int(rating),
+            "feedback_text": note or None,
+            "user_email": user_email,
+            "user_display": user_display,
+            "space_name": space_name,
+            "message_name": message.get("name", ""),
+        })
+    except Exception:
+        logging.exception("alert-feedback: BQ insert failed for %s", alert_id)
+        return jsonify({
+            "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                "message": {"text": "⚠️ Could not record your feedback. Please try again later."}
+            }}}
+        })
+
+    status_text = f"{'⭐' * int(rating)} Rated <b>{rating}/5</b> by {user_display}"
+    if note:
+        status_text += f"<br>💬 <i>{note}</i>"
+
+    from tools.radar_sync.alert_cards import replace_rating_section_with_status
+    updated_cards = replace_rating_section_with_status(message.get("cardsV2", []), status_text)
+
+    return jsonify({
+        "hostAppDataAction": {"chatDataAction": {"updateMessageAction": {
+            "message": {"cardsV2": updated_cards}
+        }}}
+    })
 
 
 @app.route("/test-bq", methods=["GET"])

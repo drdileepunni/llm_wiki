@@ -227,6 +227,23 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.study_adjudications` (
 OPTIONS (description = "Manual adjudications from review UI")
 """
 
+_DDL["study_alert_feedback"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.study_alert_feedback` (
+  alert_id       STRING,
+  CPMRN          STRING,
+  encounter      INT64,
+  problem_name   STRING,
+  rating         INT64,
+  feedback_text  STRING,
+  user_email     STRING,
+  user_display   STRING,
+  space_name     STRING,
+  message_name   STRING,
+  created_at     TIMESTAMP
+)
+OPTIONS (description = "Clinician 1-5 appropriateness ratings from alert chat cards")
+"""
+
 _DDL["fn_adjudications"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.fn_adjudications` (
   record_id        STRING,
@@ -340,6 +357,31 @@ class BQStudyStore:
             bigquery.ScalarQueryParameter("created_at",   "TIMESTAMP", _now_iso()),
         ])
         return alert_id
+
+    def insert_alert_feedback(self, doc: dict):
+        """Insert a clinician rating row from an alert chat card."""
+        self._ensure_table("study_alert_feedback")
+        sql = f"""
+        INSERT INTO {self._fqn("study_alert_feedback")}
+          (alert_id, CPMRN, encounter, problem_name, rating, feedback_text,
+           user_email, user_display, space_name, message_name, created_at)
+        VALUES
+          (@alert_id, @CPMRN, @encounter, @problem_name, @rating, @feedback_text,
+           @user_email, @user_display, @space_name, @message_name, @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("alert_id",      "STRING",    doc.get("alert_id", "")),
+            bigquery.ScalarQueryParameter("CPMRN",         "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",     "INT64",     doc.get("encounter")),
+            bigquery.ScalarQueryParameter("problem_name",  "STRING",    doc.get("problem_name", "")),
+            bigquery.ScalarQueryParameter("rating",        "INT64",     doc.get("rating")),
+            bigquery.ScalarQueryParameter("feedback_text", "STRING",    doc.get("feedback_text")),
+            bigquery.ScalarQueryParameter("user_email",    "STRING",    doc.get("user_email", "")),
+            bigquery.ScalarQueryParameter("user_display",  "STRING",    doc.get("user_display", "")),
+            bigquery.ScalarQueryParameter("space_name",    "STRING",    doc.get("space_name", "")),
+            bigquery.ScalarQueryParameter("message_name",  "STRING",    doc.get("message_name", "")),
+            bigquery.ScalarQueryParameter("created_at",    "TIMESTAMP", _now_iso()),
+        ])
 
     def update_alert(self, alert_id: str, fields: dict):
         """Update arbitrary fields on an alert by alert_id."""
@@ -649,7 +691,7 @@ class BQStudyStore:
 
 # Allowed filterable columns per table (prevent SQL injection via column names)
 _FILTERABLE: dict[str, set[str]] = {
-    "study_alerts":     {"CPMRN", "encounter", "match_status", "alerted_at", "problem_name"},
+    "study_alerts":     {"alert_id", "CPMRN", "encounter", "match_status", "alerted_at", "problem_name"},
     "study_sbar_import":{"CPMRN", "encounter", "match_status", "create_date_time", "window_expires_at", "sbar_id"},
     "study_task_import":{"CPMRN", "encounter", "match_status", "task_visible_at", "window_expires_at", "task_id"},
     "study_suppressed_events": {"CPMRN", "encounter", "suppressed_at"},

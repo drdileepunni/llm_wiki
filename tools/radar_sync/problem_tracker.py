@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from uuid import uuid4 as _uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -1256,18 +1257,39 @@ def track_problems(
                 )
                 should_alert = False
             else:
-                # Fire Google Chat alert
+                # Fire Google Chat alert — rich rating card via chat-microservice
+                # when alert_recipients is configured; legacy incoming-webhook
+                # text alert as fallback.
+                alert_id = str(_uuid4())
                 try:
-                    from tools.radar_sync.gchat_notifier import send_problem_alert
-                    cfg = db["app_settings"].find_one({"_id": "gchat_webhook"})
-                    if cfg and cfg.get("enabled") and cfg.get("url"):
-                        sent = send_problem_alert(
-                            cpmrn, encounter, assessment, structured_summary, cfg["url"],
+                    from tools.radar_sync.chat_card_sender import (
+                        get_alert_recipients,
+                        send_alert_cards,
+                    )
+                    recipients = get_alert_recipients(db)
+                    if recipients:
+                        sent = send_alert_cards(
+                            cpmrn, encounter, assessment, structured_summary,
+                            alert_id, recipients,
                         )
                         if sent:
                             alerts_sent.append(problem_name)
                             alerted = True
-                            logger.info("problem_tracker: alert sent for '%s' %s enc=%d", problem_name, cpmrn, encounter)
+                            logger.info(
+                                "problem_tracker: alert card sent for '%s' %s enc=%d (alert_id=%s)",
+                                problem_name, cpmrn, encounter, alert_id,
+                            )
+                    else:
+                        from tools.radar_sync.gchat_notifier import send_problem_alert
+                        cfg = db["app_settings"].find_one({"_id": "gchat_webhook"})
+                        if cfg and cfg.get("enabled") and cfg.get("url"):
+                            sent = send_problem_alert(
+                                cpmrn, encounter, assessment, structured_summary, cfg["url"],
+                            )
+                            if sent:
+                                alerts_sent.append(problem_name)
+                                alerted = True
+                                logger.info("problem_tracker: alert sent for '%s' %s enc=%d", problem_name, cpmrn, encounter)
                 except Exception:
                     logger.exception("problem_tracker: gchat alert failed for '%s' %s enc=%d", problem_name, cpmrn, encounter)
 
@@ -1285,6 +1307,7 @@ def track_problems(
                         _sys.path.insert(0, _p)
                 from backend.services.bq_store import get_bq_store
                 get_bq_store().insert_alert({
+                    "alert_id":     alert_id,
                     "CPMRN":        cpmrn,
                     "encounter":    encounter,
                     "problem_name": problem_name,
