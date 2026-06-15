@@ -352,6 +352,11 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
         # ABG panels store lactate as "Lactic" not "Lactate" — alias both directions
         "lactate": ["lactic", "lactate"],
         "lactic":  ["lactic", "lactate"],
+        # "ABG"/"VBG" as a panel-level query: return pH as the representative value.
+        # pH is in _BLOOD_GAS_ALLOWED so the gas-panel filter won't block it.
+        # This allows next_check {lab_name: "ABG"} to auto-fetch and confirm the test was done.
+        "abg": ["ph", "pao2", "paco2"],
+        "vbg": ["ph", "paco2"],
     }
     aliases = _ATTR_ALIASES.get(search, [search])
 
@@ -432,6 +437,47 @@ def _amt(obj: Any) -> float:
         return float(obj)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _get_latest_vital_ts(cpmrn: str, encounter: int):
+    """
+    Return the datetime of the most recent vital reading for this patient,
+    or None if no vitals are found. Used for vital staleness checks.
+    """
+    from backend.services.emr.db import get_db
+    import pandas as pd
+
+    db = get_db()
+    snaps = db.snapshots.find(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"chart.vitals": 1, "snapshot_at": 1},
+    )
+    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[:5]
+
+    latest_ts = None
+    for snap in snaps:
+        vitals = (snap.get("chart") or {}).get("vitals") or []
+        for v in vitals[:3]:
+            ts_raw = v.get("timestamp")
+            if not ts_raw:
+                continue
+            # Skip placeholder-only readings
+            has_value = any(
+                v.get(f) and str(v.get(f)).strip() not in ("", "/", "-", "null", "None")
+                for f in ("daysHR", "daysBP", "daysMAP", "daysSpO2", "daysRR")
+            )
+            if not has_value:
+                continue
+            try:
+                ts = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+            except Exception:
+                pass
+        if latest_ts:
+            break
+
+    return latest_ts
 
 
 def _get_io(cpmrn: str, encounter: int, n_hours: int = 12) -> str:

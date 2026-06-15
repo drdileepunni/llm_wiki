@@ -219,6 +219,20 @@ def _format_delta(delta: dict) -> str:
 
 # ── Flagged vital abnormality extractor ──────────────────────────────────────
 
+# Map Netra abnormal_list type strings → the corresponding manually-charted days* field.
+# An abnormal_list reading is only used if the clinician has also entered a value in this
+# field — a null days* means only Netra's camera detected the value, not a manual chart.
+_VITAL_CHARTED_FIELD: dict[str, str] = {
+    "HR":   "daysHR",
+    "SPO2": "daysSpO2",
+    "RR":   "daysRR",
+    "SBP":  "daysBP",
+    "DBP":  "daysBP",
+    "MAP":  "daysMAP",
+    "TEMP": "daysTemperature",
+    "CVP":  "daysCVP",
+}
+
 # Map Netra abnormal_list type strings → human-readable name + severity hint
 _VITAL_DISPLAY: dict[str, str] = {
     "SPO2":  "SpO2 (oxygen saturation)",
@@ -293,6 +307,12 @@ def _extract_flagged_abnormalities(chart: dict | None, delta: dict | None) -> st
                 vtype = (ab.get("type") or "").upper()
                 raw_val = ab.get("value")
                 if not vtype or raw_val is None:
+                    continue
+                # Only use a Netra-detected value if the clinician also manually
+                # charted that vital. daysHR=null with HR in abnormal_list means
+                # the camera fired but no nurse confirmed it — treat as uncharted.
+                charted_field = _VITAL_CHARTED_FIELD.get(vtype)
+                if charted_field and v.get(charted_field) is None:
                     continue
                 try:
                     val = float(raw_val)

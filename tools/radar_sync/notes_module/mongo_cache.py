@@ -24,14 +24,20 @@ def _bucket():
 
 
 def compute_notes_hash(chart: dict) -> str:
-    """SHA-256 of sorted (reportedAt, content) pairs from note documents."""
-    docs = chart.get("documents") or []
-    notes = sorted(
-        (str(d.get("reportedAt", "")), str(d.get("content", "") or d.get("text", "")))
-        for d in docs
-        if d.get("category") == "notes"
+    """
+    SHA-256 of sorted note timestamps from chart.notes.finalNotes.
+    Notes live at chart.notes.finalNotes[*].content[*].timestamp —
+    NOT at chart.documents[category=notes], which is always empty in Radar snapshots.
+    Hashing timestamps only is fast and sufficient to detect when new notes are added.
+    """
+    notes_obj = chart.get("notes") or {}
+    timestamps = sorted(
+        str(content.get("timestamp") or note.get("createdTimestamp") or "")
+        for note in (notes_obj.get("finalNotes") or [])
+        for content in (note.get("content") or [])
+        if content.get("timestamp") or note.get("createdTimestamp")
     )
-    raw = repr(notes).encode()
+    raw = repr(timestamps).encode()
     return hashlib.sha256(raw).hexdigest()
 
 

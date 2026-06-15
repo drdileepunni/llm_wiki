@@ -18,6 +18,33 @@ logger = logging.getLogger(__name__)
 
 _SCREENER_MODEL = "gemini-3.1-flash-lite"
 
+# Re-use the same ABG allowlist as summary_updater so the screener never flags
+# Na, K, glucose, ionized Ca drawn from point-of-care blood gas machines.
+_BLOOD_GAS_PANEL_KW = ("gas panel", "abg", "vbg", "arterial blood gas",
+                        "venous blood gas", "blood gas")
+_BLOOD_GAS_KEEP_ATTRS = ("ph", "pao2", "paco2", "bicarb", "hco3",
+                          "lactic", "lactate", "be", "base excess", "cso2",
+                          "spo2", "fio2")
+
+
+def _filter_screener_lab_attrs(lab: dict) -> list[tuple[str, Any]]:
+    """
+    Return (key, value) pairs from a lab document's attributes,
+    applying the same blood-gas allowlist as summary_updater._filter_lab_attrs.
+    Gas panel attributes not in the allowlist (Na, K, glucose, iCa…) are dropped.
+    """
+    name = (lab.get("name") or "").lower()
+    attrs = lab.get("attributes") or {}
+    valued = [
+        (k, v.get("value") if isinstance(v, dict) else v)
+        for k, v in attrs.items()
+        if (v.get("value") if isinstance(v, dict) else v) not in (None, "")
+    ]
+    is_gas = any(kw in name for kw in _BLOOD_GAS_PANEL_KW)
+    if not is_gas:
+        return valued
+    return [(k, v) for k, v in valued if any(keep in k.lower() for keep in _BLOOD_GAS_KEEP_ATTRS)]
+
 
 @dataclass
 class Pass1Result:
@@ -169,10 +196,11 @@ def screen_patient(
                 "reportedAt": str(lab.get("reportedAt", "")),
                 "values": {
                     k: (v.get("value") if isinstance(v, dict) else v)
-                    for k, v in (lab.get("attributes") or {}).items()
+                    for k, v in _filter_screener_lab_attrs(lab)
                 },
             }
             for lab in (delta.get("new_labs") or [])[:5]
+            if _filter_screener_lab_attrs(lab)  # skip panels that become empty after filtering
         ],
         "new_notes": [
             {

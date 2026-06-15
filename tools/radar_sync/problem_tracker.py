@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 _TRACKER_MODEL    = "gemini-2.5-flash"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
-_ALERT_COOLDOWN_H = 8   # minimum hours between repeat alerts for same problem
+_ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same problem
+_VITAL_STALENESS_HOURS = 8   # vitals older than this are considered stale for alert purposes
 
 _NEXT_CHECK_HOURS = {"vital": 1, "lab": 6, "io": 1}
 
@@ -958,6 +959,55 @@ def _build_prefetch_block(
             except Exception:
                 logger.exception("prefetch: _get_problem_state failed for '%s' %s", name, cpmrn)
 
+    # 1b. Auto-fetch labs for NEW problems (no stored state → no next_check to fetch from).
+    #     Without this, the model only has screener-flag data for brand-new problems
+    #     and may miss a corrected result (e.g. K=2.78 from ABG screener flag, but
+    #     latest serum K=4 never fetched).
+    _NEW_PROBLEM_LAB = {
+        "hypokalemia":       "potassium",
+        "hyperkalemia":      "potassium",
+        "hyponatremia":      "sodium",
+        "hypernatremia":     "sodium",
+        "hypocalcemia":      "calcium",
+        "hypercalcemia":     "calcium",
+        "hypomagnesemia":    "magnesium",
+        "hypophosphatemia":  "phosphate",
+        "hypoglycemia":      "glucose",
+        "hyperglycemia":     "glucose",
+        "anemia":            "hb",
+        "thrombocytopenia":  "platelets",
+        "leukocytosis":      "wbc",
+        "hypoalbuminemia":   "albumin",
+        "aki":               "cr",
+        "acute kidney":      "cr",
+        "renal failure":     "cr",
+        "lactic acidosis":   "lactate",
+        "hyperlactatemia":   "lactate",
+    }
+    new_problem_names = [p["name"] for p in problems if p["name"] not in stored_names]
+    if new_problem_names:
+        try:
+            from tools.radar_sync.status_classifier import _get_lab_trend
+            fetched_labs: set[str] = set()
+            autofetch_lines: list[str] = []
+            for pname in new_problem_names:
+                pname_lc = pname.lower()
+                lab_key = next(
+                    (lab for kw, lab in _NEW_PROBLEM_LAB.items() if kw in pname_lc),
+                    None,
+                )
+                if lab_key and lab_key not in fetched_labs:
+                    fetched_labs.add(lab_key)
+                    trend = _get_lab_trend(cpmrn, encounter, lab_key, n=4)
+                    if trend and not trend.startswith("No ") and not trend.startswith("Unknown"):
+                        autofetch_lines.append(f"  {pname} → {lab_key} trend: {trend}")
+            if autofetch_lines:
+                lines.append("--- Auto-fetched labs for new problems (use to verify screener flags) ---")
+                lines.extend(autofetch_lines)
+                lines.append("")
+        except Exception:
+            logger.exception("prefetch: new-problem auto-fetch failed for %s enc=%d", cpmrn, encounter)
+
     # 2. Recent clinical notes (pre-queried; indices available for citation)
     try:
         from tools.radar_sync.query_notes import query_patient_notes_with_chunks
@@ -995,6 +1045,33 @@ def _build_prefetch_block(
                 lines.append("")
         except Exception:
             logger.exception("prefetch: timing context failed for %s enc=%d", cpmrn, encounter)
+
+    # 4b. Vital staleness warning — if the most recent vital is >8h before snapshot_at,
+    #     inject an explicit warning so the model does not alert on vital-sign problems.
+    if snapshot_at is not None:
+        try:
+            from tools.radar_sync.status_classifier import _get_latest_vital_ts
+            latest_vt = _get_latest_vital_ts(cpmrn, encounter)
+            if latest_vt is not None:
+                snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+                vital_age_h = (snap - latest_vt).total_seconds() / 3600
+                if vital_age_h > _VITAL_STALENESS_HOURS:
+                    age_str = f"{vital_age_h:.1f}h"
+                    lines.append(
+                        f"⚠ VITAL STALENESS WARNING: Most recent verified vital is "
+                        f"{latest_vt.strftime('%Y-%m-%d %H:%M UTC')} — {age_str} before this "
+                        f"snapshot. Vitals are STALE. Do NOT alert on vital-sign-based problems "
+                        f"(tachycardia, bradycardia, hypotension, hypertension, hypoxemia, "
+                        f"tachypnea, shock, desaturation). A stale reading cannot indicate "
+                        f"current haemodynamic instability."
+                    )
+                    lines.append("")
+                    logger.info(
+                        "prefetch: vital staleness warning injected for %s enc=%d (%.1fh old)",
+                        cpmrn, encounter, vital_age_h,
+                    )
+        except Exception:
+            logger.exception("prefetch: vital staleness check failed for %s enc=%d", cpmrn, encounter)
 
     # 5. Linked-lab co-prefetch — fetch physiologically related labs when a problem
     #    (e.g. lactic acidosis) requires cross-lab plausibility checking.
@@ -1342,6 +1419,18 @@ def track_problems(
     # Alerting is deferred so all problems for this patient go in one batched message.
     to_alert: list[tuple[dict, str]] = []   # (assessment, alert_id)
 
+    # Pre-compute vital staleness once for the whole batch.
+    # Used by the hard suppression gate below — avoids a DB call per problem.
+    _vital_is_stale = False
+    try:
+        from tools.radar_sync.status_classifier import _get_latest_vital_ts
+        _latest_vt = _get_latest_vital_ts(cpmrn, encounter)
+        if _latest_vt is not None and snapshot_at is not None:
+            _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+            _vital_is_stale = (_snap - _latest_vt).total_seconds() / 3600 > _VITAL_STALENESS_HOURS
+    except Exception:
+        logger.exception("problem_tracker: vital staleness pre-check failed for %s enc=%d", cpmrn, encounter)
+
     for assessment in final_assessments:
         problem_name = assessment.get("problem_name", "")
         should_alert = assessment.get("should_alert", False)
@@ -1362,6 +1451,16 @@ def track_problems(
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d (cooldown)",
                     problem_name, cpmrn, encounter,
+                )
+            elif _vital_is_stale and assessment.get("next_check", {}).get("type") == "vital":
+                # Hard gate: next_check is a vital AND vitals are stale — the model
+                # was tracking a vital-sign problem (tachycardia, hypotension, etc.)
+                # whose driving data is too old to represent current haemodynamic state.
+                alerts_suppressed.append(problem_name)
+                logger.info(
+                    "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                    "(stale vitals — next_check.type=vital, vitals >%dh old)",
+                    problem_name, cpmrn, encounter, _VITAL_STALENESS_HOURS,
                 )
             else:
                 alert_id   = str(_uuid4())
