@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.study_alerts` (
   CPMRN                  STRING,
   encounter              INT64,
   problem_name           STRING,
+  alert_title            STRING,
   alert_reason           STRING,
+  note_vs_objective      STRING,
   alerted_at             TIMESTAMP,
   match_status           STRING,
   matched_sbar_id        STRING,
@@ -340,19 +342,21 @@ class BQStudyStore:
         alert_id = doc.get("alert_id") or _new_id()
         sql = f"""
         INSERT INTO {self._fqn("study_alerts")}
-          (alert_id, CPMRN, encounter, problem_name, alert_reason,
-           alerted_at, match_status, created_at)
+          (alert_id, CPMRN, encounter, problem_name, alert_title, alert_reason,
+           note_vs_objective, alerted_at, match_status, created_at)
         VALUES
-          (@alert_id, @CPMRN, @encounter, @problem_name, @alert_reason,
-           @alerted_at, @match_status, @created_at)
+          (@alert_id, @CPMRN, @encounter, @problem_name, @alert_title, @alert_reason,
+           @note_vs_objective, @alerted_at, @match_status, @created_at)
         """
         self._execute(sql, [
             bigquery.ScalarQueryParameter("alert_id",     "STRING",    alert_id),
             bigquery.ScalarQueryParameter("CPMRN",        "STRING",    doc.get("CPMRN", "")),
             bigquery.ScalarQueryParameter("encounter",    "INT64",     doc.get("encounter", 1)),
             bigquery.ScalarQueryParameter("problem_name", "STRING",    doc.get("problem_name", "")),
-            bigquery.ScalarQueryParameter("alert_reason", "STRING",    doc.get("alert_reason", "")),
-            bigquery.ScalarQueryParameter("alerted_at",   "TIMESTAMP", _dt_to_iso(doc.get("alerted_at"))),
+            bigquery.ScalarQueryParameter("alert_title",  "STRING",    doc.get("alert_title", "")),
+            bigquery.ScalarQueryParameter("alert_reason",      "STRING",    doc.get("alert_reason", "")),
+            bigquery.ScalarQueryParameter("note_vs_objective", "STRING",    doc.get("note_vs_objective", "")),
+            bigquery.ScalarQueryParameter("alerted_at",        "TIMESTAMP", _dt_to_iso(doc.get("alerted_at"))),
             bigquery.ScalarQueryParameter("match_status", "STRING",    doc.get("match_status", "pending")),
             bigquery.ScalarQueryParameter("created_at",   "TIMESTAMP", _now_iso()),
         ])

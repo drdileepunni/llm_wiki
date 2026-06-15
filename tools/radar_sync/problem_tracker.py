@@ -35,8 +35,22 @@ _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same problem
 _VITAL_STALENESS_HOURS = 8   # vitals older than this are considered stale for alert purposes
+_LAB_STALENESS_HOURS   = 24  # labs older than this are considered stale for alert purposes
 
-_NEXT_CHECK_HOURS = {"vital": 1, "lab": 6, "io": 1}
+_NEXT_CHECK_HOURS = {"vital": 1, "io": 1}   # lab handled per-key below
+# Labs that turn around clinically fast — recheck sooner
+_FAST_LAB_KEYS = {
+    "hb", "hemoglobin", "haemoglobin",
+    "sodium", "na",
+    "potassium", "k",
+    "lactate", "lactic",
+}
+_LAB_NEXT_CHECK_H_FAST    = 6
+_LAB_NEXT_CHECK_H_DEFAULT = 12
+
+
+def _lab_next_check_hours(lab_key: str) -> int:
+    return _LAB_NEXT_CHECK_H_FAST if lab_key.lower() in _FAST_LAB_KEYS else _LAB_NEXT_CHECK_H_DEFAULT
 
 # ── Treatment response buffers ────────────────────────────────────────────────
 # If a plan note is written within this window AFTER the triggering data,
@@ -83,7 +97,8 @@ For EACH problem, you must determine:
    - When setting next_check, specify:
      - "what": specific thing to look for (e.g. "Hb post-transfusion", "HR on Cardizem", "urine output")
      - "type": "vital", "lab", or "io"
-         • "vital" — heart rate, blood pressure, SpO2, MAP, RR, FiO2 (checked every 1h)
+         • "vital" — heart rate, blood pressure, SpO2, MAP, RR, Temp (checked every 1h)
+             Note: do NOT set vital_key="FiO2" — FiO2 is a ventilator setting, not a patient parameter
          • "lab"   — any blood test result (checked every 6h)
          • "io"    — urine output or fluid balance from the I/O chart (checked every 1h)
      - "fulfilled": true if the expected result from the PREVIOUS next_check is already present
@@ -109,6 +124,11 @@ IMPORTANT RULES:
 - For respiratory problems: get_vital_trend('SpO2') returns SF ratio (SpO2/FiO2%) per reading.
   If FiO2 was reduced and SF ratio is maintained or improved, the SpO2 drop is planned weaning —
   do NOT treat as treatment failure or alert for worsening oxygenation
+- FiO2 RULE — FiO2 is a clinician-controlled ventilator setting, not a patient parameter.
+  Do NOT set clinical_status="worsening" or "critical" and do NOT alert based on FiO2 changes alone.
+  FiO2 increases are intentional clinical interventions — alerting on them is circular.
+  To assess oxygenation, use SpO2 or SF ratio (both available via get_vital_trend('SpO2')).
+  If SpO2 is maintained ≥92% despite high FiO2, oxygenation is being managed — do not alert.
 - For AKI, oliguria, anuria, or fluid balance problems: ALWAYS call get_io before
   concluding output is absent — the structured summary may not reflect the latest I/O data
 - get_io shows DAILY TOTALS first, then hourly detail. If the hourly window shows 0 ml but
@@ -126,6 +146,12 @@ IMPORTANT RULES:
   (3) the direction of the recent trend. e.g. "BP rose from baseline 128/80 to a peak of 171/90;
   currently 157/90 — trending down from peak but still well above baseline. No updated plan."
   Never phrase the reason in a way that only compares peak vs current, as this sounds like improvement.
+- When writing alert_title, name the SPECIFIC concern in ≤8 words — not the problem category.
+  The title is the first thing a clinician reads on the alert card; make it immediately actionable.
+  Bad:  "Post-operative monitoring", "Hyponatremia", "Shock"
+  Good: "Note contradicts stable haemodynamics", "Na=110 — no correction plan",
+        "HR 160 uncontrolled — rate plan absent", "Lactate 20 — pH discordance",
+        "Overdue ABG on CPAP", "Cr rising — no nephrology plan"
 - For vital-sign-dependent problems (Fever, Tachycardia, Hypertension, Hypotension, etc.):
   if get_vital_trend returns "Unknown vital" or "No … readings found", do NOT conclude worsening
   based on notes alone — mark as stable with addressed_evidence="vital data unavailable in
@@ -152,6 +178,12 @@ IMPORTANT RULES:
     • SpO2 86% → 88% → 87%: flat/worsening below floor — alert
     • MAP 58 → 63 → 66: recovering through floor — do NOT alert
     • MAP 58 → 60 → 59: flat below floor — alert
+- VITAL TREND WINDOW RULE — when assessing whether a vital is worsening or improving,
+  only compare readings within the last 6–8 hours. A change observed over days does NOT
+  constitute acute worsening. If the vital has been flat or stable within the last 6–8
+  hours, classify as stable — regardless of how different it looks vs. a value from 2 or
+  3 days ago. Only compare across longer windows if you are explicitly assessing a slow
+  chronic trend (e.g. a 5-day post-op Hb decline), and even then do not alert on it.
 - SUBJECTIVE SYMPTOM RULE — do NOT set clinical_status="worsening" or "critical" and
   do NOT alert for problems whose primary evidence is a patient-reported symptom (pain,
   nausea, dizziness, fatigue, reported breathlessness, reported chest tightness) without
@@ -180,6 +212,22 @@ IMPORTANT RULES:
     • Copy-pasted summaries (same text appearing under multiple authors or timestamps)
       count as ONE piece of evidence, not independent corroboration. Do not amplify
       confidence because the same event is described in several notes.
+- LAB STALENESS RULE — do NOT set should_alert=True for any lab-based problem if the
+  most recent lab result driving the alert is more than 24 hours before the snapshot time.
+  A stale lab cannot reflect the patient's current state. Check the timestamp shown in
+  the lab trend (prefetch Section 2 or auto-fetched labs). If the most recent result is
+  >24h old, set should_alert=False and state in addressed_evidence: "Most recent [lab]
+  result is from [date] — >24h old; not alerting on stale data."
+- NOTE-OBJECTIVE DISCORDANCE — when should_alert=True and your evidence includes a
+  vital or lab value cited from a clinical note, cross-reference it against the
+  objective trend already provided in the prefetch (Section 2 above).
+  Do NOT make additional tool calls for this — the prefetch data is already in context.
+  If the note-cited value differs significantly from the objective trend, populate
+  note_vs_objective with a single sentence comparing both (e.g. "Note [4] documents
+  HR 16 bpm; last verified vital trend shows HR 72-78 bpm — likely a documentation
+  error"). If there is no significant discordance, leave note_vs_objective empty.
+  Only check for the single vital/lab most relevant to the alert — not every value
+  mentioned in the note.
 - If the structured_summary marks a problem as "resolved":
   • You may keep it "resolved" or downgrade to "stable" if you see lingering concerns.
   • You may NOT upgrade to "worsening" or "critical" unless you have OBJECTIVE data (vital trend
@@ -267,7 +315,7 @@ _VITAL_TREND_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "vital_name": {"type": "string", "description": "HR, BP, MAP, SpO2, RR, FiO2, Temp"},
+            "vital_name": {"type": "string", "description": "HR, BP, MAP, SpO2, RR, Temp (not FiO2 — use SpO2 for oxygenation)"},
             "n": {"type": "integer", "description": "Number of readings (default 6, max 20)"},
         },
         "required": ["vital_name"],
@@ -338,7 +386,28 @@ _SET_ALL_TOOL = {
                         "being_addressed":    {"type": "boolean"},
                         "addressed_evidence": {"type": "string", "description": "Quote from notes or 'No plan documented'"},
                         "should_alert":       {"type": "boolean"},
+                        "alert_title":        {
+                            "type": "string",
+                            "description": (
+                                "Required if should_alert=True. A concise ≤8-word phrase naming "
+                                "the SPECIFIC concern — not the problem category. Shown as the "
+                                "alert card header. Examples: 'Note contradicts stable haemodynamics', "
+                                "'K=2.6 — no correction plan', 'Overdue ABG on CPAP', "
+                                "'Lactate 20 — pH discordance', 'HR 160 uncontrolled — no rate plan'."
+                            ),
+                        },
                         "alert_reason":       {"type": "string", "description": "Required if should_alert=True"},
+                        "note_vs_objective":  {
+                            "type": "string",
+                            "description": (
+                                "Only populate when should_alert=True and your alert evidence includes "
+                                "a vital or lab value cited from a clinical note. Compare that note-cited "
+                                "value against the objective trend in the prefetch (no extra tool calls). "
+                                "Write one sentence: e.g. 'Note [4] documents HR 16 bpm; verified vital "
+                                "trend shows HR 72-78 bpm — likely a documentation error.' "
+                                "Leave empty if there is no significant discordance."
+                            ),
+                        },
                         "suggestions":        {
                             "type": "array",
                             "items": {"type": "string"},
@@ -374,7 +443,7 @@ _SET_ALL_TOOL = {
                                 },
                                 "vital_key": {
                                     "type": "string",
-                                    "enum": ["HR", "BP", "MAP", "SpO2", "RR", "FiO2", "Temp"],
+                                    "enum": ["HR", "BP", "MAP", "SpO2", "RR", "Temp"],
                                     "description": (
                                         "Required when type='vital'. Pick exactly ONE vital — "
                                         "the most clinically relevant one for this problem."
@@ -653,8 +722,13 @@ def _upsert_problem(
         #                   so the window doesn't roll forward every hour
         fulfilled = nc_raw.get("fulfilled", True)
 
+        def _check_hours() -> int:
+            if nc_type == "lab":
+                return _lab_next_check_hours(nc_key)
+            return _NEXT_CHECK_HOURS.get(nc_type, 1)
+
         if fulfilled:
-            due_after = now + timedelta(hours=_NEXT_CHECK_HOURS.get(nc_type, 1))
+            due_after = now + timedelta(hours=_check_hours())
         else:
             stored = db["patient_problems"].find_one(
                 {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
@@ -666,7 +740,7 @@ def _upsert_problem(
                     stored_due = stored_due.replace(tzinfo=timezone.utc)
                 due_after = stored_due
             else:
-                due_after = now + timedelta(hours=_NEXT_CHECK_HOURS.get(nc_type, 1))
+                due_after = now + timedelta(hours=_check_hours())
 
         next_check: dict | None = {
             "key":       nc_key,    # machine-readable fetch argument
@@ -686,8 +760,10 @@ def _upsert_problem(
         "next_check":         next_check,
         "alerted":            alerted,
         "should_alert":       assessment.get("should_alert"),
-        "alert_reason":       assessment.get("alert_reason", ""),
-        "cited_notes":        assessment.get("cited_notes", []),
+        "alert_reason":        assessment.get("alert_reason", ""),
+        "alert_title":         assessment.get("alert_title", ""),
+        "note_vs_objective":   assessment.get("note_vs_objective", ""),
+        "cited_notes":         assessment.get("cited_notes", []),
     }
 
     # Write reasoning fingerprint if provided by model.
@@ -1072,6 +1148,37 @@ def _build_prefetch_block(
                     )
         except Exception:
             logger.exception("prefetch: vital staleness check failed for %s enc=%d", cpmrn, encounter)
+
+    # 4c. Lab staleness warning — for each auto-fetched lab in section 1b that appears
+    #     stale (>24h), inject an explicit per-lab warning so the model doesn't alert on it.
+    if snapshot_at is not None:
+        try:
+            from tools.radar_sync.status_classifier import _get_latest_lab_ts
+            snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+            stale_lab_warnings: list[str] = []
+            for pname in ([p.get("name", "") for p in problems]):
+                pname_lc = pname.lower()
+                lab_key = next((lab for kw, lab in _NEW_PROBLEM_LAB.items() if kw in pname_lc), None)
+                if not lab_key:
+                    continue
+                latest_lt = _get_latest_lab_ts(cpmrn, encounter, lab_key)
+                if latest_lt is not None:
+                    lab_age_h = (snap - latest_lt).total_seconds() / 3600
+                    if lab_age_h > _LAB_STALENESS_HOURS:
+                        stale_lab_warnings.append(
+                            f"  {pname} → most recent {lab_key} is "
+                            f"{latest_lt.strftime('%Y-%m-%d %H:%M UTC')} "
+                            f"({lab_age_h:.0f}h ago) — DO NOT ALERT"
+                        )
+            if stale_lab_warnings:
+                lines.append(
+                    f"⚠ LAB STALENESS WARNING: The following labs are >{_LAB_STALENESS_HOURS}h "
+                    f"old and must NOT be used as the basis for any new alert:"
+                )
+                lines.extend(stale_lab_warnings)
+                lines.append("")
+        except Exception:
+            logger.exception("prefetch: lab staleness check failed for %s enc=%d", cpmrn, encounter)
 
     # 5. Linked-lab co-prefetch — fetch physiologically related labs when a problem
     #    (e.g. lactic acidosis) requires cross-lab plausibility checking.
@@ -1462,9 +1569,37 @@ def track_problems(
                     "(stale vitals — next_check.type=vital, vitals >%dh old)",
                     problem_name, cpmrn, encounter, _VITAL_STALENESS_HOURS,
                 )
+            elif assessment.get("next_check", {}).get("type") == "lab":
+                # Hard gate: if the lab driving this alert is >24h old, suppress.
+                nc_lab = (assessment.get("next_check") or {}).get("lab_name") or (assessment.get("next_check") or {}).get("key", "")
+                _lab_is_stale = False
+                if nc_lab and snapshot_at is not None:
+                    try:
+                        from tools.radar_sync.status_classifier import _get_latest_lab_ts
+                        _latest_lt = _get_latest_lab_ts(cpmrn, encounter, nc_lab)
+                        if _latest_lt is not None:
+                            _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+                            _lab_is_stale = (_snap - _latest_lt).total_seconds() / 3600 > _LAB_STALENESS_HOURS
+                    except Exception:
+                        logger.exception("problem_tracker: lab staleness check failed for '%s' %s enc=%d", problem_name, cpmrn, encounter)
+                if _lab_is_stale:
+                    alerts_suppressed.append(problem_name)
+                    logger.info(
+                        "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                        "(stale lab '%s' — >%dh old)",
+                        problem_name, cpmrn, encounter, nc_lab, _LAB_STALENESS_HOURS,
+                    )
+                else:
+                    alert_id   = str(_uuid4())
+                    will_alert = True
+                    assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
+                    to_alert.append((assessment, alert_id))
+                    alerts_sent.append(problem_name)
             else:
                 alert_id   = str(_uuid4())
                 will_alert = True
+                # Inject snapshot_at so the card builder can show timestamps in IST
+                assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
                 to_alert.append((assessment, alert_id))
                 alerts_sent.append(problem_name)
 
@@ -1541,8 +1676,10 @@ def track_problems(
                     "CPMRN":        cpmrn,
                     "encounter":    encounter,
                     "problem_name": assessment.get("problem_name", ""),
-                    "alert_reason": assessment.get("alert_reason", ""),
-                    "alerted_at":   now,
+                    "alert_title":        assessment.get("alert_title", ""),
+                    "alert_reason":       assessment.get("alert_reason", ""),
+                    "note_vs_objective":  assessment.get("note_vs_objective", ""),
+                    "alerted_at":         now,
                     "match_status": "pending",
                 })
         except Exception:

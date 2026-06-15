@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from datetime import datetime, timezone, timedelta
 
 from tools.radar_sync.gchat_notifier import (
     _CHART_BASE,
@@ -23,6 +24,32 @@ from tools.radar_sync.gchat_notifier import (
 logger = logging.getLogger(__name__)
 
 RATING_SECTION_HEADER = "Rate this alert"
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _fmt_ist(dt_iso: str | None) -> str:
+    """Format an ISO timestamp as 'Jun 15, 9:07 PM IST'. Returns '' if unparseable."""
+    if not dt_iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(dt_iso).replace("Z", "+00:00"))
+        ist = dt.astimezone(_IST)
+        return ist.strftime("%-d %b, %-I:%M %p IST")
+    except Exception:
+        return ""
+
+
+_FOLLOWUP_WINDOW_VITAL_IO = {"vital": "1 hour", "io": "1 hour"}
+_FAST_LAB_KEYS_CARD = {
+    "hb", "hemoglobin", "haemoglobin",
+    "sodium", "na",
+    "potassium", "k",
+    "lactate", "lactic",
+}
+
+
+def _lab_followup_label(lab_key: str) -> str:
+    return "6 hours" if lab_key.lower() in _FAST_LAB_KEYS_CARD else "12 hours"
 
 
 def build_alert_card(
@@ -43,8 +70,11 @@ def build_alert_card(
     problem_name    = assessment.get("problem_name", "Unknown")
     clinical_status = assessment.get("clinical_status", "worsening")
     alert_reason    = assessment.get("alert_reason", "")
-    suggestions     = assessment.get("suggestions") or []
     emoji           = _STATUS_EMOJI.get(clinical_status, "⚠️")
+    alert_title         = assessment.get("alert_title") or problem_name
+    note_vs_objective   = assessment.get("note_vs_objective", "")
+    snapshot_ts         = _fmt_ist(assessment.get("_snapshot_at"))
+    nc                  = assessment.get("next_check") or {}
 
     sections: list[dict] = []
 
@@ -70,17 +100,19 @@ def build_alert_card(
     if not current_state:
         current_state = assessment.get("addressed_evidence", "")
     if current_state:
+        observed_text = current_state
+        if snapshot_ts:
+            observed_text += f" <i>({snapshot_ts})</i>"
         sections.append({
             "header": "Observed",
-            "widgets": [{"textParagraph": {"text": current_state}}],
+            "widgets": [{"textParagraph": {"text": observed_text}}],
         })
 
     # ── Objective data — auto-fetched readings for the next_check item ────────
-    nc = assessment.get("next_check") or {}
-    nc_what = nc.get("key") or nc.get("what", "")
+    nc_data_what = nc.get("key") or nc.get("what", "")
     nc_type = nc.get("type", "")
-    if nc_what and nc_type:
-        obj_line = _fetch_objective_line(cpmrn, encounter, nc_what, nc_type)
+    if nc_data_what and nc_type:
+        obj_line = _fetch_objective_line(cpmrn, encounter, nc_data_what, nc_type)
         if obj_line:
             widgets = [{"decoratedText": {
                 "startIcon": {"materialIcon": {"name": "monitoring"}},
@@ -101,6 +133,17 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": alert_reason}}],
         })
 
+    # ── Note vs. objective discordance ───────────────────────────────────────
+    if note_vs_objective:
+        sections.append({
+            "header": "⚠ Note vs. objective",
+            "widgets": [{"decoratedText": {
+                "startIcon": {"materialIcon": {"name": "compare_arrows"}},
+                "text": note_vs_objective,
+                "wrapText": True,
+            }}],
+        })
+
     # ── Model reasoning (collapsed by default) ────────────────────────────────
     fp = assessment.get("reasoning_fingerprint")
     if isinstance(fp, dict):
@@ -117,18 +160,21 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": reasoning}}],
         })
 
-    # ── Suggested actions ─────────────────────────────────────────────────────
-    if suggestions:
+    # ── Model follow-up ───────────────────────────────────────────────────────
+    if nc.get("type"):
+        nc_type   = nc["type"]
+        nc_what   = nc.get("label") or nc.get("vital_key") or nc.get("lab_name") or nc.get("key") or nc_type
+        if nc_type == "lab":
+            nc_window = _lab_followup_label(nc.get("lab_name") or nc.get("key") or "")
+        else:
+            nc_window = _FOLLOWUP_WINDOW_VITAL_IO.get(nc_type, "next run")
         sections.append({
-            "header": "Suggested actions",
-            "widgets": [
-                {"decoratedText": {
-                    "startIcon": {"materialIcon": {"name": "arrow_right"}},
-                    "text": s,
-                    "wrapText": True,
-                }}
-                for s in suggestions[:5]
-            ],
+            "header": "Model follow-up",
+            "widgets": [{"decoratedText": {
+                "startIcon": {"materialIcon": {"name": "schedule"}},
+                "text": f"The model will recheck <b>{nc_what}</b> in {nc_window}.",
+                "wrapText": True,
+            }}],
         })
 
     # ── Rating form ───────────────────────────────────────────────────────────
@@ -180,7 +226,7 @@ def build_alert_card(
         "cardId": f"cds-alert-{alert_id}",
         "card": {
             "header": {
-                "title": f"{emoji} {problem_name}",
+                "title": f"{emoji} {alert_title}",
                 "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
                 "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/clinical_notes/default/48px.svg",
                 "imageType": "CIRCLE",

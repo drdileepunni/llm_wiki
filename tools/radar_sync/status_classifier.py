@@ -480,6 +480,73 @@ def _get_latest_vital_ts(cpmrn: str, encounter: int):
     return latest_ts
 
 
+def _get_latest_lab_ts(cpmrn: str, encounter: int, lab_name: str):
+    """
+    Return the datetime of the most recent result for a specific lab parameter,
+    or None if not found. Uses the same alias + gas-panel filter as _get_lab_trend.
+    Used for lab staleness checks — do not alert on labs older than _LAB_STALENESS_HOURS.
+    """
+    from backend.services.emr.db import get_db
+    import pandas as pd
+
+    db = get_db()
+    snaps = db.snapshots.find(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"chart.documents": 1, "snapshot_at": 1},
+    )
+    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[:10]
+
+    search = lab_name.lower()
+    _ATTR_ALIASES = {
+        "hb":      ["hb", "hemoglobin", "haemoglobin"],
+        "k":       ["potassium", "k"],
+        "na":      ["sodium", "na"],
+        "cr":      ["creatinine", "cr"],
+        "wbc":     ["total count", "wbc", "white blood cell"],
+        "plt":     ["platelets", "plt"],
+        "lactate": ["lactic", "lactate"],
+        "lactic":  ["lactic", "lactate"],
+        "abg":     ["ph", "pao2", "paco2"],
+        "vbg":     ["ph", "paco2"],
+    }
+    aliases = _ATTR_ALIASES.get(search, [search])
+    _BLOOD_GAS_KEYWORDS = ("abg", "vbg", "arterial blood gas", "venous blood gas", "blood gas", "gas panel")
+    _BLOOD_GAS_ALLOWED  = {"ph", "pao2", "paco2", "bicarb", "hco3", "lactic", "lactate",
+                            "be", "base excess", "spo2", "fio2", "cso2"}
+    _is_allowed_from_gas = bool(set(aliases) & _BLOOD_GAS_ALLOWED)
+
+    latest_ts = None
+    for snap in snaps:
+        docs = (snap.get("chart") or {}).get("documents") or []
+        for doc in docs:
+            if doc.get("category") != "labs":
+                continue
+            panel_name = (doc.get("name") or "").lower()
+            if any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS) and not _is_allowed_from_gas:
+                continue
+            attrs = doc.get("attributes") or {}
+            for attr_key, attr_val in attrs.items():
+                if not isinstance(attr_val, dict):
+                    continue
+                ak_lower = attr_key.lower()
+                if any(re.search(
+                    (r'(?<!\w)' + re.escape(al) + r'(?!\w)' if len(al) <= 2
+                     else r'(?<!\w)' + re.escape(al)),
+                    ak_lower,
+                ) for al in aliases):
+                    ts_raw = doc.get("reportedAt")
+                    if ts_raw and attr_val.get("value") is not None:
+                        try:
+                            ts = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+                            if latest_ts is None or ts > latest_ts:
+                                latest_ts = ts
+                        except Exception:
+                            pass
+                    break
+
+    return latest_ts
+
+
 def _get_io(cpmrn: str, encounter: int, n_hours: int = 12) -> str:
     """
     Return a per-hour fluid balance table from chart.io in the latest snapshot.
