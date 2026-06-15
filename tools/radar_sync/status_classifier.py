@@ -98,7 +98,7 @@ _VITAL_TREND_TOOL = {
         "properties": {
             "vital_name": {
                 "type": "string",
-                "description": "One of: HR, BP, MAP, SpO2, RR, FiO2, Temp",
+                "description": "One of: HR, BP, MAP, SpO2, RR, FiO2, Temp, GCS",
             },
             "n": {
                 "type": "integer",
@@ -198,6 +198,7 @@ _VITAL_FIELD = {
     "FIO2":        "daysFiO2",
     "TEMP":        "daysTemp",
     "TEMPERATURE": "daysTemp",   # alias — model may say "Temperature"
+    "GCS":         "daysGCS",
 }
 
 
@@ -210,7 +211,7 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
     n = min(max(n, 1), 20)
     field = _VITAL_FIELD.get(vital_name.strip().upper())
     if not field:
-        return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2, Temp"
+        return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2, Temp, GCS"
 
     db = get_db()
     snaps = db.snapshots.find(
@@ -299,6 +300,21 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
                     except (TypeError, ValueError):
                         pass
 
+    is_gcs = vital_name.strip().upper() == "GCS"
+    # Pre-collect GCS sub-components per timestamp for formatted output.
+    gcs_components: dict = {}
+    if is_gcs:
+        for snap in snaps:
+            vitals = (snap.get("chart") or {}).get("vitals") or []
+            for v in vitals[:3]:
+                ts_raw_g = v.get("timestamp")
+                if ts_raw_g and ts_raw_g not in gcs_components:
+                    eye    = v.get("daysGCSeyes")
+                    verbal = v.get("daysGCSverbal")
+                    motor  = v.get("daysGCSmotor")
+                    if eye is not None or verbal is not None or motor is not None:
+                        gcs_components[ts_raw_g] = (eye, verbal, motor)
+
     lines = [f"SpO2 + FiO2 trend (newest first):" if is_spo2 else f"{vital_name} trend (newest first):"]
     for ts_raw, val in rows:
         if is_spo2:
@@ -311,6 +327,13 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
                     lines.append(f"  [{_to_ist(ts_raw)}] SpO2 {val}%  FiO2 {fio2:.0f}%")
             else:
                 lines.append(f"  [{_to_ist(ts_raw)}] SpO2 {val}%")
+        elif is_gcs:
+            comp = gcs_components.get(ts_raw)
+            if comp and all(c is not None for c in comp):
+                eye, verbal, motor = comp
+                lines.append(f"  [{_to_ist(ts_raw)}] GCS {val}  (E{eye}V{verbal}M{motor})")
+            else:
+                lines.append(f"  [{_to_ist(ts_raw)}] GCS {val}")
         elif is_map and ts_raw in derived_bp:
             # Derived from BP — annotate so the model knows it's estimated
             lines.append(f"  [{_to_ist(ts_raw)}] {val}  (est. from BP {derived_bp[ts_raw]})")

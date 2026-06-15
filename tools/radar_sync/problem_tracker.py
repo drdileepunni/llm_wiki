@@ -228,6 +228,11 @@ IMPORTANT RULES:
   error"). If there is no significant discordance, leave note_vs_objective empty.
   Only check for the single vital/lab most relevant to the alert — not every value
   mentioned in the note.
+  GCS SPECIFICS — GCS is recorded both in clinical notes (free text) and in the
+  verified vitals flowsheet. If your alert evidence includes a GCS value from a note,
+  always check the prefetch vital trend for GCS and compare. Set next_check.type="vital"
+  with vital_key="GCS" (not type="io") so the follow-up fetches the flowsheet reading.
+  If the note GCS differs from the flowsheet GCS, populate note_vs_objective.
 - If the structured_summary marks a problem as "resolved":
   • You may keep it "resolved" or downgrade to "stable" if you see lingering concerns.
   • You may NOT upgrade to "worsening" or "critical" unless you have OBJECTIVE data (vital trend
@@ -255,6 +260,29 @@ IMPORTANT RULES:
 - For reasoning_fingerprint: write 3-5 sentences in first person covering what data you checked,
   what you found, your alert decision (alerted / suppressed — reason / no alert — stable), and
   what specific data would change this assessment next run. Do NOT nest it — it is a plain string.
+
+CONTEXT GATE — PERMISSIVE WINDOW MONITORING:
+Some problems have a monitoring protocol that defines a *permissive window* — a bounded
+period where an abnormal value is clinically INTENDED. When the == CONTEXT GATE == block
+is present in the user message, you MUST populate the context_gate field for each listed problem.
+
+Gate verdict rules:
+- permissive_active:    value is inside the band AND no invalidate_if trigger fired AND valid_until not passed
+                        → set should_alert=False for this problem (suppress alert silently)
+- permissive_breached:  value exceeds the permissive band BUT eligibility is still valid
+                        → set should_alert=True (alert fires) — eligibility is NOT ended; it auto-resumes
+- permissive_ended:     an invalidate_if trigger fired OR valid_until passed
+                        → set should_alert=True; after this point the gate is closed permanently
+- no_permissive_context: no scenario applies to this patient → normal alert rules apply
+
+Carry-forward: if the stored gate says eligibility=active and nothing has changed, confirm in one
+sentence and carry it forward. Do NOT re-derive unnecessarily. Only call tools if a trigger is
+ambiguous or you need to verify the current value against the band.
+
+IMPORTANT: if a gate verdict is permissive_active, override should_alert=False regardless of what
+the problem's clinical_status or other rules suggest. The permissive window takes precedence.
+If the gate verdict is permissive_breached or permissive_ended, apply normal alert rules
+(the gate does not suppress in those cases).
 
 SCREENER FLAG — NEW PROBLEM DETECTION:
 If the user message contains a "== SCREENER FLAG ==" section, the Pass 1 screener
@@ -315,7 +343,7 @@ _VITAL_TREND_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "vital_name": {"type": "string", "description": "HR, BP, MAP, SpO2, RR, Temp (not FiO2 — use SpO2 for oxygenation)"},
+            "vital_name": {"type": "string", "description": "HR, BP, MAP, SpO2, RR, Temp, GCS (not FiO2 — use SpO2 for oxygenation)"},
             "n": {"type": "integer", "description": "Number of readings (default 6, max 20)"},
         },
         "required": ["vital_name"],
@@ -443,7 +471,7 @@ _SET_ALL_TOOL = {
                                 },
                                 "vital_key": {
                                     "type": "string",
-                                    "enum": ["HR", "BP", "MAP", "SpO2", "RR", "Temp"],
+                                    "enum": ["HR", "BP", "MAP", "SpO2", "RR", "Temp", "GCS"],
                                     "description": (
                                         "Required when type='vital'. Pick exactly ONE vital — "
                                         "the most clinically relevant one for this problem."
@@ -486,6 +514,70 @@ _SET_ALL_TOOL = {
                                 "Always populate this when you called query_patient_notes — "
                                 "include every [N] you relied on as evidence."
                             ),
+                        },
+                        "context_gate": {
+                            "type": "object",
+                            "description": (
+                                "ONLY populate for problems that have an active context-gate protocol "
+                                "(listed in the == CONTEXT GATE == block). "
+                                "Omit entirely for problems with no matching protocol, or where the "
+                                "stored gate has eligibility='ended'."
+                            ),
+                            "properties": {
+                                "verdict": {
+                                    "type": "string",
+                                    "enum": ["permissive_active", "permissive_breached", "permissive_ended", "no_permissive_context"],
+                                    "description": (
+                                        "permissive_active — in-band, eligibility intact, suppress alert. "
+                                        "permissive_breached — out-of-band but eligibility preserved; alert fires, auto-resumes when corrected. "
+                                        "permissive_ended — trigger fired or time expired; eligibility permanently ended. "
+                                        "no_permissive_context — no permissive scenario applies; normal alert rules."
+                                    ),
+                                },
+                                "scenario": {
+                                    "type": "string",
+                                    "description": "Name of the matched scenario (e.g. 'acute_ischaemic_stroke_no_tpa') or 'none'.",
+                                },
+                                "band_description": {
+                                    "type": "string",
+                                    "description": "Clinical English description of the permissive band (e.g. 'SBP ≤ 220 mmHg, DBP ≤ 120 mmHg').",
+                                },
+                                "valid_until_iso": {
+                                    "type": "string",
+                                    "description": (
+                                        "ISO 8601 UTC datetime when the permissive window expires "
+                                        "(e.g. '2026-06-17T14:00:00Z'). "
+                                        "Compute from documented onset time + window duration. "
+                                        "Omit or set null if there is no time cap (e.g. chronic renovascular, raised ICP)."
+                                    ),
+                                },
+                                "rationale": {
+                                    "type": "string",
+                                    "description": (
+                                        "First-person 2-4 sentence reasoning: which scenarios were ruled in/out and why, "
+                                        "what evidence was found (note indices), and what would change this verdict."
+                                    ),
+                                },
+                                "plan_if_permissive": {
+                                    "type": "string",
+                                    "description": "What should be done while the permissive window is active (e.g. 'Do not drop BP — maintain penumbral perfusion. Avoid antihypertensives unless SBP > 220.').",
+                                },
+                                "plan_when_ended": {
+                                    "type": "string",
+                                    "description": "What to do once the window closes or a trigger fires (e.g. 'Taper to SBP < 140 over 24–48h at ~15%/day. Restart home antihypertensives when swallowing safely.').",
+                                },
+                                "invalidate_if": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Carry forward the invalidate_if list from the matched scenario.",
+                                },
+                                "gate_cited_note_indices": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "Note indices used to derive this gate verdict.",
+                                },
+                            },
+                            "required": ["verdict", "scenario", "rationale"],
                         },
                     },
                     "required": [
@@ -793,6 +885,43 @@ def _upsert_problem(
     }
     if stored_fingerprint:
         set_fields["reasoning_fingerprint"] = stored_fingerprint
+
+    # Persist context_gate if model provided one.
+    raw_gate = assessment.get("context_gate")
+    if isinstance(raw_gate, dict) and raw_gate.get("verdict"):
+        verdict = raw_gate.get("verdict", "")
+        # Parse valid_until_iso → datetime
+        valid_until: datetime | None = None
+        viso = raw_gate.get("valid_until_iso")
+        if viso:
+            try:
+                valid_until = datetime.fromisoformat(str(viso).replace("Z", "+00:00"))
+            except Exception:
+                logger.warning("_upsert_problem: could not parse valid_until_iso=%r for '%s'", viso, problem_name)
+
+        # Eligibility: permissive_ended → sticky ended; breached keeps active
+        if verdict in ("permissive_ended", "no_permissive_context"):
+            eligibility = "ended" if verdict == "permissive_ended" else "none"
+        else:
+            eligibility = "active"
+
+        stored_gate: dict = {
+            "anchored_at":      now,
+            "verdict":          verdict,
+            "eligibility":      eligibility,
+            "scenario":         raw_gate.get("scenario", "none"),
+            "band_description": raw_gate.get("band_description", ""),
+            "valid_until":      valid_until,
+            "rationale":        raw_gate.get("rationale", ""),
+            "plan_if_permissive": raw_gate.get("plan_if_permissive", ""),
+            "plan_when_ended":  raw_gate.get("plan_when_ended", ""),
+            "invalidate_if":    raw_gate.get("invalidate_if", []),
+        }
+        set_fields["context_gate"] = stored_gate
+        logger.info(
+            "_upsert_problem: gate verdict=%s eligibility=%s for '%s' %s enc=%d",
+            verdict, eligibility, problem_name, cpmrn, encounter,
+        )
 
     update: dict = {
         "$set": set_fields,
@@ -1248,6 +1377,130 @@ def _build_fingerprint_block(cpmrn: str, encounter: int, db: Any) -> str:
     return "\n".join(lines)
 
 
+# ── Context-gate helpers ──────────────────────────────────────────────────────
+
+def _load_monitoring_protocols(db: Any) -> list[dict]:
+    """Fetch all monitoring protocols from MongoDB. Returns [] on failure (safe default)."""
+    try:
+        return list(db["monitoring_protocols"].find({}))
+    except Exception:
+        logger.exception("problem_tracker: failed to load monitoring_protocols")
+        return []
+
+
+def _match_protocols(problems: list[dict], protocols: list[dict]) -> dict[str, dict]:
+    """
+    For each problem, find the first matching protocol (applies_when substring match).
+    Returns {problem_name: protocol_doc}.
+    """
+    matched: dict[str, dict] = {}
+    for prob in problems:
+        name_lc = prob.get("name", "").lower()
+        for proto in protocols:
+            if any(kw in name_lc for kw in proto.get("applies_when", [])):
+                matched[prob["name"]] = proto
+                break
+    return matched
+
+
+def _build_gate_block(
+    matched_protocols: dict[str, dict],
+    stored_gates: dict[str, dict],
+    snapshot_at: datetime,
+) -> str:
+    """
+    Build the CONTEXT GATE prompt block for matched problems.
+    Injects:
+      - For problems with an active gate: carry-forward instructions + stored state
+      - For problems without a gate: full scenario checklist for fresh derivation
+    """
+    if not matched_protocols:
+        return ""
+
+    lines: list[str] = [
+        "== CONTEXT GATE ==",
+        "The following problems have monitoring protocols. For each:",
+        "  1. Check if any invalidate_if trigger appears in new notes/data → verdict=permissive_ended",
+        "  2. Check if the current value is inside the band_description → if not, verdict=permissive_breached",
+        "  3. If all clear → verdict=permissive_active; carry forward in one sentence",
+        "  Call tools only if uncertain about a trigger or band status.",
+        "  In set_all_assessments, populate context_gate for EACH of these problems.",
+        "",
+    ]
+
+    for problem_name, proto in matched_protocols.items():
+        stored = stored_gates.get(problem_name, {})
+        eligibility = stored.get("eligibility", "")
+        valid_until = stored.get("valid_until")
+        # Normalise valid_until to UTC-aware
+        if isinstance(valid_until, datetime) and valid_until.tzinfo is None:
+            valid_until = valid_until.replace(tzinfo=timezone.utc)
+
+        lines.append(f"--- {problem_name} | Protocol: {proto['protocol_id']} ---")
+
+        if eligibility == "ended":
+            # Gate already sticky-ended — skip gate logic, fall through to normal alert
+            lines.append("  Gate: ENDED (eligibility permanently closed — normal alert rules apply)")
+            lines.append("  Do NOT populate context_gate for this problem.")
+            lines.append("")
+            continue
+
+        if stored and eligibility == "active":
+            # Carry-forward path
+            anchored_at = stored.get("anchored_at")
+            anchored_str = anchored_at.strftime("%Y-%m-%d %H:%M UTC") if isinstance(anchored_at, datetime) else "unknown"
+            valid_str = valid_until.strftime("%Y-%m-%d %H:%M UTC") if isinstance(valid_until, datetime) else "none"
+            hours_remaining = (
+                f"{(valid_until - snapshot_at).total_seconds() / 3600:.1f}h remaining"
+                if isinstance(valid_until, datetime) else "no time cap"
+            )
+
+            lines.append(f"  Stored gate (anchored {anchored_str}):")
+            lines.append(f"    Eligibility: {eligibility}")
+            lines.append(f"    Scenario:    {stored.get('scenario', 'none')}")
+            lines.append(f"    Band:        {stored.get('band_description', '?')}")
+            lines.append(f"    Valid until: {valid_str} ({hours_remaining})")
+            lines.append(f"    Invalidate if: {stored.get('invalidate_if', [])}")
+            lines.append(f"    Prior rationale: {stored.get('rationale', '(none)')}")
+            lines.append("")
+            lines.append("  CARRY-FORWARD INSTRUCTION:")
+            lines.append("    If no invalidate_if trigger appears in new data AND value is in-band →")
+            lines.append("    set verdict=permissive_active, confirm in one sentence (no tool calls needed).")
+            lines.append("    If a trigger appears OR value is out-of-band → re-derive fully using tools.")
+
+        else:
+            # Fresh derivation path — no stored gate
+            lines.append(f"  Gate question: {proto.get('gate_question', '')}")
+            lines.append("")
+            lines.append("  Scenarios to rule in/out:")
+            for s in proto.get("scenarios", []):
+                lines.append(f"    [{s['name']}]")
+                lines.append(f"      Band:         {s['band_description']}")
+                lines.append(f"      Window:       {s['window']}")
+                lines.append(f"      Invalidate if: {s['invalidate_if']}")
+            lines.append("")
+            lines.append(f"  If no scenario applies → verdict=no_permissive_context (normal alert rules apply).")
+            lines.append(f"  If window closes/trigger fires → verdict=permissive_ended.")
+            lines.append(f"  After window: {proto.get('escalation_target_after_window', '')}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _load_stored_gates(cpmrn: str, encounter: int, problem_names: list[str], db: Any) -> dict[str, dict]:
+    """Load stored context_gate sub-documents for matched problems."""
+    gates: dict[str, dict] = {}
+    for name in problem_names:
+        doc = db["patient_problems"].find_one(
+            {"CPMRN": cpmrn, "encounter": encounter, "problem_name": name},
+            {"context_gate": 1},
+        )
+        if doc and doc.get("context_gate"):
+            gates[name] = doc["context_gate"]
+    return gates
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def track_problems(
@@ -1311,6 +1564,33 @@ def track_problems(
     except Exception:
         logger.exception("problem_tracker: fingerprint load failed for %s enc=%d", cpmrn, encounter)
         fingerprint_block = ""
+
+    # ── Context gate — load protocols + build gate prompt block ───────────────
+    # Code-side: check valid_until before model runs; flip ended gates immediately.
+    _monitoring_protocols = _load_monitoring_protocols(db)
+    _matched_protocols = _match_protocols(problems, _monitoring_protocols)
+    _stored_gates: dict[str, dict] = {}
+    if _matched_protocols:
+        _stored_gates = _load_stored_gates(cpmrn, encounter, list(_matched_protocols.keys()), db)
+        # Hard code-side check: if valid_until has passed, mark eligibility ended now
+        # so the model sees the gate as already closed and doesn't carry it forward.
+        _now_utc = datetime.now(timezone.utc)
+        for pname, gate in _stored_gates.items():
+            vu = gate.get("valid_until")
+            if isinstance(vu, datetime):
+                if vu.tzinfo is None:
+                    vu = vu.replace(tzinfo=timezone.utc)
+                if _now_utc > vu and gate.get("eligibility") == "active":
+                    gate["eligibility"] = "ended"
+                    logger.info(
+                        "problem_tracker: gate valid_until expired for '%s' %s enc=%d — eligibility ended",
+                        pname, cpmrn, encounter,
+                    )
+    try:
+        gate_block = _build_gate_block(_matched_protocols, _stored_gates, snapshot_at)
+    except Exception:
+        logger.exception("problem_tracker: gate block build failed for %s enc=%d", cpmrn, encounter)
+        gate_block = ""
 
     # Build the stored state summary for the model
     stored_names = [
@@ -1411,6 +1691,7 @@ def track_problems(
         + (f"{coexisting_block}\n\n" if coexisting_block else "")
         + (f"{prefetch_block}\n\n" if prefetch_block else "")
         + (f"{fingerprint_block}\n\n" if fingerprint_block else "")
+        + (f"{gate_block}\n\n" if gate_block else "")
         + f"Current problems from summary:\n{problem_block}\n{new_block}\n\n"
         + (f"{screener_block}\n" if screener_block else "")
         + "Review each problem. The pre-fetched context above is your primary source — "
@@ -1546,6 +1827,46 @@ def track_problems(
 
         if should_alert:
             clinical_status = assessment.get("clinical_status", "stable")
+
+            # ── Gate 0: Permissive-window suppression ─────────────────────────
+            # If the model set verdict=permissive_active, suppress regardless of
+            # other rules. This gate runs first and is the only one that can
+            # silence a permissive-window problem.
+            _gate = assessment.get("context_gate") or {}
+            _gate_verdict = _gate.get("verdict", "")
+            if _gate_verdict == "permissive_active":
+                alerts_suppressed.append(problem_name)
+                logger.info(
+                    "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                    "(permissive_active — scenario=%s)",
+                    problem_name, cpmrn, encounter, _gate.get("scenario", "?"),
+                )
+                # Write permissive-window suppression event to BigQuery
+                try:
+                    import sys as _sys
+                    from pathlib import Path as _Path
+                    _root = _Path(__file__).resolve().parents[2]
+                    for _p in [str(_root / "app"), str(_root)]:
+                        if _p not in _sys.path:
+                            _sys.path.insert(0, _p)
+                    from backend.services.bq_store import get_bq_store
+                    get_bq_store().insert_suppressed_event({
+                        "CPMRN":              cpmrn,
+                        "encounter":          encounter,
+                        "problem_name":       problem_name,
+                        "suppressed_at":      now,
+                        "suppression_reason": "permissive_window",
+                        "gate_scenario":      _gate.get("scenario", ""),
+                        "gate_valid_until":   str(_gate.get("valid_until", "")),
+                    })
+                except Exception:
+                    logger.exception(
+                        "problem_tracker: permissive suppression event write failed for '%s' %s",
+                        problem_name, cpmrn,
+                    )
+                _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                continue  # skip remaining gates for this problem
+
             if clinical_status not in ("worsening", "critical"):
                 alerts_suppressed.append(problem_name)
                 logger.info(
@@ -1553,7 +1874,9 @@ def track_problems(
                     "(status=%s — only worsening/critical may alert)",
                     problem_name, cpmrn, encounter, clinical_status,
                 )
-            elif _should_suppress_alert(cpmrn, encounter, problem_name, db):
+            elif clinical_status != "critical" and _should_suppress_alert(cpmrn, encounter, problem_name, db):
+                # Cooldown is bypassed for critical status — a 280/150 escalation
+                # must not be muffled by an earlier alert from the same run window.
                 alerts_suppressed.append(problem_name)
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d (cooldown)",

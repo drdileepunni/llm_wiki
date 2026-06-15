@@ -160,6 +160,53 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": reasoning}}],
         })
 
+    # ── Context-gate reasoning (collapsed by default) ────────────────────────
+    ctx_gate = assessment.get("context_gate") or {}
+    if ctx_gate and ctx_gate.get("verdict"):
+        verdict = ctx_gate.get("verdict", "")
+        verdict_label = {
+            "permissive_active":     "🟢 Permissive window ACTIVE — alert suppressed",
+            "permissive_breached":   "🟠 Permissive window BREACHED — alert firing",
+            "permissive_ended":      "🔴 Permissive window ENDED — normal alert rules apply",
+            "no_permissive_context": "⚪ No permissive context — normal alert rules apply",
+        }.get(verdict, verdict)
+
+        gate_lines: list[str] = [f"<b>{verdict_label}</b>"]
+
+        scenario = ctx_gate.get("scenario", "")
+        if scenario and scenario != "none":
+            gate_lines.append(f"Scenario: <i>{scenario}</i>")
+
+        band = ctx_gate.get("band_description", "")
+        if band:
+            gate_lines.append(f"Band: {band}")
+
+        valid_until = ctx_gate.get("valid_until")
+        if valid_until:
+            valid_str = _fmt_ist(
+                valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until)
+            )
+            gate_lines.append(f"Valid until: {valid_str}")
+
+        rationale = ctx_gate.get("rationale", "")
+        if rationale:
+            gate_lines.append(f"\n{rationale}")
+
+        if verdict == "permissive_active":
+            plan = ctx_gate.get("plan_if_permissive", "")
+            if plan:
+                gate_lines.append(f"\n<b>While permissive:</b> {plan}")
+        plan_end = ctx_gate.get("plan_when_ended", "")
+        if plan_end:
+            gate_lines.append(f"<b>When window closes:</b> {plan_end}")
+
+        sections.append({
+            "header": "🔓 Permissive-window reasoning",
+            "collapsible": True,
+            "uncollapsibleWidgetsCount": 0,
+            "widgets": [{"textParagraph": {"text": "\n".join(gate_lines)}}],
+        })
+
     # ── Model follow-up ───────────────────────────────────────────────────────
     if nc.get("type"):
         nc_type   = nc["type"]

@@ -187,6 +187,9 @@ class GCSCollection:
         if n == "app_settings" and "_id" in filter:
             return f"app_settings/{filter['_id']}.json"
 
+        if n == "monitoring_protocols" and "protocol_id" in filter:
+            return f"monitoring_protocols/{filter['protocol_id']}.json"
+
         # CPMRN+encounter (most operational collections)
         if "CPMRN" in filter and "encounter" in filter:
             return f"{n}/{filter['CPMRN']}_{filter['encounter']}.json"
