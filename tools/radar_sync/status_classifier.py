@@ -355,11 +355,17 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
     }
     aliases = _ATTR_ALIASES.get(search, [search])
 
-    # Na and K from ABG/VBG are unreliable point-of-care values; exclude them.
+    # Only a subset of attributes from ABG/VBG panels are clinically valid.
+    # Everything else (ionized Ca, Na, K, glucose from point-of-care gas machines)
+    # must be sourced from dedicated lab panels, not gas panels.
     # "Gas panel (BldA)" / "Gas panel (BldV)" are Radar's ABG/VBG panel names.
     _BLOOD_GAS_KEYWORDS = ("abg", "vbg", "arterial blood gas", "venous blood gas", "blood gas", "gas panel")
-    _BLOOD_GAS_THROWAWAY = {"sodium", "na", "potassium", "k"}
-    _is_throwaway_query = bool(set(aliases) & _BLOOD_GAS_THROWAWAY)
+    _BLOOD_GAS_ALLOWED = {
+        "ph", "pao2", "paco2", "bicarb", "hco3",
+        "lactic", "lactate", "be", "base excess",
+        "spo2", "fio2", "cso2",
+    }
+    _is_allowed_from_gas = bool(set(aliases) & _BLOOD_GAS_ALLOWED)
 
     seen_ts = set()
     rows = []
@@ -374,8 +380,9 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
                     continue
                 # Search panel name
                 panel_name = (doc.get("name") or "").lower()
-                # Skip Na/K from blood gas panels — not valid for clinical decisions
-                if _is_throwaway_query and any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS):
+                # For blood gas panels, only accept the allowed subset of attributes.
+                # Ionized Ca, Na, K, glucose etc. must come from dedicated lab panels.
+                if any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS) and not _is_allowed_from_gas:
                     continue
                 attrs = doc.get("attributes") or {}
                 # Look for matching attribute key
@@ -383,7 +390,16 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
                     if not isinstance(attr_val, dict):
                         continue
                     ak_lower = attr_key.lower()
-                    if any(al in ak_lower for al in aliases):
+                    # Word-start boundary prevents "ph" matching "neutrophils".
+                    # Short aliases (≤ 2 chars, e.g. "ph", "hb") also require a word-end
+                    # boundary so "ph" doesn't match "phosphate". Longer aliases only
+                    # need the start boundary (e.g. "cr" correctly prefix-matches "creatinine").
+                    def _al_matches(al: str, ak: str) -> bool:
+                        pat = (r'(?<!\w)' + re.escape(al) + r'(?!\w)'
+                               if len(al) <= 2 else
+                               r'(?<!\w)' + re.escape(al))
+                        return bool(re.search(pat, ak))
+                    if any(_al_matches(al, ak_lower) for al in aliases):
                         val = attr_val.get("value")
                         unit = attr_val.get("unit", "")
                         if val is not None:

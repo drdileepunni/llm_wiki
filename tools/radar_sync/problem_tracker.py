@@ -996,6 +996,23 @@ def _build_prefetch_block(
         except Exception:
             logger.exception("prefetch: timing context failed for %s enc=%d", cpmrn, encounter)
 
+    # 5. Linked-lab co-prefetch — fetch physiologically related labs when a problem
+    #    (e.g. lactic acidosis) requires cross-lab plausibility checking.
+    try:
+        from tools.radar_sync.linked_lab_prefetch import (
+            get_triggered_context_labs,
+            build_linked_lab_block,
+        )
+        context_labs = get_triggered_context_labs(problems)
+        if context_labs:
+            existing = "\n".join(lines)
+            linked_block = build_linked_lab_block(cpmrn, encounter, context_labs, existing)
+            if linked_block:
+                lines.append(linked_block)
+                lines.append("")
+    except Exception:
+        logger.exception("prefetch: linked-lab fetch failed for %s enc=%d", cpmrn, encounter)
+
     return "\n".join(lines)
 
 
