@@ -796,6 +796,131 @@ def _all_cited_notes_stale(assessment: dict, snapshot_at: datetime) -> bool:
     return True
 
 
+def _vital_improved_since_snapshot(
+    cpmrn: str,
+    encounter: int,
+    vital_key: str,
+    problem_name: str,
+    latest_vital_ts: datetime,
+) -> bool:
+    """
+    Fetch live vitals from Radar and return True if a newer reading arrived
+    AFTER the most recent vital in the snapshot AND it shows improvement.
+
+    Uses latest_vital_ts (the timestamp of the most recent vital reading that
+    was in the snapshot) as the cutoff — NOT snapshot_at (the GCS blob write
+    time), because the chart puller's API call happens 1-2 minutes before the
+    blob is written, so snapshot_at is too late a cutoff and misses readings
+    that were verified in that gap.
+
+    Logic:
+      - Get live vitals (newest-first, verified only).
+      - Split into: post-snapshot readings (ts > latest_vital_ts) and the
+        alerting reading (most recent ts <= latest_vital_ts, i.e. what the
+        model saw when it decided to alert).
+      - If there is at least one post-snapshot reading AND its value is better
+        than the alerting reading, return True → suppress the alert.
+
+    Direction inference:
+      - RR, Temp → "high" (lower is better)
+      - SpO2, GCS → "low" (higher is better)
+      - HR, BP, MAP → inferred from problem_name (tachy/brady, hyper/hypo); fails
+        open (returns False) if direction cannot be determined.
+
+    Always returns False on any error — fails open (alert is allowed through).
+    """
+    _FIXED_DIRECTION: dict[str, str] = {
+        "RR":          "high",
+        "TEMP":        "high",
+        "TEMPERATURE": "high",
+        "SPO2":        "low",
+        "GCS":         "low",
+    }
+    vk = vital_key.strip().upper()
+    direction = _FIXED_DIRECTION.get(vk)
+
+    if direction is None:
+        pn = problem_name.lower()
+        if vk == "HR":
+            if any(w in pn for w in ("tachycardia", "tachyarrhythmia", "fast heart", "tachypnea")):
+                direction = "high"
+            elif any(w in pn for w in ("bradycardia", "slow heart", "heart block")):
+                direction = "low"
+        elif vk in ("BP", "MAP"):
+            if any(w in pn for w in ("hypertens", "elevated bp", "high bp", "high blood pressure")):
+                direction = "high"
+            elif any(w in pn for w in ("hypotens", "low bp", "low map", "shock", "low blood pressure")):
+                direction = "low"
+
+    if direction is None:
+        return False  # ambiguous vital + problem name — fail open
+
+    try:
+        from tools.radar_sync.chart_puller import fetch_fresh_vitals
+        from tools.radar_sync.status_classifier import _VITAL_FIELD
+        import pandas as pd
+
+        field = _VITAL_FIELD.get(vk)
+        if not field:
+            return False
+
+        vitals = fetch_fresh_vitals(cpmrn, encounter)
+        if not vitals:
+            return False
+
+        cutoff = latest_vital_ts if latest_vital_ts.tzinfo else latest_vital_ts.replace(tzinfo=timezone.utc)
+
+        def _parse_val(v: dict) -> float | None:
+            raw = v.get(field)
+            if raw is None:
+                return None
+            try:
+                # BP is stored as "SBP/DBP" — use SBP for direction comparison
+                return float(str(raw).split("/")[0].strip())
+            except (ValueError, TypeError):
+                return None
+
+        def _parse_ts(v: dict):
+            try:
+                return pd.to_datetime(v.get("timestamp"), utc=True).to_pydatetime()
+            except Exception:
+                return None
+
+        # Split into post-snapshot and snapshot-era readings
+        post_snap_vals: list[float] = []
+        snap_val: float | None = None
+        for v in vitals:  # newest-first
+            ts = _parse_ts(v)
+            val = _parse_val(v)
+            if val is None or ts is None:
+                continue
+            if ts > cutoff:
+                post_snap_vals.append(val)
+            elif snap_val is None:
+                snap_val = val  # most recent reading the pipeline actually saw
+
+        if not post_snap_vals or snap_val is None:
+            return False  # no newer data, or no snapshot baseline to compare against
+
+        best_new = min(post_snap_vals) if direction == "high" else max(post_snap_vals)
+        improved = best_new < snap_val if direction == "high" else best_new > snap_val
+
+        if improved:
+            logger.info(
+                "problem_tracker: pre-send vital check for '%s' %s enc=%d — "
+                "%s improved since snapshot: alerting_val=%s new_val=%s (direction=%s)",
+                problem_name, cpmrn, encounter, vk, snap_val, best_new, direction,
+            )
+        return improved
+
+    except Exception:
+        logger.exception(
+            "problem_tracker: pre-send vital check failed for '%s' %s enc=%d — continuing",
+            problem_name, cpmrn, encounter,
+        )
+        return False
+
+
 def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: Any) -> bool:
     """Return True if we alerted recently and should hold off."""
     doc = db["patient_problems"].find_one(
@@ -2127,6 +2252,24 @@ def track_problems(
                     to_alert.append((assessment, alert_id))
                     alerts_sent.append(problem_name)
             else:
+                # ── Pre-send vital freshness check ─────────────────────────────
+                # If the alert is driven by a vital-sign next_check, fetch the
+                # latest reading live from Radar. If a newer reading arrived after
+                # the snapshot was taken AND it shows improvement, the alert is
+                # already stale — suppress and let the next hourly run decide.
+                _nc = assessment.get("next_check") or {}
+                _vk = _nc.get("vital_key", "") if _nc.get("type") == "vital" else ""
+                if _vk and _latest_vt is not None:
+                    if _vital_improved_since_snapshot(cpmrn, encounter, _vk, problem_name, _latest_vt):
+                        alerts_suppressed.append(problem_name)
+                        logger.info(
+                            "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                            "(pre-send vital check — %s improved since snapshot)",
+                            problem_name, cpmrn, encounter, _vk,
+                        )
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                        continue
+
                 alert_id   = str(_uuid4())
                 will_alert = True
                 # Inject snapshot_at so the card builder can show timestamps in IST

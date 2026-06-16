@@ -112,6 +112,27 @@ def pull_chart(cpmrn: str, encounter: int = 1) -> dict:
     return chart
 
 
+def fetch_fresh_vitals(cpmrn: str, encounter: int = 1) -> list[dict]:
+    """
+    Fetch only the verified vitals for a single patient directly from Radar.
+    Lighter than pull_chart — requests only the vitals field.
+    Used for pre-send freshness checks just before dispatching an alert.
+    Returns an empty list on any error.
+    """
+    try:
+        result = _radar_post({
+            "function": "get_patient_json",
+            "filter_using": {"CPMRN": cpmrn, "encounters": encounter},
+            "return_fields": {"vitals": 1},
+        })
+        if isinstance(result, list):
+            result = result[0] if result else {}
+        return _filter_vitals(result.get("vitals") or [])
+    except Exception:
+        logger.exception("fetch_fresh_vitals: failed for CPMRN=%s enc=%d", cpmrn, encounter)
+        return []
+
+
 def upsert_to_local(chart: dict) -> None:
     """Upsert the chart into local MongoDB patients collection."""
     import sys
