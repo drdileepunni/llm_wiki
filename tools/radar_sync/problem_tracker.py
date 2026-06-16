@@ -34,8 +34,9 @@ _TRACKER_MODEL    = "gemini-2.5-flash"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same problem
-_VITAL_STALENESS_HOURS = 8   # vitals older than this are considered stale for alert purposes
-_LAB_STALENESS_HOURS   = 24  # labs older than this are considered stale for alert purposes
+_VITAL_STALENESS_HOURS      = 8   # vitals older than this → hard block on vital alerts
+_VITAL_CARD_WARNING_HOURS   = 2   # vitals older than this → soft warning in prefetch + card marker
+_LAB_STALENESS_HOURS        = 24  # labs older than this are considered stale for alert purposes
 
 _NEXT_CHECK_HOURS = {"vital": 1, "io": 1}   # lab handled per-key below
 # Labs that turn around clinically fast — recheck sooner
@@ -1251,8 +1252,9 @@ def _build_prefetch_block(
         except Exception:
             logger.exception("prefetch: timing context failed for %s enc=%d", cpmrn, encounter)
 
-    # 4b. Vital staleness warning — if the most recent vital is >8h before snapshot_at,
-    #     inject an explicit warning so the model does not alert on vital-sign problems.
+    # 4b. Vital staleness warning — graded by age:
+    #   >2h  → soft advisory: be cautious, more recent unverified readings may exist
+    #   >8h  → hard warning: do NOT alert on vital-sign-based problems
     if snapshot_at is not None:
         try:
             from tools.radar_sync.status_classifier import _get_latest_vital_ts
@@ -1273,6 +1275,21 @@ def _build_prefetch_block(
                     lines.append("")
                     logger.info(
                         "prefetch: vital staleness warning injected for %s enc=%d (%.1fh old)",
+                        cpmrn, encounter, vital_age_h,
+                    )
+                elif vital_age_h > _VITAL_CARD_WARNING_HOURS:
+                    age_str = f"{vital_age_h:.1f}h"
+                    lines.append(
+                        f"⚠ VITAL DATA ADVISORY: Most recent verified vital is "
+                        f"{latest_vt.strftime('%Y-%m-%d %H:%M UTC')} — {age_str} before this "
+                        f"snapshot. The bedside monitor may have more recent readings that have "
+                        f"not yet been verified in the system. Be cautious about alerting on "
+                        f"vital-sign trends: if the only concerning reading is old (>{_VITAL_CARD_WARNING_HOURS}h) "
+                        f"and more recent readings are missing, the situation may have already resolved."
+                    )
+                    lines.append("")
+                    logger.info(
+                        "prefetch: vital advisory injected for %s enc=%d (%.1fh old)",
                         cpmrn, encounter, vital_age_h,
                     )
         except Exception:
@@ -1810,6 +1827,7 @@ def track_problems(
     # Pre-compute vital staleness once for the whole batch.
     # Used by the hard suppression gate below — avoids a DB call per problem.
     _vital_is_stale = False
+    _latest_vt = None
     try:
         from tools.radar_sync.status_classifier import _get_latest_vital_ts
         _latest_vt = _get_latest_vital_ts(cpmrn, encounter)
@@ -1916,6 +1934,9 @@ def track_problems(
                     alert_id   = str(_uuid4())
                     will_alert = True
                     assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
+                    if _latest_vt is not None and snapshot_at is not None:
+                        _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+                        assessment["_vital_age_hours"] = round((_snap - _latest_vt).total_seconds() / 3600, 1)
                     to_alert.append((assessment, alert_id))
                     alerts_sent.append(problem_name)
             else:
@@ -1923,6 +1944,9 @@ def track_problems(
                 will_alert = True
                 # Inject snapshot_at so the card builder can show timestamps in IST
                 assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
+                if _latest_vt is not None and snapshot_at is not None:
+                    _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
+                    assessment["_vital_age_hours"] = round((_snap - _latest_vt).total_seconds() / 3600, 1)
                 to_alert.append((assessment, alert_id))
                 alerts_sent.append(problem_name)
 

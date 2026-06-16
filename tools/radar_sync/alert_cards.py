@@ -75,6 +75,7 @@ def build_alert_card(
     note_vs_objective   = assessment.get("note_vs_objective", "")
     snapshot_ts         = _fmt_ist(assessment.get("_snapshot_at"))
     nc                  = assessment.get("next_check") or {}
+    vital_age_hours     = assessment.get("_vital_age_hours")  # float or None
 
     sections: list[dict] = []
 
@@ -131,6 +132,23 @@ def build_alert_card(
         sections.append({
             "header": "Why alerting",
             "widgets": [{"textParagraph": {"text": alert_reason}}],
+        })
+
+    # ── Vital data staleness warning ─────────────────────────────────────────
+    _VITAL_CARD_WARN_H = 2
+    if vital_age_hours is not None and vital_age_hours > _VITAL_CARD_WARN_H:
+        age_label = f"{vital_age_hours:.0f}h" if vital_age_hours >= 1 else f"{int(vital_age_hours * 60)}min"
+        sections.append({
+            "header": "⚠ Vital data may be outdated",
+            "widgets": [{"decoratedText": {
+                "startIcon": {"materialIcon": {"name": "history"}},
+                "text": (
+                    f"The most recent <b>verified</b> vital in our system is <b>{age_label} old</b>. "
+                    f"More recent bedside readings may exist but are not yet verified in Radar. "
+                    f"Please confirm current vitals at bedside before acting on this alert."
+                ),
+                "wrapText": True,
+            }}],
         })
 
     # ── Note vs. objective discordance ───────────────────────────────────────
