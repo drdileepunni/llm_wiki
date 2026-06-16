@@ -83,6 +83,22 @@ _KEYWORD_BUFFER_H: list[tuple[str, int]] = [
     ("vasopressin",   1),
 ]
 
+# ── Problem subsumption ontology ──────────────────────────────────────────────
+# Parent → list of child problem name substrings it absorbs.
+# All strings are lowercase for case-insensitive matching.
+# When both parent and child would fire alerts for the same patient,
+# the child is suppressed (post-hoc safety net — prompt rule is the primary path).
+_PROBLEM_SUBSUMES: dict[str, list[str]] = {
+    "septic shock":              ["refractory hypotension", "vasopressor dependency", "vasoplegia", "low map"],
+    "refractory septic shock":   ["refractory hypotension", "vasopressor dependency", "vasoplegia", "low map"],
+    "ards":                      ["hypoxemia", "refractory hypoxemia", "desaturation", "low spo2"],
+    "acute respiratory failure": ["hypoxemia", "refractory hypoxemia", "desaturation"],
+    "acute kidney injury":       ["oliguria", "anuria", "rising creatinine", "elevated creatinine"],
+    "fluid overload":            ["pulmonary oedema", "pulmonary edema", "pleural effusion"],
+    "diabetic ketoacidosis":     ["hyperglycemia", "metabolic acidosis"],
+    "hepatic encephalopathy":    ["altered sensorium", "confusion"],
+}
+
 _SYSTEM = """You are a senior ICU clinician reviewing the current problem list for a patient.
 
 You will receive:
@@ -333,7 +349,24 @@ When a problem is marked secondary (has a cause), apply this reasoning:
     • A rapid step-change worsening (e.g. creatinine rises >50% from last snapshot)
     • A value in a life-threatening range (K+ ≥ 6.0, pH < 7.20, bicarb < 12)
     • A clinical sign requiring independent intervention (RRT indication, dialysis)
-- If the primary driver is NOT being_addressed, assess the secondary problem normally."""
+- If the primary driver is NOT being_addressed, assess the secondary problem normally.
+
+PROBLEM CONSOLIDATION — before finalising your assessment list, check each pair of
+alerting problems for clinical redundancy:
+  • If two problems are synonymous (different names for the same condition), keep the
+    more specific / more severe one and suppress the other (should_alert=False).
+  • If one problem is a direct physiological criterion or consequence of another,
+    do NOT alert them separately. Merge the subsidiary finding's key data into the
+    primary problem's alert_reason, and set should_alert=False for the subsidiary.
+  Common examples (not exhaustive):
+    • Refractory Hypotension + Refractory Septic Shock → alert only Septic Shock;
+      include MAP/vasopressor data in the Septic Shock alert_reason
+    • Oliguria + AKI → alert only AKI; include urine output numbers in AKI alert_reason
+    • Hypoxemia + ARDS → alert only ARDS
+    • Pulmonary Oedema + Fluid Overload → alert only Fluid Overload
+    • Vasopressor Dependency + Septic Shock → alert only Septic Shock
+  Rule: if problem B would not exist as an independent clinical concern without
+  problem A, do not fire two separate alerts."""
 
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -1518,6 +1551,46 @@ def _load_stored_gates(cpmrn: str, encounter: int, problem_names: list[str], db:
     return gates
 
 
+# ── Post-hoc alert deduplication ─────────────────────────────────────────────
+
+def _suppress_redundant_alerts(to_alert: list[tuple[dict, str]]) -> list[tuple[dict, str]]:
+    """
+    Safety-net deduplication after the model returns assessments.
+    If a child problem (per _PROBLEM_SUBSUMES) appears in to_alert alongside
+    its parent, the child is removed. The prompt-level PROBLEM CONSOLIDATION
+    rule handles the common case; this catches misses.
+    """
+    if len(to_alert) < 2:
+        return to_alert
+
+    alerting_names_lc = [a.get("problem_name", "").lower() for a, _ in to_alert]
+    to_remove: set[str] = set()
+
+    for parent_pattern, children in _PROBLEM_SUBSUMES.items():
+        # Check if any alerting problem matches this parent (substring either way)
+        matched_parent_lc = next(
+            (n for n in alerting_names_lc if parent_pattern in n or n in parent_pattern),
+            None,
+        )
+        if matched_parent_lc is None:
+            continue
+        for child_pattern in children:
+            for n in alerting_names_lc:
+                if n == matched_parent_lc:
+                    continue
+                if child_pattern in n or n in child_pattern:
+                    to_remove.add(n)
+                    logger.info(
+                        "_suppress_redundant_alerts: suppressing '%s' (absorbed by '%s')",
+                        n, matched_parent_lc,
+                    )
+
+    if not to_remove:
+        return to_alert
+
+    return [(a, aid) for a, aid in to_alert if a.get("problem_name", "").lower() not in to_remove]
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def track_problems(
@@ -1978,7 +2051,8 @@ def track_problems(
             except Exception:
                 logger.exception("problem_tracker: study_suppressed_events write failed for '%s' %s", problem_name, cpmrn)
 
-    # Phase 2 — send one batched message for all alerting problems.
+    # Phase 2 — deduplicate and send one batched message for all alerting problems.
+    to_alert = _suppress_redundant_alerts(to_alert)
     if to_alert:
         try:
             from tools.radar_sync.chat_card_sender import (

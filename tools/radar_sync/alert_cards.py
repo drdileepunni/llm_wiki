@@ -46,53 +46,42 @@ _FAST_LAB_KEYS_CARD = {
     "potassium", "k",
     "lactate", "lactic",
 }
+_VITAL_CARD_WARN_H = 2
 
 
 def _lab_followup_label(lab_key: str) -> str:
     return "6 hours" if lab_key.lower() in _FAST_LAB_KEYS_CARD else "12 hours"
 
 
-def build_alert_card(
+def _build_problem_body_sections(
     cpmrn: str,
     encounter: int,
     assessment: dict,
-    structured_summary: dict,
+    all_problems: list[dict],
     alert_id: str,
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
-) -> list:
+    *,
+    rating_label: str = RATING_SECTION_HEADER,
+    include_open_patient: bool = True,
+) -> list[dict]:
     """
-    Build the cardsV2 payload for a single problem alert.
-    Mirrors the sections of gchat_notifier._format_problem_payload.
-    Returns the cardsV2 list (to be sent via chat-microservice /send-cards).
+    Build the content sections for one alerting problem.
+    Does NOT include the patient-overview (chips) section — that's shared.
+    Used by both build_alert_card (single) and build_batched_alert_card (multi).
     """
-    problem_name    = assessment.get("problem_name", "Unknown")
-    clinical_status = assessment.get("clinical_status", "worsening")
-    alert_reason    = assessment.get("alert_reason", "")
-    emoji           = _STATUS_EMOJI.get(clinical_status, "⚠️")
-    alert_title         = assessment.get("alert_title") or problem_name
-    note_vs_objective   = assessment.get("note_vs_objective", "")
-    snapshot_ts         = _fmt_ist(assessment.get("_snapshot_at"))
-    nc                  = assessment.get("next_check") or {}
-    vital_age_hours     = assessment.get("_vital_age_hours")  # float or None
+    problem_name      = assessment.get("problem_name", "Unknown")
+    clinical_status   = assessment.get("clinical_status", "worsening")
+    alert_reason      = assessment.get("alert_reason", "")
+    note_vs_objective = assessment.get("note_vs_objective", "")
+    snapshot_ts       = _fmt_ist(assessment.get("_snapshot_at"))
+    nc                = assessment.get("next_check") or {}
+    vital_age_hours   = assessment.get("_vital_age_hours")
 
     sections: list[dict] = []
 
-    # ── Patient overview: all problems as chips ──────────────────────────────
-    all_problems: list[dict] = structured_summary.get("problems", [])
-    if all_problems:
-        chips = []
-        for p in all_problems:
-            name   = p.get("name", "?")
-            arrow  = _STATUS_ARROW.get(p.get("status", "stable"), "→")
-            chips.append({"label": f"{name} {arrow}"})
-        sections.append({
-            "header": "Patient problems",
-            "widgets": [{"chipList": {"chips": chips}}],
-        })
-
-    # ── Observed (model narrative for this problem) ───────────────────────────
+    # ── Observed ──────────────────────────────────────────────────────────────
     current_state = ""
     for p in all_problems:
         if p.get("name") == problem_name:
@@ -109,7 +98,7 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": observed_text}}],
         })
 
-    # ── Objective data — auto-fetched readings for the next_check item ────────
+    # ── Objective data ────────────────────────────────────────────────────────
     nc_data_what = nc.get("key") or nc.get("what", "")
     nc_type = nc.get("type", "")
     if nc_data_what and nc_type:
@@ -134,8 +123,7 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": alert_reason}}],
         })
 
-    # ── Vital data staleness warning ─────────────────────────────────────────
-    _VITAL_CARD_WARN_H = 2
+    # ── Vital data staleness warning ──────────────────────────────────────────
     if vital_age_hours is not None and vital_age_hours > _VITAL_CARD_WARN_H:
         age_label = f"{vital_age_hours:.0f}h" if vital_age_hours >= 1 else f"{int(vital_age_hours * 60)}min"
         sections.append({
@@ -151,7 +139,7 @@ def build_alert_card(
             }}],
         })
 
-    # ── Note vs. objective discordance ───────────────────────────────────────
+    # ── Note vs. objective discordance ────────────────────────────────────────
     if note_vs_objective:
         sections.append({
             "header": "⚠ Note vs. objective",
@@ -162,7 +150,7 @@ def build_alert_card(
             }}],
         })
 
-    # ── Model reasoning (collapsed by default) ────────────────────────────────
+    # ── Model reasoning (collapsed) ───────────────────────────────────────────
     fp = assessment.get("reasoning_fingerprint")
     if isinstance(fp, dict):
         reasoning = fp.get("reasoning_chain", "")
@@ -178,7 +166,7 @@ def build_alert_card(
             "widgets": [{"textParagraph": {"text": reasoning}}],
         })
 
-    # ── Context-gate reasoning (collapsed by default) ────────────────────────
+    # ── Context-gate reasoning (collapsed) ───────────────────────────────────
     ctx_gate = assessment.get("context_gate") or {}
     if ctx_gate and ctx_gate.get("verdict"):
         verdict = ctx_gate.get("verdict", "")
@@ -190,26 +178,21 @@ def build_alert_card(
         }.get(verdict, verdict)
 
         gate_lines: list[str] = [f"<b>{verdict_label}</b>"]
-
         scenario = ctx_gate.get("scenario", "")
         if scenario and scenario != "none":
             gate_lines.append(f"Scenario: <i>{scenario}</i>")
-
         band = ctx_gate.get("band_description", "")
         if band:
             gate_lines.append(f"Band: {band}")
-
         valid_until = ctx_gate.get("valid_until")
         if valid_until:
             valid_str = _fmt_ist(
                 valid_until.isoformat() if hasattr(valid_until, "isoformat") else str(valid_until)
             )
             gate_lines.append(f"Valid until: {valid_str}")
-
         rationale = ctx_gate.get("rationale", "")
         if rationale:
             gate_lines.append(f"\n{rationale}")
-
         if verdict == "permissive_active":
             plan = ctx_gate.get("plan_if_permissive", "")
             if plan:
@@ -227,12 +210,12 @@ def build_alert_card(
 
     # ── Model follow-up ───────────────────────────────────────────────────────
     if nc.get("type"):
-        nc_type   = nc["type"]
-        nc_what   = nc.get("label") or nc.get("vital_key") or nc.get("lab_name") or nc.get("key") or nc_type
-        if nc_type == "lab":
+        nc_type_fu = nc["type"]
+        nc_what = nc.get("label") or nc.get("vital_key") or nc.get("lab_name") or nc.get("key") or nc_type_fu
+        if nc_type_fu == "lab":
             nc_window = _lab_followup_label(nc.get("lab_name") or nc.get("key") or "")
         else:
-            nc_window = _FOLLOWUP_WINDOW_VITAL_IO.get(nc_type, "next run")
+            nc_window = _FOLLOWUP_WINDOW_VITAL_IO.get(nc_type_fu, "next run")
         sections.append({
             "header": "Model follow-up",
             "widgets": [{"decoratedText": {
@@ -243,18 +226,41 @@ def build_alert_card(
         })
 
     # ── Rating form ───────────────────────────────────────────────────────────
+    rating_buttons = [
+        {
+            "text": "Submit feedback",
+            "type": "FILLED",
+            "icon": {"materialIcon": {"name": "send"}},
+            "onClick": {"action": {
+                "function": gchat_webhook_url,
+                "parameters": [
+                    {"key": "action",       "value": "alert_rating_submit"},
+                    {"key": "action_id",    "value": alert_id},
+                    {"key": "callback_url", "value": callback_url},
+                    {"key": "cb_token",     "value": cb_token},
+                ],
+            }},
+        },
+    ]
+    if include_open_patient:
+        rating_buttons.append({
+            "text": "Open patient",
+            "icon": {"materialIcon": {"name": "open_in_new"}},
+            "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
+        })
+
     sections.append({
-        "header": RATING_SECTION_HEADER,
+        "header": rating_label,
         "widgets": [
             {"selectionInput": {
                 "name": "rating",
                 "label": "How appropriate is this alert?",
                 "type": "RADIO_BUTTON",
                 "items": [
-                    {"text": "⭐ 1 — Not appropriate at all", "value": "1"},
-                    {"text": "⭐⭐ 2 — Mostly inappropriate", "value": "2"},
-                    {"text": "⭐⭐⭐ 3 — Borderline", "value": "3"},
-                    {"text": "⭐⭐⭐⭐ 4 — Mostly appropriate", "value": "4"},
+                    {"text": "⭐ 1 — Not appropriate at all",  "value": "1"},
+                    {"text": "⭐⭐ 2 — Mostly inappropriate",   "value": "2"},
+                    {"text": "⭐⭐⭐ 3 — Borderline",            "value": "3"},
+                    {"text": "⭐⭐⭐⭐ 4 — Mostly appropriate",  "value": "4"},
                     {"text": "⭐⭐⭐⭐⭐ 5 — Fully appropriate", "value": "5"},
                 ],
             }},
@@ -263,29 +269,51 @@ def build_alert_card(
                 "label": "Optional note about your rating",
                 "type": "MULTIPLE_LINE",
             }},
-            {"buttonList": {"buttons": [
-                {
-                    "text": "Submit feedback",
-                    "type": "FILLED",
-                    "icon": {"materialIcon": {"name": "send"}},
-                    "onClick": {"action": {
-                        "function": gchat_webhook_url,
-                        "parameters": [
-                            {"key": "action", "value": "alert_rating_submit"},
-                            {"key": "action_id", "value": alert_id},
-                            {"key": "callback_url", "value": callback_url},
-                            {"key": "cb_token", "value": cb_token},
-                        ],
-                    }},
-                },
-                {
-                    "text": "Open patient",
-                    "icon": {"materialIcon": {"name": "open_in_new"}},
-                    "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
-                },
-            ]}},
+            {"buttonList": {"buttons": rating_buttons}},
         ],
     })
+
+    return sections
+
+
+def build_alert_card(
+    cpmrn: str,
+    encounter: int,
+    assessment: dict,
+    structured_summary: dict,
+    alert_id: str,
+    gchat_webhook_url: str,
+    callback_url: str,
+    cb_token: str,
+) -> list:
+    """
+    Build the cardsV2 payload for a single problem alert.
+    Returns the cardsV2 list (one card).
+    """
+    clinical_status = assessment.get("clinical_status", "worsening")
+    emoji           = _STATUS_EMOJI.get(clinical_status, "⚠️")
+    alert_title     = assessment.get("alert_title") or assessment.get("problem_name", "Unknown")
+
+    all_problems: list[dict] = structured_summary.get("problems", [])
+    sections: list[dict] = []
+
+    # Patient overview chips
+    if all_problems:
+        chips = [
+            {"label": f"{p.get('name', '?')} {_STATUS_ARROW.get(p.get('status', 'stable'), '→')}"}
+            for p in all_problems
+        ]
+        sections.append({
+            "header": "Patient problems",
+            "widgets": [{"chipList": {"chips": chips}}],
+        })
+
+    # All problem-specific content (includes "Open patient" in rating)
+    sections.extend(_build_problem_body_sections(
+        cpmrn, encounter, assessment, all_problems, alert_id,
+        gchat_webhook_url, callback_url, cb_token,
+        include_open_patient=True,
+    ))
 
     return [{
         "cardId": f"cds-alert-{alert_id}",
@@ -301,16 +329,101 @@ def build_alert_card(
     }]
 
 
+def build_batched_alert_card(
+    cpmrn: str,
+    encounter: int,
+    alerts: list[tuple[dict, str]],
+    structured_summary: dict,
+    gchat_webhook_url: str,
+    callback_url: str,
+    cb_token: str,
+) -> list:
+    """
+    Build ONE combined cardsV2 card for multiple alerting problems on the same patient.
+    Shared header + patient problems shown once; each problem gets its own labelled
+    section group with an individual rating form.
+    """
+    all_problems: list[dict] = structured_summary.get("problems", [])
+
+    # Determine worst status for the combined card header
+    statuses = [a.get("clinical_status", "worsening") for a, _ in alerts]
+    if "critical" in statuses:
+        header_emoji = "🔴"
+    else:
+        header_emoji = "🟠"
+    n = len(alerts)
+    header_title = f"{header_emoji} {n} Alert{'s' if n > 1 else ''}"
+
+    sections: list[dict] = []
+
+    # ── Shared patient overview with "Open patient" button ────────────────────
+    shared_widgets: list[dict] = []
+    if all_problems:
+        chips = [
+            {"label": f"{p.get('name', '?')} {_STATUS_ARROW.get(p.get('status', 'stable'), '→')}"}
+            for p in all_problems
+        ]
+        shared_widgets.append({"chipList": {"chips": chips}})
+    shared_widgets.append({"buttonList": {"buttons": [{
+        "text": "Open patient",
+        "icon": {"materialIcon": {"name": "open_in_new"}},
+        "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
+    }]}})
+    sections.append({"header": "Patient problems", "widgets": shared_widgets})
+
+    # ── Per-problem sections ──────────────────────────────────────────────────
+    for i, (assessment, alert_id) in enumerate(alerts):
+        problem_name    = assessment.get("problem_name", "Unknown")
+        clinical_status = assessment.get("clinical_status", "worsening")
+        emoji           = _STATUS_EMOJI.get(clinical_status, "⚠️")
+        alert_title     = assessment.get("alert_title") or problem_name
+
+        # Section header acts as the problem title within the combined card.
+        # hasDivider=True draws a line above (except for the first problem).
+        problem_header_section: dict = {
+            "header": f"{emoji} {alert_title}",
+            "widgets": [],          # content comes in subsequent sections
+        }
+        if i > 0:
+            problem_header_section["hasDivider"] = True
+        sections.append(problem_header_section)
+
+        # Problem body (no "Open patient" — already in shared section)
+        body_sections = _build_problem_body_sections(
+            cpmrn, encounter, assessment, all_problems, alert_id,
+            gchat_webhook_url, callback_url, cb_token,
+            rating_label=f"Rate: {problem_name}",
+            include_open_patient=False,
+        )
+        sections.extend(body_sections)
+
+    first_alert_id = alerts[0][1]
+    return [{
+        "cardId": f"cds-batch-{first_alert_id}",
+        "card": {
+            "header": {
+                "title": header_title,
+                "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
+                "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/clinical_notes/default/48px.svg",
+                "imageType": "CIRCLE",
+            },
+            "sections": sections,
+        },
+    }]
+
+
 def replace_rating_section_with_status(cards_v2: list, status_text: str) -> list:
     """
-    Return a copy of cardsV2 with the rating form replaced by a status line,
+    Return a copy of cardsV2 with every rating form replaced by a status line,
     so the card updates in place and can't be voted on twice.
+    Handles both single cards and batched cards (multiple rating sections).
     """
     updated = copy.deepcopy(cards_v2)
     for card_wrapper in updated:
         sections = card_wrapper.get("card", {}).get("sections", [])
         for i, section in enumerate(sections):
-            if section.get("header") == RATING_SECTION_HEADER:
+            hdr = section.get("header", "")
+            if hdr == RATING_SECTION_HEADER or hdr.startswith("Rate:"):
                 sections[i] = {
                     "widgets": [
                         {"divider": {}},

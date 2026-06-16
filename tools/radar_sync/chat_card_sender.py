@@ -18,7 +18,7 @@ from typing import Any
 
 import requests
 
-from tools.radar_sync.alert_cards import build_alert_card
+from tools.radar_sync.alert_cards import build_alert_card, build_batched_alert_card
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +45,36 @@ def _build_cards_v2(
     cds_url: str,
     cb_token: str,
 ) -> list:
-    """Concatenate cardsV2 payloads for all alerting assessments into one list."""
-    all_cards: list = []
-    for assessment, alert_id in alerts:
-        cards = build_alert_card(
+    """
+    Build cardsV2 payload.
+    Multiple alerts → one combined card (shared header + per-problem sections).
+    Single alert   → one standard per-problem card.
+    """
+    gchat_webhook_url = f"{service_url}/webhook"
+    callback_url      = f"{cds_url}/alert-feedback"
+
+    if len(alerts) > 1:
+        return build_batched_alert_card(
             cpmrn=cpmrn,
             encounter=encounter,
-            assessment=assessment,
+            alerts=alerts,
             structured_summary=structured_summary,
-            alert_id=alert_id,
-            gchat_webhook_url=f"{service_url}/webhook",
-            callback_url=f"{cds_url}/alert-feedback",
+            gchat_webhook_url=gchat_webhook_url,
+            callback_url=callback_url,
             cb_token=cb_token,
         )
-        all_cards.extend(cards)
-    return all_cards
+
+    assessment, alert_id = alerts[0]
+    return build_alert_card(
+        cpmrn=cpmrn,
+        encounter=encounter,
+        assessment=assessment,
+        structured_summary=structured_summary,
+        alert_id=alert_id,
+        gchat_webhook_url=gchat_webhook_url,
+        callback_url=callback_url,
+        cb_token=cb_token,
+    )
 
 
 def send_batch_alert_cards(
