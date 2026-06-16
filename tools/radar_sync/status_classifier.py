@@ -214,31 +214,28 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
         return f"Unknown vital '{vital_name}'. Use one of: HR, BP, MAP, SpO2, RR, FiO2, Temp, GCS"
 
     db = get_db()
-    snaps = db.snapshots.find(
+    snap = db.snapshots.find_one(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.vitals": 1, "snapshot_at": 1},
+        sort=[("snapshot_at", -1)],
     )
-    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[: n * 3]
+    vitals = (snap.get("chart") or {}).get("vitals") or [] if snap else []
 
     seen_ts = set()
     rows = []
     empty_count = 0
-    for snap in snaps:
-        vitals = (snap.get("chart") or {}).get("vitals") or []
-        for v in vitals[:3]:  # newest readings in each snapshot
-            ts_raw = v.get("timestamp")
-            val = v.get(field)
-            if val is None or ts_raw in seen_ts:
-                continue
-            seen_ts.add(ts_raw)
-            # Skip placeholder readings where the monitor recorded no value
-            val_str = str(val).strip()
-            if val_str in ("", "/", "-", "null", "None"):
-                empty_count += 1
-                continue
-            rows.append((ts_raw, val))
-            if len(rows) >= n:
-                break
+    for v in vitals:
+        ts_raw = v.get("timestamp")
+        val = v.get(field)
+        if val is None or ts_raw in seen_ts:
+            continue
+        seen_ts.add(ts_raw)
+        # Skip placeholder readings where the monitor recorded no value
+        val_str = str(val).strip()
+        if val_str in ("", "/", "-", "null", "None"):
+            empty_count += 1
+            continue
+        rows.append((ts_raw, val))
         if len(rows) >= n:
             break
 
@@ -249,27 +246,25 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
     if is_map:
         bp_field = _VITAL_FIELD["BP"]
         derived_rows: list[tuple] = []
-        for snap in snaps:
-            vitals = (snap.get("chart") or {}).get("vitals") or []
-            for v in vitals[:3]:
-                ts_raw = v.get("timestamp")
-                if ts_raw in seen_ts:
-                    continue  # already have a real MAP value for this timestamp
-                bp_val = v.get(bp_field)
-                if not bp_val:
-                    continue
-                bp_str = str(bp_val).strip()
-                if "/" not in bp_str:
-                    continue
-                try:
-                    sbp_s, dbp_s = bp_str.split("/", 1)
-                    sbp, dbp = float(sbp_s.strip()), float(dbp_s.strip())
-                    est_map = round((sbp + 2 * dbp) / 3, 1)
-                    seen_ts.add(ts_raw)
-                    derived_rows.append((ts_raw, est_map))
-                    derived_bp[ts_raw] = bp_str
-                except (ValueError, TypeError):
-                    continue
+        for v in vitals:
+            ts_raw = v.get("timestamp")
+            if ts_raw in seen_ts:
+                continue  # already have a real MAP value for this timestamp
+            bp_val = v.get(bp_field)
+            if not bp_val:
+                continue
+            bp_str = str(bp_val).strip()
+            if "/" not in bp_str:
+                continue
+            try:
+                sbp_s, dbp_s = bp_str.split("/", 1)
+                sbp, dbp = float(sbp_s.strip()), float(dbp_s.strip())
+                est_map = round((sbp + 2 * dbp) / 3, 1)
+                seen_ts.add(ts_raw)
+                derived_rows.append((ts_raw, est_map))
+                derived_bp[ts_raw] = bp_str
+            except (ValueError, TypeError):
+                continue
         if derived_rows:
             # Merge with stored MAP rows, sort newest-first, cap at n
             combined = rows + derived_rows
@@ -289,31 +284,27 @@ def _get_vital_trend(cpmrn: str, encounter: int, vital_name: str, n: int = 8) ->
     fio2_by_ts: dict = {}
     if is_spo2:
         fio2_field = _VITAL_FIELD["FIO2"]
-        for snap in snaps:
-            vitals = (snap.get("chart") or {}).get("vitals") or []
-            for v in vitals[:3]:
-                ts_raw_f = v.get("timestamp")
-                fio2_val = v.get(fio2_field)
-                if ts_raw_f and fio2_val is not None:
-                    try:
-                        fio2_by_ts[ts_raw_f] = float(fio2_val)
-                    except (TypeError, ValueError):
-                        pass
+        for v in vitals:
+            ts_raw_f = v.get("timestamp")
+            fio2_val = v.get(fio2_field)
+            if ts_raw_f and fio2_val is not None:
+                try:
+                    fio2_by_ts[ts_raw_f] = float(fio2_val)
+                except (TypeError, ValueError):
+                    pass
 
     is_gcs = vital_name.strip().upper() == "GCS"
     # Pre-collect GCS sub-components per timestamp for formatted output.
     gcs_components: dict = {}
     if is_gcs:
-        for snap in snaps:
-            vitals = (snap.get("chart") or {}).get("vitals") or []
-            for v in vitals[:3]:
-                ts_raw_g = v.get("timestamp")
-                if ts_raw_g and ts_raw_g not in gcs_components:
-                    eye    = v.get("daysGCSeyes")
-                    verbal = v.get("daysGCSverbal")
-                    motor  = v.get("daysGCSmotor")
-                    if eye is not None or verbal is not None or motor is not None:
-                        gcs_components[ts_raw_g] = (eye, verbal, motor)
+        for v in vitals:
+            ts_raw_g = v.get("timestamp")
+            if ts_raw_g and ts_raw_g not in gcs_components:
+                eye    = v.get("daysGCSeyes")
+                verbal = v.get("daysGCSverbal")
+                motor  = v.get("daysGCSmotor")
+                if eye is not None or verbal is not None or motor is not None:
+                    gcs_components[ts_raw_g] = (eye, verbal, motor)
 
     lines = [f"SpO2 + FiO2 trend (newest first):" if is_spo2 else f"{vital_name} trend (newest first):"]
     for ts_raw, val in rows:
@@ -357,11 +348,11 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
 
     n = min(max(n, 1), 12)
     db = get_db()
-    snaps = db.snapshots.find(
+    snap = db.snapshots.find_one(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.documents": 1, "snapshot_at": 1},
+        sort=[("snapshot_at", -1)],
     )
-    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[: n * 4]
 
     search = lab_name.lower()
     # Lab attribute aliases for common short names
@@ -397,43 +388,40 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
 
     seen_ts = set()
     rows = []
-    for snap in snaps:
-        docs = [(snap.get("chart") or {}).get("documents") or []]
-        for doc_list in docs:
-            for doc in doc_list:
-                if doc.get("category") != "labs":
-                    continue
-                ts_raw = doc.get("reportedAt")
-                if ts_raw in seen_ts:
-                    continue
-                # Search panel name
-                panel_name = (doc.get("name") or "").lower()
-                # For blood gas panels, only accept the allowed subset of attributes.
-                # Ionized Ca, Na, K, glucose etc. must come from dedicated lab panels.
-                if any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS) and not _is_allowed_from_gas:
-                    continue
-                attrs = doc.get("attributes") or {}
-                # Look for matching attribute key
-                for attr_key, attr_val in attrs.items():
-                    if not isinstance(attr_val, dict):
-                        continue
-                    ak_lower = attr_key.lower()
-                    # Word-start boundary prevents "ph" matching "neutrophils".
-                    # Short aliases (≤ 2 chars, e.g. "ph", "hb") also require a word-end
-                    # boundary so "ph" doesn't match "phosphate". Longer aliases only
-                    # need the start boundary (e.g. "cr" correctly prefix-matches "creatinine").
-                    def _al_matches(al: str, ak: str) -> bool:
-                        pat = (r'(?<!\w)' + re.escape(al) + r'(?!\w)'
-                               if len(al) <= 2 else
-                               r'(?<!\w)' + re.escape(al))
-                        return bool(re.search(pat, ak))
-                    if any(_al_matches(al, ak_lower) for al in aliases):
-                        val = attr_val.get("value")
-                        unit = attr_val.get("unit", "")
-                        if val is not None:
-                            seen_ts.add(ts_raw)
-                            rows.append((ts_raw, attr_key, val, unit))
-                            break
+    for doc in (snap.get("chart") or {}).get("documents") or [] if snap else []:
+        if doc.get("category") != "labs":
+            continue
+        ts_raw = doc.get("reportedAt")
+        if ts_raw in seen_ts:
+            continue
+        # Search panel name
+        panel_name = (doc.get("name") or "").lower()
+        # For blood gas panels, only accept the allowed subset of attributes.
+        # Ionized Ca, Na, K, glucose etc. must come from dedicated lab panels.
+        if any(bg in panel_name for bg in _BLOOD_GAS_KEYWORDS) and not _is_allowed_from_gas:
+            continue
+        attrs = doc.get("attributes") or {}
+        # Look for matching attribute key
+        for attr_key, attr_val in attrs.items():
+            if not isinstance(attr_val, dict):
+                continue
+            ak_lower = attr_key.lower()
+            # Word-start boundary prevents "ph" matching "neutrophils".
+            # Short aliases (≤ 2 chars, e.g. "ph", "hb") also require a word-end
+            # boundary so "ph" doesn't match "phosphate". Longer aliases only
+            # need the start boundary (e.g. "cr" correctly prefix-matches "creatinine").
+            def _al_matches(al: str, ak: str) -> bool:
+                pat = (r'(?<!\w)' + re.escape(al) + r'(?!\w)'
+                       if len(al) <= 2 else
+                       r'(?<!\w)' + re.escape(al))
+                return bool(re.search(pat, ak))
+            if any(_al_matches(al, ak_lower) for al in aliases):
+                val = attr_val.get("value")
+                unit = attr_val.get("unit", "")
+                if val is not None:
+                    seen_ts.add(ts_raw)
+                    rows.append((ts_raw, attr_key, val, unit))
+                    break
 
     if not rows:
         return f"No '{lab_name}' values found in stored snapshots."
@@ -471,36 +459,79 @@ def _get_latest_vital_ts(cpmrn: str, encounter: int):
     import pandas as pd
 
     db = get_db()
-    snaps = db.snapshots.find(
+    snap = db.snapshots.find_one(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.vitals": 1, "snapshot_at": 1},
+        sort=[("snapshot_at", -1)],
     )
-    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[:5]
+    if not snap:
+        return None
 
     latest_ts = None
-    for snap in snaps:
-        vitals = (snap.get("chart") or {}).get("vitals") or []
-        for v in vitals[:3]:
-            ts_raw = v.get("timestamp")
-            if not ts_raw:
-                continue
-            # Skip placeholder-only readings
-            has_value = any(
-                v.get(f) and str(v.get(f)).strip() not in ("", "/", "-", "null", "None")
-                for f in ("daysHR", "daysBP", "daysMAP", "daysSpO2", "daysRR")
-            )
-            if not has_value:
-                continue
-            try:
-                ts = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
-                if latest_ts is None or ts > latest_ts:
-                    latest_ts = ts
-            except Exception:
-                pass
-        if latest_ts:
-            break
+    for v in (snap.get("chart") or {}).get("vitals") or []:
+        ts_raw = v.get("timestamp")
+        if not ts_raw:
+            continue
+        # Skip placeholder-only readings
+        has_value = any(
+            v.get(f) and str(v.get(f)).strip() not in ("", "/", "-", "null", "None")
+            for f in ("daysHR", "daysBP", "daysMAP", "daysSpO2", "daysRR")
+        )
+        if not has_value:
+            continue
+        try:
+            ts = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+        except Exception:
+            pass
 
     return latest_ts
+
+
+def _get_gcs_6h_delta(cpmrn: str, encounter: int, window_hours: int = 6) -> int | None:
+    """
+    Return the GCS delta (most_recent - oldest) across the last window_hours of vital readings.
+    Positive = improving, 0 = stable, negative = worsening.
+    Returns None if fewer than 2 GCS readings exist in the window (can't compute delta).
+
+    The latest snapshot contains the full vitals history since admission, so only
+    one snapshot download is needed.
+    """
+    from backend.services.emr.db import get_db
+    from datetime import timedelta
+    import pandas as pd
+
+    db = get_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    snap = db.snapshots.find_one(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"chart.vitals": 1},
+        sort=[("snapshot_at", -1)],
+    )
+    if not snap:
+        return None
+
+    readings: list[tuple] = []  # (datetime, int)
+    for v in (snap.get("chart") or {}).get("vitals") or []:
+        ts_raw = v.get("timestamp")
+        gcs = v.get("daysGCS")
+        if gcs is None or ts_raw is None:
+            continue
+        try:
+            ts = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+        except Exception:
+            continue
+        if ts < cutoff:
+            continue
+        readings.append((ts, int(gcs)))
+
+    if len(readings) < 2:
+        return None
+
+    readings.sort(key=lambda x: x[0])
+    return readings[-1][1] - readings[0][1]  # most recent minus oldest in window
 
 
 def _get_latest_lab_ts(cpmrn: str, encounter: int, lab_name: str):
@@ -513,11 +544,11 @@ def _get_latest_lab_ts(cpmrn: str, encounter: int, lab_name: str):
     import pandas as pd
 
     db = get_db()
-    snaps = db.snapshots.find(
+    snap = db.snapshots.find_one(
         {"CPMRN": cpmrn, "encounter": encounter},
         {"chart.documents": 1, "snapshot_at": 1},
+        sort=[("snapshot_at", -1)],
     )
-    snaps = sorted(snaps, key=lambda s: str(s.get("snapshot_at") or ""), reverse=True)[:10]
 
     search = lab_name.lower()
     _ATTR_ALIASES = {
@@ -539,9 +570,7 @@ def _get_latest_lab_ts(cpmrn: str, encounter: int, lab_name: str):
     _is_allowed_from_gas = bool(set(aliases) & _BLOOD_GAS_ALLOWED)
 
     latest_ts = None
-    for snap in snaps:
-        docs = (snap.get("chart") or {}).get("documents") or []
-        for doc in docs:
+    for doc in (snap.get("chart") or {}).get("documents") or [] if snap else []:
             if doc.get("category") != "labs":
                 continue
             panel_name = (doc.get("name") or "").lower()

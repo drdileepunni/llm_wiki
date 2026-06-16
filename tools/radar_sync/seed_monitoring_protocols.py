@@ -1,11 +1,18 @@
 """
 One-time script to seed monitoring protocols into the monitoring_protocols collection.
 
-Run from repo root:
-    python -m tools.radar_sync.seed_monitoring_protocols [--dry-run]
+⚠ PRODUCTION BUCKET — always run with the production bucket env var:
+    GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols
 
-Adding a new dynamic monitoring protocol = adding a new document here and re-running.
-No code changes required.
+The local default (cds-pipeline-ops) is NOT the production bucket used by Cloud Run.
+Running without GCS_BUCKET set will silently write to the wrong bucket and protocols
+will have no effect on any live patients.
+
+Dry-run (prints JSON without writing):
+    python -m tools.radar_sync.seed_monitoring_protocols --dry-run
+
+Adding a new dynamic monitoring protocol = adding a new document to PROTOCOLS below
+and re-running with the production GCS_BUCKET. No code changes required.
 
 Protocol schema:
   protocol_id     — unique key (used for matching in patient_problems.context_gate)

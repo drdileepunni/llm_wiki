@@ -181,3 +181,24 @@ Do not take any action until you have done this.
 ## Citation Format
 Author(s). Title. Source/Journal. Date. PMID/URL if available.
 For case reports: Patient initials or anonymised ID. Clinical setting. Date.
+
+---
+
+## CDS Pipeline — Infrastructure Notes
+
+### GCS buckets
+The repo uses two GCS buckets. Getting them confused causes silent failures.
+
+| Bucket | Purpose |
+|---|---|
+| `patientview-cds-pipeline-ops` | **Production** — used by Cloud Run (`GCS_BUCKET` env var). All live patient data, monitoring protocols, and app settings live here. |
+| `cds-pipeline-ops` | Local dev fallback (the default when `GCS_BUCKET` is not set). Nearly empty — not connected to any live pipeline. |
+
+**Whenever you seed data that must reach live patients, always prefix the command with `GCS_BUCKET=patientview-cds-pipeline-ops`.**
+
+### Adding a monitoring protocol
+1. Add the new protocol document to `PROTOCOLS` in `tools/radar_sync/seed_monitoring_protocols.py`.
+2. Run: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols`
+3. Verify with: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols --dry-run`
+
+Omitting `GCS_BUCKET` writes to the wrong bucket. The pipeline will continue running with the old protocol set and no error will be logged.

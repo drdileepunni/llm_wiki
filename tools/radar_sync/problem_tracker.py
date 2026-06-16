@@ -2033,6 +2033,40 @@ def track_problems(
                 _upsert_problem(cpmrn, encounter, assessment, now, False, db)
                 continue  # skip remaining gates for this problem
 
+            # ── Gate 0b: Code-side GCS stability gate ─────────────────────────
+            # Catches cases where the model created a new GCS problem (or renamed
+            # one) and therefore skipped the protocol gate evaluation. If the
+            # daysGCS vital delta over the last 6 hours is ≥ 0 (stable or
+            # improving), suppress — only a negative delta (drop ≥ 2 pts) should
+            # alert. This mirrors the established-low-gcs protocol's direction rule.
+            _gcs_protocol_keywords = ("gcs", "low gcs", "reduced gcs", "altered consciousness",
+                                      "neurological deterioration", "coma", "encephalopathy")
+            _problem_lc = problem_name.lower()
+            _gate_not_active = _gate_verdict not in ("permissive_active",)
+            if _gate_not_active and any(kw in _problem_lc for kw in _gcs_protocol_keywords):
+                try:
+                    from tools.radar_sync.status_classifier import _get_gcs_6h_delta
+                    _gcs_delta = _get_gcs_6h_delta(cpmrn, encounter)
+                    if _gcs_delta is not None and _gcs_delta >= 0:
+                        alerts_suppressed.append(problem_name)
+                        logger.info(
+                            "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                            "(code-side GCS gate — 6h delta=%+d, stable/improving)",
+                            problem_name, cpmrn, encounter, _gcs_delta,
+                        )
+                        assessment["context_gate"] = {
+                            "verdict": "permissive_active",
+                            "scenario": "established_neurological_injury",
+                            "rationale": f"Code-side gate: GCS 6h delta={_gcs_delta:+d} (stable/improving)",
+                        }
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                        continue
+                except Exception:
+                    logger.exception(
+                        "problem_tracker: code-side GCS gate failed for '%s' %s enc=%d — continuing",
+                        problem_name, cpmrn, encounter,
+                    )
+
             if clinical_status not in ("worsening", "critical"):
                 alerts_suppressed.append(problem_name)
                 logger.info(
