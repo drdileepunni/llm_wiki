@@ -125,6 +125,103 @@ PROTOCOLS = [
             "Do NOT drop rapidly — autoregulation takes time to re-establish."
         ),
     },
+    {
+        "protocol_id": "established-low-gcs",
+        "applies_when": [
+            "gcs",
+            "low gcs",
+            "reduced gcs",
+            "altered consciousness",
+            "neurological deterioration",
+            "coma",
+            "encephalopathy",
+        ],
+        "gate_question": (
+            "Is this patient's low GCS expected and established given their current clinical context? "
+            "DIRECTION RULE — only a NEGATIVE delta (GCS dropping) is clinically concerning. "
+            "A positive delta (GCS improving) is always a good sign and must NEVER trigger an alert. "
+            "To assess the delta: call get_vital_trend('GCS', n=6) and compare the most recent "
+            "reading against the reading from 6 hours ago. "
+            "If GCS is stable or improving over the last 6 hours → permissive_active (suppress). "
+            "If GCS has dropped ≥2 points within the last 6 hours → permissive_breached (alert). "
+            "Do NOT compare current GCS to admission baseline or any value older than 6 hours — "
+            "a drop from GCS 15 at admission two days ago is irrelevant if GCS has been stable since."
+        ),
+        "scenarios": [
+            {
+                "name": "post_craniotomy",
+                "description": "Post-craniotomy / post-neurosurgical procedure — expected neurological depression",
+                "band_description": (
+                    "GCS stable or improving over the last 6 hours from the post-operative baseline. "
+                    "Only alert if GCS drops ≥2 points within the 6-hour window."
+                ),
+                "window": "First 24–48 hours post-craniotomy or neurosurgical procedure",
+                "invalidate_if": [
+                    "GCS drops ≥2 points within the last 6 hours (negative delta only — improvement is not a trigger)",
+                    "new pupillary asymmetry or non-reactivity documented in a fresh note",
+                    "new focal neurological deficit appearing in current assessment",
+                    "imaging shows new haematoma, herniation, or acute hydrocephalus",
+                ],
+            },
+            {
+                "name": "established_neurological_injury",
+                "description": (
+                    "Known neurological injury (TBI, ICH, stroke, HIE, SAH, post-arrest) "
+                    "with a stable established low GCS"
+                ),
+                "band_description": (
+                    "GCS is unchanged or improving over the last 6 hours. "
+                    "A chronically low GCS from a known injury is the patient's current baseline — "
+                    "it is NOT acute deterioration. "
+                    "Alert only if GCS drops ≥2 points within the 6-hour window."
+                ),
+                "window": "While GCS is stable or improving within the 6-hour assessment window",
+                "invalidate_if": [
+                    "GCS drops ≥2 points within the last 6 hours (negative delta — improvement never triggers)",
+                    "new clinical signs in a fresh note: pupillary asymmetry, Cushing's triad, abnormal posturing",
+                    "new haemorrhage, oedema, or herniation on imaging",
+                    "seizure activity not controlled by current regimen AND GCS worsening",
+                ],
+            },
+            {
+                "name": "intentional_sedation",
+                "description": "Low GCS due to intentional pharmacological sedation (propofol, midazolam, etc.)",
+                "band_description": (
+                    "GCS is consistent with the documented sedation target "
+                    "(deep sedation RASS −4/−5 ≈ GCS 3–6). "
+                    "Alert suppressed while sedation is active and GCS matches target. "
+                    "Improvement in GCS as sedation is lightened is expected and should never alert."
+                ),
+                "window": "While sedative infusion is running and targeting deep sedation",
+                "invalidate_if": [
+                    "sedation discontinued or hold placed AND GCS does not recover within 2 hours",
+                    "GCS lower than expected for the current sedation dose (suggests another cause)",
+                    "new haemodynamic compromise attributable to oversedation",
+                ],
+            },
+            {
+                "name": "post_ictal",
+                "description": "Post-ictal GCS depression following a documented seizure",
+                "band_description": (
+                    "GCS expected to be depressed for up to 2 hours post-seizure. "
+                    "Improvement in GCS during this window is expected — never alert on it. "
+                    "Alert only if GCS is not recovering after 2 hours OR drops further."
+                ),
+                "window": "First 2 hours following a documented seizure",
+                "invalidate_if": [
+                    "more than 2 hours since last documented seizure AND GCS not recovering",
+                    "GCS drops further from the post-ictal nadir (negative delta)",
+                    "seizure recurrence or status epilepticus",
+                ],
+            },
+        ],
+        "escalation_target_after_window": (
+            "When an invalidation trigger fires (GCS drops ≥2 points in 6 hours, new brainstem signs, "
+            "or uncontrolled seizures), alert immediately. "
+            "Neurology or neurosurgery review is warranted. "
+            "Consider urgent CT head if not already done within the last 12 hours."
+        ),
+    },
 ]
 
 

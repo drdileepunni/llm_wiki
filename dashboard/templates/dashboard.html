@@ -21,22 +21,27 @@
 
 <!-- KPI row 1: alert performance -->
 <div class="row g-3 mb-3" id="kpi-alerts">
-  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
     <div class="kpi-label">Alerts Sent</div>
     <div class="kpi-value" id="kpi-sent">—</div>
   </div></div></div>
-  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
     <div class="kpi-label">Alerts Rated</div>
     <div class="kpi-value" id="kpi-rated">—</div>
   </div></div></div>
-  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
     <div class="kpi-label">Response Rate</div>
     <div class="kpi-value" id="kpi-response">—</div>
   </div></div></div>
-  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
     <div class="kpi-label">Avg Rating</div>
     <div class="kpi-value" id="kpi-mean">—</div>
     <div class="kpi-sub" id="kpi-raters"></div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Avg Alerts / Run</div>
+    <div class="kpi-value" id="kpi-avg-alerts">—</div>
+    <div class="kpi-sub" id="kpi-run-count-alerts"></div>
   </div></div></div>
 </div>
 
@@ -88,20 +93,13 @@
   </div>
 </div>
 
+<!-- Alerts per run chart -->
 <div class="row g-3 mb-4">
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header card-header-sm">By Problem Type</div>
-      <div class="card-body chart-wrap chart-wrap--tall">
-        <canvas id="chart-problem"></canvas>
-      </div>
-    </div>
-  </div>
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header card-header-sm">Cost Over Time</div>
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header card-header-sm">Alerts per Run</div>
       <div class="card-body chart-wrap">
-        <canvas id="chart-cost"></canvas>
+        <canvas id="chart-alerts-per-run"></canvas>
       </div>
     </div>
   </div>

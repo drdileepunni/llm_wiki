@@ -37,6 +37,7 @@ _ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same prob
 _VITAL_STALENESS_HOURS      = 8   # vitals older than this → hard block on vital alerts
 _VITAL_CARD_WARNING_HOURS   = 2   # vitals older than this → soft warning in prefetch + card marker
 _LAB_STALENESS_HOURS        = 24  # labs older than this are considered stale for alert purposes
+_CITED_NOTE_STALENESS_HOURS = 48  # if ALL cited notes are older than this, suppress — chronic audit issue not urgent alert
 
 _NEXT_CHECK_HOURS = {"vital": 1, "io": 1}   # lab handled per-key below
 # Labs that turn around clinically fast — recheck sooner
@@ -765,6 +766,35 @@ def _run_tool(
 
 
 # ── Alert eligibility check ────────────────────────────────────────────────────
+
+def _all_cited_notes_stale(assessment: dict, snapshot_at: datetime) -> bool:
+    """
+    Return True if the assessment cited notes AND every cited note is older than
+    _CITED_NOTE_STALENESS_HOURS before snapshot_at.
+    Returns False when no notes were cited (alert based on objective vitals/labs — don't suppress).
+    """
+    cited = assessment.get("cited_notes") or []
+    if not cited:
+        return False
+
+    cutoff = snapshot_at - timedelta(hours=_CITED_NOTE_STALENESS_HOURS)
+    for note in cited:
+        ts = note.get("timestamp")
+        if ts is None:
+            continue
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts > cutoff:
+            return False  # at least one fresh note — allow alert
+    return True
+
 
 def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: Any) -> bool:
     """Return True if we alerted recently and should hold off."""
@@ -1551,6 +1581,38 @@ def _load_stored_gates(cpmrn: str, encounter: int, problem_names: list[str], db:
     return gates
 
 
+# ── IO charting-miss caveat ───────────────────────────────────────────────────
+
+_IO_ALERT_KEYWORDS = (
+    "oliguria", "anuria", "aki", "acute kidney", "renal failure",
+    "urine output", "fluid balance",
+)
+
+
+def _maybe_append_charting_caveat(cpmrn: str, encounter: int, assessment: dict) -> None:
+    """
+    For IO-related alerts where intake is recorded but urine output is 0,
+    append a sentence to alert_reason asking the clinician to verify it's not a charting miss.
+    """
+    problem_name = assessment.get("problem_name", "").lower()
+    if not any(kw in problem_name for kw in _IO_ALERT_KEYWORDS):
+        return
+    try:
+        from tools.radar_sync.status_classifier import _get_io_day_summary
+        summary = _get_io_day_summary(cpmrn, encounter)
+        if summary and summary["urine_ml"] == 0 and summary["intake_ml"] > 0:
+            caveat = (
+                f"\n\n⚠ Charting note: Day {summary['day_num']} intake is recorded "
+                f"({summary['intake_ml']:.0f} ml) but urine output is 0 ml. "
+                f"This pattern may reflect missed charting rather than true anuria — "
+                f"please verify urine output at bedside before acting."
+            )
+            assessment["alert_reason"] = (assessment.get("alert_reason") or "") + caveat
+    except Exception:
+        logger.exception("problem_tracker: charting caveat injection failed for '%s' %s enc=%d",
+                         assessment.get("problem_name", ""), cpmrn, encounter)
+
+
 # ── Post-hoc alert deduplication ─────────────────────────────────────────────
 
 def _suppress_redundant_alerts(to_alert: list[tuple[dict, str]]) -> list[tuple[dict, str]]:
@@ -1633,6 +1695,19 @@ def track_problems(
     if not problems:
         logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
         return {"problem_tracker": "no_problems"}
+
+    # Gate: skip entirely if no clinical data has been recorded yet.
+    # Newly admitted patients may have no vitals/labs; alerting on data absence is not actionable.
+    try:
+        from tools.radar_sync.status_classifier import _get_latest_vital_ts
+        if _get_latest_vital_ts(cpmrn, encounter) is None:
+            logger.info(
+                "problem_tracker: no clinical data for %s enc=%d — skipping run",
+                cpmrn, encounter,
+            )
+            return {"problem_tracker": "no_data_skipped"}
+    except Exception:
+        logger.exception("problem_tracker: data sufficiency check failed for %s enc=%d — continuing", cpmrn, encounter)
 
     # Accumulates Chunk objects from every query_patient_notes call this session.
     # Indexed by the [N] numbers the model sees, so cited_note_indices can be resolved.
@@ -1965,13 +2040,18 @@ def track_problems(
                     "(status=%s — only worsening/critical may alert)",
                     problem_name, cpmrn, encounter, clinical_status,
                 )
-            elif clinical_status != "critical" and _should_suppress_alert(cpmrn, encounter, problem_name, db):
-                # Cooldown is bypassed for critical status — a 280/150 escalation
-                # must not be muffled by an earlier alert from the same run window.
+            elif _should_suppress_alert(cpmrn, encounter, problem_name, db):
                 alerts_suppressed.append(problem_name)
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d (cooldown)",
                     problem_name, cpmrn, encounter,
+                )
+            elif _all_cited_notes_stale(assessment, snapshot_at):
+                alerts_suppressed.append(problem_name)
+                logger.info(
+                    "problem_tracker: alert suppressed for '%s' %s enc=%d "
+                    "(all cited notes >%dh old — chronic audit issue, not urgent alert)",
+                    problem_name, cpmrn, encounter, _CITED_NOTE_STALENESS_HOURS,
                 )
             elif _vital_is_stale and assessment.get("next_check", {}).get("type") == "vital":
                 # Hard gate: next_check is a vital AND vitals are stale — the model
@@ -2053,6 +2133,8 @@ def track_problems(
 
     # Phase 2 — deduplicate and send one batched message for all alerting problems.
     to_alert = _suppress_redundant_alerts(to_alert)
+    for assessment, _ in to_alert:
+        _maybe_append_charting_caveat(cpmrn, encounter, assessment)
     if to_alert:
         try:
             from tools.radar_sync.chat_card_sender import (

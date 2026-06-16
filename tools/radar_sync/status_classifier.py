@@ -774,6 +774,44 @@ def _get_io(cpmrn: str, encounter: int, n_hours: int = 12) -> str:
     return "\n".join(lines)
 
 
+def _get_io_day_summary(cpmrn: str, encounter: int) -> dict | None:
+    """
+    Return {intake_ml, urine_ml, day_num} for the most recent ICU day, or None on error.
+    Used to detect intake-recorded-but-no-output-charted pattern for alert card caveats.
+    """
+    from backend.services.emr.db import get_db
+    db = get_db()
+    snap = db.snapshots.find_one(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"chart.io": 1},
+        sort=[("snapshot_at", -1)],
+    )
+    if not snap:
+        return None
+    days = ((snap.get("chart") or {}).get("io") or {}).get("days") or []
+    if not days:
+        return None
+
+    most_recent = max(d.get("dayNumber", 0) for d in days)
+    intake_ml = urine_ml = 0.0
+    for day in days:
+        if day.get("dayNumber") != most_recent:
+            continue
+        for hour_obj in (day.get("hours") or []):
+            for minute in (hour_obj.get("minutes") or []):
+                intake = minute.get("intake") or {}
+                output = minute.get("output") or {}
+                meds = intake.get("meds") or {}
+                for inf in (meds.get("infusion") or []):
+                    intake_ml += _amt(inf)
+                for bol in (meds.get("bolus") or []):
+                    intake_ml += _amt(bol)
+                intake_ml += _amt(intake.get("feeds"))
+                intake_ml += _amt(intake.get("others"))
+                urine_ml += _amt(output.get("urine"))
+    return {"intake_ml": round(intake_ml), "urine_ml": round(urine_ml), "day_num": most_recent}
+
+
 def _run_tool(name: str, args: dict, cpmrn: str, encounter: int) -> str:
     try:
         if name == "get_vital_trend":

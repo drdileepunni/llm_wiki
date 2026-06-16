@@ -13,6 +13,7 @@ from .config_writer import save_app_setting, save_monitoring_protocol
 from .metrics import (
     get_summary, get_timeseries, get_by_problem,
     get_by_rater, get_cost, get_comments, get_ratings_per_alert,
+    get_alerts_per_run,
 )
 from .agreement import compute_agreement
 from .config_reader import (
@@ -99,6 +100,14 @@ def create_app() -> Flask:
             return _ok(get_cost(*_date_params()))
         except Exception as e:
             log.exception("api_cost failed")
+            return _err(e)
+
+    @app.route("/api/metrics/alerts-per-run")
+    def api_alerts_per_run():
+        try:
+            return _ok(get_alerts_per_run(*_date_params()))
+        except Exception as e:
+            log.exception("api_alerts_per_run failed")
             return _err(e)
 
     @app.route("/api/metrics/agreement")

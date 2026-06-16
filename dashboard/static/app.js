@@ -157,46 +157,63 @@ async function loadCost() {
     document.getElementById('kpi-per-patient').textContent   = usdShort(d.avg_cost_per_patient);
     document.getElementById('kpi-total-patients').textContent = fmt(d.total_patients) + ' patients processed';
 
-    // Costliest step
+    // Costliest step — find max by value, don't trust key order (Flask may sort keys)
     const steps = Object.entries(d.by_step || {});
+    const topStep = steps.length
+      ? steps.reduce((best, cur) => cur[1] > best[1] ? cur : best)
+      : null;
     document.getElementById('kpi-top-step').textContent =
-      steps.length ? steps[0][0].replace(/_/g, ' ') : '—';
+      topStep ? topStep[0].replace(/_/g, ' ') : '—';
 
-    // Cost-by-step table
-    const totalStepCost = steps.reduce((s, [,v]) => s + v, 0);
+    // Cost-by-step table (sort descending by cost for display)
+    const stepsSorted = steps.slice().sort((a, b) => b[1] - a[1]);
+    const totalStepCost = stepsSorted.reduce((s, [,v]) => s + v, 0);
     const tbody = document.querySelector('#tbl-steps tbody');
-    tbody.innerHTML = steps.length
-      ? steps.map(([step, cost]) => `
+    tbody.innerHTML = stepsSorted.length
+      ? stepsSorted.map(([step, cost]) => `
           <tr>
             <td>${step.replace(/_/g,' ')}</td>
             <td class="text-end">${usd(cost)}</td>
             <td class="text-end text-muted">${totalStepCost ? pct(cost/totalStepCost*100) : '—'}</td>
           </tr>`).join('')
       : '<tr><td colspan="3" class="text-muted text-center py-3">No cost data</td></tr>';
+  } catch (e) { console.error('loadCost', e); }
+}
 
-    // Cost over time chart
-    destroyChart('cost');
-    const ctx = document.getElementById('chart-cost').getContext('2d');
+async function loadAlertsPerRun() {
+  try {
+    const d = await apiFetch('/api/metrics/alerts-per-run' + dateParams());
+    document.getElementById('kpi-avg-alerts').textContent = d.avg_alerts_per_run !== undefined
+      ? fmt(d.avg_alerts_per_run, 1) : '—';
+    document.getElementById('kpi-run-count-alerts').textContent =
+      d.run_count ? d.run_count + ' run(s)' : '';
+
+    destroyChart('alertsPerRun');
+    const ctx = document.getElementById('chart-alerts-per-run').getContext('2d');
     const ts = d.timeseries || [];
-    charts['cost'] = new Chart(ctx, {
+    const pointR = ts.length > 20 ? 2 : 4;
+    charts['alertsPerRun'] = new Chart(ctx, {
       type: 'line',
       data: {
         labels: ts.map(r => r.run_started_at.slice(0, 16).replace('T', ' ')),
         datasets: [{
-          label: 'Cost per run (USD)',
-          data: ts.map(r => r.cost_usd),
-          borderColor: '#6f42c1',
-          backgroundColor: 'rgba(111,66,193,0.1)',
-          fill: true, tension: 0.2, pointRadius: 3,
+          label: 'Alerts sent',
+          data: ts.map(r => r.alerts_sent),
+          borderColor: '#0d6efd',
+          backgroundColor: 'rgba(13,110,253,0.08)',
+          fill: true, tension: 0.2, pointRadius: pointR,
         }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true } }
+        scales: {
+          y: { beginAtZero: true, ticks: { stepSize: 1, precision: 0 } },
+          x: { ticks: { maxTicksLimit: 12, maxRotation: 30 } }
+        }
       }
     });
-  } catch (e) { console.error('loadCost', e); }
+  } catch (e) { console.error('loadAlertsPerRun', e); }
 }
 
 async function loadRaters() {
@@ -268,7 +285,7 @@ async function loadAll() {
   const el = document.getElementById('last-updated');
   if (el) el.textContent = 'Loading…';
   await Promise.all([
-    loadSummary(), loadTimeseries(), loadByProblem(),
+    loadSummary(), loadTimeseries(), loadAlertsPerRun(),
     loadCost(), loadRaters(), loadAgreement(), loadComments(),
   ]);
   if (el) el.textContent = 'Updated ' + ts;

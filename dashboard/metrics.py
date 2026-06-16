@@ -237,6 +237,45 @@ def get_cost(from_date: str | None = None, to_date: str | None = None) -> dict[s
     }
 
 
+# ── alerts per run ────────────────────────────────────────────────────────────
+
+def get_alerts_per_run(from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
+    date_filter = _date_clause("r.run_started_at", from_date, to_date)
+    sql = f"""
+    WITH runs AS (
+      SELECT
+        run_started_at,
+        LEAD(run_started_at) OVER (ORDER BY run_started_at) AS next_run
+      FROM {fqn("pipeline_run_costs")}
+      WHERE 1=1 {date_filter}
+    )
+    SELECT
+      r.run_started_at,
+      COUNT(DISTINCT a.alert_id) AS alerts_sent
+    FROM runs r
+    LEFT JOIN {fqn("study_alerts")} a
+      ON a.alerted_at >= r.run_started_at
+      AND (r.next_run IS NULL OR a.alerted_at < r.next_run)
+    GROUP BY 1
+    ORDER BY 1
+    """
+    rows = query(sql)
+    timeseries = []
+    total_alerts = 0
+    for r in rows:
+        ts = r.get("run_started_at")
+        ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        alerts = int(r.get("alerts_sent") or 0)
+        total_alerts += alerts
+        timeseries.append({"run_started_at": ts_str, "alerts_sent": alerts})
+    run_count = len(timeseries)
+    return {
+        "timeseries":       timeseries,
+        "avg_alerts_per_run": round(total_alerts / run_count, 1) if run_count else 0,
+        "run_count":        run_count,
+    }
+
+
 # ── feedback comments ─────────────────────────────────────────────────────────
 
 def get_comments(limit: int = 50, from_date: str | None = None, to_date: str | None = None) -> list[dict]:
