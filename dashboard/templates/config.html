@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Config{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center mb-4">
+  <h5 class="mb-0 fw-semibold">Pipeline Configuration</h5>
+  <button class="btn btn-sm btn-outline-secondary ms-3" onclick="loadConfig()">
+    <i class="bi bi-arrow-clockwise me-1"></i>Refresh from GCS
+  </button>
+</div>
+
+<!-- Edit JSON modal -->
+<div class="modal fade" id="editModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="editModalLabel">Edit config</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-2">
+        <div id="edit-error" class="alert alert-danger py-1 px-2 small d-none"></div>
+        <textarea id="edit-json" class="form-control font-monospace"
+          style="height:60vh; font-size:0.78rem; resize:none; white-space:pre;"
+          spellcheck="false"></textarea>
+      </div>
+      <div class="modal-footer py-2">
+        <span class="text-muted small me-auto" id="edit-hint"></span>
+        <button class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-warning" onclick="saveConfig()">
+          <i class="bi bi-cloud-upload me-1"></i>Save to GCS
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- nav tabs -->
+<ul class="nav nav-tabs mb-4" id="config-tabs">
+  <li class="nav-item">
+    <a class="nav-link active" href="#" onclick="showTab('protocols',this)">
+      <i class="bi bi-signpost-split me-1"></i>Monitoring Protocols
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="#" onclick="showTab('lab',this)">
+      <i class="bi bi-droplet me-1"></i>Lab Alert Rules
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="#" onclick="showTab('symptom',this)">
+      <i class="bi bi-thermometer me-1"></i>Symptom Alert Rules
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="#" onclick="showTab('ops',this)">
+      <i class="bi bi-gear me-1"></i>Operational Settings
+    </a>
+  </li>
+</ul>
+
+<!-- Monitoring Protocols -->
+<div id="tab-protocols">
+  <div class="d-flex align-items-center mb-2">
+    <p class="text-muted small mb-0">
+      Monitoring protocols define when a high blood pressure (or similar condition) is <em>intentionally permissive</em>.
+      The problem tracker uses these to gate alerts — if a scenario applies, the alert is suppressed.
+    </p>
+    <button class="btn btn-sm btn-outline-primary ms-3 flex-shrink-0"
+      onclick="openEditProtocols()">
+      <i class="bi bi-pencil me-1"></i>Edit / Add Protocol
+    </button>
+  </div>
+  <div id="protocols-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
+</div>
+
+<!-- Lab Alert Rules -->
+<div id="tab-lab" class="d-none">
+  <div class="d-flex align-items-center mb-2">
+    <p class="text-muted small mb-0">
+      Per-lab thresholds injected into the problem-tracker prompt. An alert fires only when the
+      most recent value crosses the floor/ceiling <em>or</em> delta threshold.
+    </p>
+    <button class="btn btn-sm btn-outline-primary ms-3 flex-shrink-0"
+      onclick="openEditLabRules()">
+      <i class="bi bi-pencil me-1"></i>Edit Rules
+    </button>
+  </div>
+  <div id="lab-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
+</div>
+
+<!-- Symptom Alert Rules -->
+<div id="tab-symptom" class="d-none">
+  <div class="d-flex align-items-center mb-2">
+    <p class="text-muted small mb-0">
+      Symptom rules require an objective criterion to be met before the model can alert on a
+      subjective complaint (pain, nausea, etc.).
+    </p>
+    <button class="btn btn-sm btn-outline-primary ms-3 flex-shrink-0"
+      onclick="openEditSymptomRules()">
+      <i class="bi bi-pencil me-1"></i>Edit Rules
+    </button>
+  </div>
+  <div id="symptom-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
+</div>
+
+<!-- Operational Settings -->
+<div id="tab-ops" class="d-none">
+  <p class="text-muted small mb-3">
+    Runtime settings loaded from GCS <code>app_settings/</code> on every pipeline run.
+    Click <strong>Edit</strong> next to any setting to modify it.
+  </p>
+  <div id="ops-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.PAGE = 'config';
+</script>
+{% endblock %}

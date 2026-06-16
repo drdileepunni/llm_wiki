@@ -1,0 +1,84 @@
+:root {
+  --brand: #0d6efd;
+  --cost-accent: #6f42c1;
+}
+
+body { background: #f8f9fa; font-size: 14px; }
+
+/* nav */
+.navbar .nav-link { color: rgba(255,255,255,.7); font-size: 0.875rem; padding: 0; }
+.navbar .nav-link:hover, .navbar .nav-link.active { color: #fff; }
+
+/* KPI cards */
+.kpi-card { border: none; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.kpi-card--cost { border-left: 3px solid var(--cost-accent); }
+.kpi-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; margin-bottom: 4px; }
+.kpi-value { font-size: 1.7rem; font-weight: 700; line-height: 1.1; color: #212529; }
+.kpi-sub { font-size: 0.75rem; color: #6c757d; margin-top: 3px; }
+
+/* charts */
+.chart-wrap { position: relative; height: 220px; }
+.chart-wrap--tall { height: 280px; }
+
+/* card header */
+.card-header-sm { font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .05em; color: #495057; padding: 8px 12px; background: #fff; border-bottom: 1px solid #e9ecef; }
+
+/* tables */
+.table-sm td, .table-sm th { padding: 6px 10px; vertical-align: middle; }
+
+/* spinner */
+.spinner-wrap { display: flex; justify-content: center; padding: 40px; }
+
+/* rating stars */
+.star-1 { color: #dc3545; }
+.star-2 { color: #fd7e14; }
+.star-3 { color: #ffc107; }
+.star-4 { color: #20c997; }
+.star-5 { color: #198754; }
+.rating-badge { display: inline-block; width: 28px; height: 28px; border-radius: 50%;
+  line-height: 28px; text-align: center; font-weight: 700; font-size: 0.8rem; color: #fff; }
+.rating-1 { background: #dc3545; }
+.rating-2 { background: #fd7e14; }
+.rating-3 { background: #ffc107; color: #333; }
+.rating-4 { background: #20c997; }
+.rating-5 { background: #198754; }
+
+/* config page */
+.protocol-card { border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+.protocol-header { background: #e9f0ff; padding: 12px 16px; font-weight: 600; font-size: 0.9rem; }
+.protocol-body { padding: 12px 16px; }
+.scenario-table th { font-size: 0.75rem; color: #6c757d; text-transform: uppercase; }
+.invalidate-list { margin: 0; padding-left: 16px; font-size: 0.8rem; color: #495057; }
+.raw-json-toggle { font-size: 0.75rem; cursor: pointer; color: var(--brand); }
+.raw-json-block { background: #f1f3f5; border-radius: 4px; padding: 10px; font-size: 0.72rem;
+  white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+.source-badge { font-size: 0.65rem; vertical-align: middle; }
+.enabled-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 5px; }
+.enabled-dot--on  { background: #198754; }
+.enabled-dot--off { background: #dc3545; }
+
+/* docs */
+.markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 16px; }
+.markdown-body h2 { font-size: 1.15rem; font-weight: 600; margin-top: 24px; margin-bottom: 10px;
+  padding-bottom: 4px; border-bottom: 1px solid #e9ecef; }
+.markdown-body h3 { font-size: 1rem; font-weight: 600; margin-top: 18px; }
+.markdown-body p  { margin-bottom: 10px; line-height: 1.65; }
+.markdown-body code { background: #e9ecef; padding: 1px 5px; border-radius: 3px; font-size: 0.82rem; }
+.markdown-body pre { background: #f1f3f5; padding: 12px; border-radius: 6px; overflow-x: auto; }
+.markdown-body ul, .markdown-body ol { padding-left: 20px; margin-bottom: 10px; }
+.markdown-body li  { margin-bottom: 4px; line-height: 1.55; }
+.markdown-body table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 0.85rem; }
+.markdown-body th, .markdown-body td { border: 1px solid #dee2e6; padding: 6px 10px; }
+.markdown-body th { background: #f8f9fa; font-weight: 600; }
+.doc-link { display: block; padding: 6px 10px; border-radius: 6px; color: #495057;
+  text-decoration: none; font-size: 0.85rem; margin-bottom: 2px; }
+.doc-link:hover, .doc-link.active { background: #e9f0ff; color: var(--brand); }
+
+/* agreement */
+.agreement-metric { display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid #f0f0f0; }
+.agreement-metric:last-child { border-bottom: none; }
+.agreement-label { font-size: 0.8rem; color: #495057; }
+.agreement-value { font-weight: 600; font-size: 0.95rem; }

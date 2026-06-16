@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Metrics{% endblock %}
+
+{% block content %}
+<!-- date filter bar -->
+<div class="d-flex align-items-center gap-3 mb-4 flex-wrap">
+  <div class="d-flex align-items-center gap-2">
+    <label class="form-label mb-0 text-muted small">From</label>
+    <input type="date" id="from-date" class="form-control form-control-sm" style="width:150px">
+    <label class="form-label mb-0 text-muted small">To</label>
+    <input type="date" id="to-date" class="form-control form-control-sm" style="width:150px">
+    <select id="ts-bucket" class="form-select form-select-sm" style="width:100px">
+      <option value="day">Daily</option>
+      <option value="week">Weekly</option>
+    </select>
+    <button class="btn btn-sm btn-primary" onclick="loadAll()">Apply</button>
+    <button class="btn btn-sm btn-outline-secondary" onclick="clearDates()">All time</button>
+  </div>
+  <span id="last-updated" class="text-muted small ms-auto"></span>
+</div>
+
+<!-- KPI row 1: alert performance -->
+<div class="row g-3 mb-3" id="kpi-alerts">
+  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Alerts Sent</div>
+    <div class="kpi-value" id="kpi-sent">—</div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Alerts Rated</div>
+    <div class="kpi-value" id="kpi-rated">—</div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Response Rate</div>
+    <div class="kpi-value" id="kpi-response">—</div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Avg Rating</div>
+    <div class="kpi-value" id="kpi-mean">—</div>
+    <div class="kpi-sub" id="kpi-raters"></div>
+  </div></div></div>
+</div>
+
+<!-- KPI row 2: cost -->
+<div class="row g-3 mb-4" id="kpi-cost">
+  <div class="col-6 col-md-3"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Total LLM Cost</div>
+    <div class="kpi-value" id="kpi-total-cost">—</div>
+    <div class="kpi-sub" id="kpi-run-count"></div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Avg Cost / Run</div>
+    <div class="kpi-value" id="kpi-per-run">—</div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Avg Cost / Patient</div>
+    <div class="kpi-value" id="kpi-per-patient">—</div>
+    <div class="kpi-sub" id="kpi-total-patients"></div>
+  </div></div></div>
+  <div class="col-6 col-md-3"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Costliest Stage</div>
+    <div class="kpi-value small" id="kpi-top-step">—</div>
+  </div></div></div>
+</div>
+
+<!-- Charts row -->
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">Rating Distribution</div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-dist"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-8">
+    <div class="card h-100">
+      <div class="card-header card-header-sm d-flex align-items-center gap-2">
+        Performance Over Time
+        <select id="ts-bucket-inline" class="form-select form-select-sm ms-auto" style="width:100px" onchange="loadTimeseries()">
+          <option value="day">Daily</option>
+          <option value="week">Weekly</option>
+        </select>
+      </div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-timeseries"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">By Problem Type</div>
+      <div class="card-body chart-wrap chart-wrap--tall">
+        <canvas id="chart-problem"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">Cost Over Time</div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-cost"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Cost by step + inter-rater -->
+<div class="row g-3 mb-4">
+  <div class="col-md-5">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">LLM Cost by Pipeline Stage</div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0" id="tbl-steps">
+          <thead><tr><th>Stage</th><th class="text-end">Cost (USD)</th><th class="text-end">%</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-7">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">Inter-Rater Agreement</div>
+      <div class="card-body" id="agreement-body">
+        <div class="text-muted small">Loading…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- By rater -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header card-header-sm">By Rater</div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0" id="tbl-raters">
+          <thead><tr>
+            <th>Rater</th><th class="text-center">Ratings</th>
+            <th class="text-center">Avg</th>
+            <th class="text-center">⭐⭐⭐⭐⭐</th>
+            <th class="text-center">⭐⭐⭐⭐</th>
+            <th class="text-center">⭐⭐⭐</th>
+            <th class="text-center">⭐⭐</th>
+            <th class="text-center">⭐</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Comments feed -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header card-header-sm">Clinician Comments</div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0" id="tbl-comments">
+          <thead><tr>
+            <th>Problem</th><th class="text-center" style="width:60px">Rating</th>
+            <th>Comment</th><th>Rater</th><th style="width:120px">Date</th>
+          </tr></thead>
+          <tbody><tr><td colspan="5" class="text-muted text-center py-3">No comments yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.PAGE = 'dashboard';
+</script>
+{% endblock %}

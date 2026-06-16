@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Docs{% endblock %}
+
+{% block content %}
+<div class="row g-0" style="min-height: 80vh">
+  <!-- sidebar -->
+  <div class="col-md-2 border-end pe-3">
+    <h6 class="text-muted text-uppercase small fw-semibold mb-3 mt-1">Documents</h6>
+    <div id="doc-list">
+      <div class="text-muted small">Loading…</div>
+    </div>
+  </div>
+
+  <!-- content -->
+  <div class="col-md-10 ps-4">
+    <div id="doc-content" class="markdown-body">
+      <div class="text-muted text-center mt-5">
+        <i class="bi bi-diagram-3 display-4 d-block mb-3 text-muted"></i>
+        Select a document from the sidebar
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.PAGE = 'docs';
+</script>
+{% endblock %}
