@@ -233,14 +233,20 @@ PROTOCOLS = [
         "protocol_id": "permissive-respiratory",
         "applies_when": [
             "hypoxia",
+            "hypoxemia",
+            "hypoxaemia",
             "desaturation",
             "low spo2",
+            "spo2",
+            "oxygen saturation",
+            "o2 sat",
             "low oxygen",
             "tachypnea",
             "tachypnoea",
             "respiratory distress",
             "oxygen requirement",
-            "hypoxaemia",
+            "respiratory failure",
+            "refractory hypox",
         ],
         "gate_question": (
             "Is this patient's hypoxia or tachypnea likely to be expected and tolerable given their clinical context? "

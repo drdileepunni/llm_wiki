@@ -174,6 +174,13 @@ IMPORTANT RULES:
   of the following are true: (1) the daily total is also 0 ml, (2) clinical notes explicitly
   document anuria or oliguria, AND (3) creatinine is rising. Do NOT escalate AKI, alert for
   anuria, or conclude oliguria on the basis of 0 ml charting alone
+- NOTE FRESHNESS RULE — A plan note written within the last 24 hours is ALWAYS considered a
+  current, active plan. If the most recent plan note for a problem is < 24 hours old, set
+  being_addressed=True and should_alert=False — regardless of whether the response buffer has
+  expired, regardless of whether the problem is still worsening, and regardless of the
+  treatment-inadequate override. Clinicians write notes at most once per day; a note from
+  earlier the same day is still the active plan. Only apply the treatment-inadequate override
+  when the most recent plan note is > 24 hours old AND the problem is worsening.
 - If treatment is documented but the problem is worsening DESPITE adequate time for response:
   set being_addressed=False, should_alert=True, alert_reason="Treatment inadequate — [details]"
 - When writing alert_reason, always state: (1) the patient's baseline value, (2) current value,
@@ -212,6 +219,13 @@ IMPORTANT RULES:
   A drop from the patient's baseline is NOT sufficient on its own. The absolute value
   must cross the floor above. If the current value is above the floor (e.g. MAP 67 after
   a transient dip to 64), classify as stable or improving — do NOT alert.
+- GCS DELTA RULE — for any problem related to GCS, consciousness, or neurological status:
+  do NOT alert unless GCS has dropped ≥ 2 points within the last 6 hours.
+  Call get_vital_trend('GCS', n=6) and compare the most recent reading against the reading
+  from 6 hours ago. If the delta is < 2 (stable or improving), set should_alert=False
+  regardless of the absolute GCS value, regardless of whether a plan note exists, and
+  regardless of the treatment-inadequate override. A chronically low GCS is NOT a reason
+  to alert. Only a negative delta ≥ 2 within the 6-hour window justifies an alert.
 - TREND DIRECTION RULE — even if the current value is still below the floor, do NOT
   alert if the vital is clearly recovering (most recent reading is better than the prior
   reading and trending toward normal). In that case classify as improving and set a
