@@ -27,11 +27,17 @@ _NEW_HEADER = "➕ Create these orders"
 _ACTION_HEADERS = (_EDIT_HEADER, _DISCONTINUE_HEADER, _NEW_HEADER)
 
 
-def _checkbox_section(header: str, name: str, items: list[dict]) -> dict | None:
+_IMAGE_HEADER = "📄 Treatment chart images"
+
+
+def _checkbox_section(header: str, name: str, items: list[dict],
+                      default_selected: bool = True) -> dict | None:
     """
     One CHECK_BOX selectionInput section. `items` is a list of
-    {"key": <action key>, "label": <human text>}. All boxes default-ticked so
-    "approve everything + submit" is a single click. Returns None if no items.
+    {"key": <action key>, "label": <human text>}. Boxes default to
+    `default_selected` so "approve everything + submit" is a single click —
+    EXCEPT discontinues, which arrive un-ticked (Moderate posture) so the
+    clinician must consciously opt in to stopping a drug. Returns None if no items.
     """
     if not items:
         return None
@@ -42,11 +48,26 @@ def _checkbox_section(header: str, name: str, items: list[dict]) -> dict | None:
                 "name": name,
                 "type": "CHECK_BOX",
                 "items": [
-                    {"text": it["label"], "value": it["key"], "selected": True}
+                    {"text": it["label"], "value": it["key"], "selected": default_selected}
                     for it in items
                 ],
             }
         }],
+    }
+
+
+def _image_section(chart_image_urls: list[str] | None) -> dict | None:
+    """Collapsible accordion of treatment-chart images (default collapsed)."""
+    if not chart_image_urls:
+        return None
+    return {
+        "header": _IMAGE_HEADER,
+        "collapsible": True,
+        "uncollapsibleWidgetsCount": 0,
+        "widgets": [
+            {"image": {"imageUrl": url, "onClick": {"openLink": {"url": url}}}}
+            for url in chart_image_urls
+        ],
     }
 
 
@@ -60,10 +81,16 @@ def build_order_recon_card(
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
+    chart_image_urls: list[str] | None = None,
+    recon_id: str = "",
 ) -> list:
     """
     Build the cardsV2 list (one card). `edits`/`discontinues`/`news` are lists of
     {"key": ..., "label": ...} describing each proposed change.
+
+    `chart_image_urls` (optional) renders a collapsible accordion of the source
+    treatment-chart images. `recon_id` (optional) is carried in the Submit params so
+    the apply webhook can write the BQ action-audit row.
     """
     n = len(edits) + len(discontinues) + len(news)
     sections: list[dict] = []
@@ -78,11 +105,18 @@ def build_order_recon_card(
 
     for section in (
         _checkbox_section(_EDIT_HEADER, "edit_actions", edits),
-        _checkbox_section(_DISCONTINUE_HEADER, "discontinue_actions", discontinues),
+        _checkbox_section(_DISCONTINUE_HEADER, "discontinue_actions", discontinues,
+                          default_selected=False),  # un-ticked: Moderate posture
         _checkbox_section(_NEW_HEADER, "new_actions", news),
     ):
         if section:
             sections.append(section)
+
+    # Collapsed treatment-chart images, before Submit so it survives the post-submit
+    # rewrite (replace_actions_with_results strips only action headers + submit).
+    image_section = _image_section(chart_image_urls)
+    if image_section:
+        sections.append(image_section)
 
     # Submit + Open patient
     sections.append({
@@ -96,6 +130,7 @@ def build_order_recon_card(
                     "parameters": [
                         {"key": "action",        "value": "order_recon_submit"},
                         {"key": "action_set_id", "value": action_set_id},
+                        {"key": "recon_id",      "value": recon_id},
                         {"key": "callback_url",  "value": callback_url},
                         {"key": "cb_token",      "value": cb_token},
                     ],

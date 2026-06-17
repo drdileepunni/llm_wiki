@@ -246,6 +246,57 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.study_alert_feedback` (
 OPTIONS (description = "Clinician 1-5 appropriateness ratings from alert chat cards")
 """
 
+_DDL["med_recon_audit"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.med_recon_audit` (
+  recon_id               STRING    NOT NULL,
+  CPMRN                  STRING,
+  encounter              INT64,
+  snapshot_at            TIMESTAMP,
+  recon_at               TIMESTAMP,
+  document_file_keys     STRING,
+  document_reported_ats  STRING,
+  document_categories    STRING,
+  summary_narrative      STRING,
+  raw_transcription      STRING,
+  extracted_meds         STRING,
+  active_orders_snapshot STRING,
+  recon_items            STRING,
+  proposed_actions       STRING,
+  action_set_id          STRING,
+  image_urls             STRING,
+  model                  STRING,
+  discrepancy_count      INT64,
+  card_sent              BOOL,
+  recipients             STRING,
+  dedup_of               STRING,
+  step_costs             STRING,
+  created_at             TIMESTAMP
+)
+OPTIONS (description = "Medication reconciliation audit — full per-run trace")
+"""
+
+_DDL["med_recon_actions"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.med_recon_actions` (
+  recon_id           STRING,
+  action_set_id      STRING,
+  CPMRN              STRING,
+  encounter          INT64,
+  selected_keys      STRING,
+  action_kind        STRING,
+  action_key         STRING,
+  order_label        STRING,
+  result_ok          BOOL,
+  result_status      INT64,
+  result_error       STRING,
+  applied_by_email   STRING,
+  applied_by_display STRING,
+  space_name         STRING,
+  message_name       STRING,
+  applied_at         TIMESTAMP
+)
+OPTIONS (description = "Applied med-recon order actions — who/what/when/result")
+"""
+
 _DDL["fn_adjudications"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.fn_adjudications` (
   record_id        STRING,
@@ -671,6 +722,91 @@ class BQStudyStore:
         sql = f"SELECT * FROM {self._fqn('study_adjudications')}"
         return self._query(sql)
 
+    # ── med_recon ───────────────────────────────────────────────────────────────
+
+    def insert_med_recon(self, doc: dict) -> str:
+        """Insert one med-reconciliation audit row. Returns the recon_id."""
+        self._ensure_table("med_recon_audit")
+        recon_id = doc.get("recon_id") or _new_id()
+        sql = f"""
+        INSERT INTO {self._fqn("med_recon_audit")}
+          (recon_id, CPMRN, encounter, snapshot_at, recon_at, document_file_keys,
+           document_reported_ats, document_categories, summary_narrative, raw_transcription,
+           extracted_meds, active_orders_snapshot, recon_items, proposed_actions, action_set_id,
+           image_urls, model, discrepancy_count, card_sent, recipients, dedup_of, step_costs, created_at)
+        VALUES
+          (@recon_id, @CPMRN, @encounter, @snapshot_at, @recon_at, @document_file_keys,
+           @document_reported_ats, @document_categories, @summary_narrative, @raw_transcription,
+           @extracted_meds, @active_orders_snapshot, @recon_items, @proposed_actions, @action_set_id,
+           @image_urls, @model, @discrepancy_count, @card_sent, @recipients, @dedup_of, @step_costs, @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("recon_id",              "STRING",    recon_id),
+            bigquery.ScalarQueryParameter("CPMRN",                 "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",             "INT64",     doc.get("encounter", 1)),
+            bigquery.ScalarQueryParameter("snapshot_at",           "TIMESTAMP", _dt_to_iso(doc.get("snapshot_at"))),
+            bigquery.ScalarQueryParameter("recon_at",              "TIMESTAMP", _dt_to_iso(doc.get("recon_at"))),
+            bigquery.ScalarQueryParameter("document_file_keys",    "STRING",    _to_json_col(doc.get("document_file_keys"))),
+            bigquery.ScalarQueryParameter("document_reported_ats", "STRING",    _to_json_col(doc.get("document_reported_ats"))),
+            bigquery.ScalarQueryParameter("document_categories",   "STRING",    _to_json_col(doc.get("document_categories"))),
+            bigquery.ScalarQueryParameter("summary_narrative",     "STRING",    doc.get("summary_narrative")),
+            bigquery.ScalarQueryParameter("raw_transcription",     "STRING",    _to_json_col(doc.get("raw_transcription"))),
+            bigquery.ScalarQueryParameter("extracted_meds",        "STRING",    _to_json_col(doc.get("extracted_meds"))),
+            bigquery.ScalarQueryParameter("active_orders_snapshot","STRING",    _to_json_col(doc.get("active_orders_snapshot"))),
+            bigquery.ScalarQueryParameter("recon_items",           "STRING",    _to_json_col(doc.get("recon_items"))),
+            bigquery.ScalarQueryParameter("proposed_actions",      "STRING",    _to_json_col(doc.get("proposed_actions"))),
+            bigquery.ScalarQueryParameter("action_set_id",         "STRING",    doc.get("action_set_id")),
+            bigquery.ScalarQueryParameter("image_urls",            "STRING",    _to_json_col(doc.get("image_urls"))),
+            bigquery.ScalarQueryParameter("model",                 "STRING",    doc.get("model", "")),
+            bigquery.ScalarQueryParameter("discrepancy_count",     "INT64",     doc.get("discrepancy_count", 0)),
+            bigquery.ScalarQueryParameter("card_sent",             "BOOL",      bool(doc.get("card_sent", False))),
+            bigquery.ScalarQueryParameter("recipients",            "STRING",    _to_json_col(doc.get("recipients"))),
+            bigquery.ScalarQueryParameter("dedup_of",              "STRING",    doc.get("dedup_of")),
+            bigquery.ScalarQueryParameter("step_costs",            "STRING",    _to_json_col(doc.get("step_costs"))),
+            bigquery.ScalarQueryParameter("created_at",            "TIMESTAMP", _now_iso()),
+        ])
+        return recon_id
+
+    def insert_med_recon_action(self, doc: dict):
+        """Insert one applied-action row (one per action on Submit)."""
+        self._ensure_table("med_recon_actions")
+        sql = f"""
+        INSERT INTO {self._fqn("med_recon_actions")}
+          (recon_id, action_set_id, CPMRN, encounter, selected_keys, action_kind, action_key,
+           order_label, result_ok, result_status, result_error, applied_by_email,
+           applied_by_display, space_name, message_name, applied_at)
+        VALUES
+          (@recon_id, @action_set_id, @CPMRN, @encounter, @selected_keys, @action_kind, @action_key,
+           @order_label, @result_ok, @result_status, @result_error, @applied_by_email,
+           @applied_by_display, @space_name, @message_name, @applied_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("recon_id",           "STRING",    doc.get("recon_id", "")),
+            bigquery.ScalarQueryParameter("action_set_id",      "STRING",    doc.get("action_set_id", "")),
+            bigquery.ScalarQueryParameter("CPMRN",              "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",          "INT64",     doc.get("encounter", 1)),
+            bigquery.ScalarQueryParameter("selected_keys",      "STRING",    _to_json_col(doc.get("selected_keys"))),
+            bigquery.ScalarQueryParameter("action_kind",        "STRING",    doc.get("action_kind", "")),
+            bigquery.ScalarQueryParameter("action_key",         "STRING",    doc.get("action_key", "")),
+            bigquery.ScalarQueryParameter("order_label",        "STRING",    doc.get("order_label", "")),
+            bigquery.ScalarQueryParameter("result_ok",          "BOOL",      bool(doc.get("result_ok", False))),
+            bigquery.ScalarQueryParameter("result_status",      "INT64",     doc.get("result_status")),
+            bigquery.ScalarQueryParameter("result_error",       "STRING",    doc.get("result_error")),
+            bigquery.ScalarQueryParameter("applied_by_email",   "STRING",    doc.get("applied_by_email", "")),
+            bigquery.ScalarQueryParameter("applied_by_display", "STRING",    doc.get("applied_by_display", "")),
+            bigquery.ScalarQueryParameter("space_name",         "STRING",    doc.get("space_name", "")),
+            bigquery.ScalarQueryParameter("message_name",       "STRING",    doc.get("message_name", "")),
+            bigquery.ScalarQueryParameter("applied_at",         "TIMESTAMP", _now_iso()),
+        ])
+
+    def find_med_recon(self, filter: dict) -> list[dict]:
+        """SELECT med_recon_audit rows matching filter (recon_id, CPMRN, encounter, ...)."""
+        self._ensure_table("med_recon_audit")
+        clauses, params = _build_where("med_recon_audit", filter)
+        where = " AND ".join(clauses) if clauses else "TRUE"
+        sql = f"SELECT * FROM {self._fqn('med_recon_audit')} WHERE {where}"
+        return self._query(sql, params)
+
     def insert_run_cost(self, doc: dict):
         self._ensure_table("pipeline_run_costs")
         sql = f"""
@@ -699,6 +835,8 @@ _FILTERABLE: dict[str, set[str]] = {
     "study_sbar_import":{"CPMRN", "encounter", "match_status", "create_date_time", "window_expires_at", "sbar_id"},
     "study_task_import":{"CPMRN", "encounter", "match_status", "task_visible_at", "window_expires_at", "task_id"},
     "study_suppressed_events": {"CPMRN", "encounter", "suppressed_at"},
+    "med_recon_audit":  {"recon_id", "CPMRN", "encounter", "recon_at", "action_set_id"},
+    "med_recon_actions":{"recon_id", "CPMRN", "encounter", "action_set_id"},
 }
 
 

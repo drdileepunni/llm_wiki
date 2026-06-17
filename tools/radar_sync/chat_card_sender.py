@@ -77,6 +77,37 @@ def _build_cards_v2(
     )
 
 
+def send_cards_to_recipients(cards_v2: list, recipients: list[str]) -> bool:
+    """
+    POST a pre-built cardsV2 payload to each recipient via the chat-microservice.
+    Generic helper (reused by med-recon). Returns True if at least one send succeeded.
+    """
+    service_url = (os.getenv("GCHAT_SERVICE_URL") or _DEFAULT_GCHAT_SERVICE_URL).rstrip("/")
+    api_key = os.getenv("GCHAT_API_KEY", "")
+    if not api_key:
+        logger.error("chat_card_sender: GCHAT_API_KEY not set — cannot send cards")
+        return False
+
+    sent_any = False
+    for email in recipients:
+        try:
+            resp = requests.post(
+                f"{service_url}/send-cards",
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"user_email": email, "cardsV2": cards_v2},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                sent_any = True
+                logger.info("chat_card_sender: card sent to %s", email)
+            else:
+                logger.error("chat_card_sender: send to %s failed (HTTP %d): %s",
+                             email, resp.status_code, resp.text[:300])
+        except Exception:
+            logger.exception("chat_card_sender: send to %s failed", email)
+    return sent_any
+
+
 def send_batch_alert_cards(
     cpmrn: str,
     encounter: int,

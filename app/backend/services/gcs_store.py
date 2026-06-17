@@ -584,3 +584,8 @@ def get_gcs_db(bucket_name: str | None = None) -> GCSDatabase:
         _db_instance = GCSDatabase(bucket)
         log.info("gcs_store: connected to bucket gs://%s", bucket_name)
     return _db_instance
+
+
+def get_bucket() -> storage.Bucket:
+    """Return the underlying storage.Bucket (for raw blob upload / signed URLs)."""
+    return get_gcs_db()._bucket

@@ -41,6 +41,15 @@ class LLMUsage:
     thinking_tokens: int = 0   # Gemini 2.5: thoughts_token_count from usage_metadata
 
 
+def _usage_from(raw) -> "LLMUsage":
+    """Build an LLMUsage from a Gemini response's usage_metadata."""
+    meta = getattr(raw, "usage_metadata", None)
+    in_tok    = getattr(meta, "prompt_token_count",     0) or 0
+    out_tok   = getattr(meta, "candidates_token_count", 0) or 0
+    think_tok = getattr(meta, "thoughts_token_count",   0) or 0
+    return LLMUsage(in_tok, out_tok, thinking_tokens=think_tok)
+
+
 @dataclass
 class LLMToolUseBlock:
     type: str = "tool_use"
@@ -267,12 +276,59 @@ class GeminiLLMClient:
         `schema` must be a Pydantic BaseModel subclass.
         Returns a plain Python dict guaranteed to match the schema.
         """
-        import json as _json
+        raw = self._structured_request(prompt, schema, system, max_tokens)
+        return self._parse_json_response(raw)
+
+    def generate_json_with_usage(
+        self,
+        prompt: str,
+        schema: type,
+        system: str = "",
+        max_tokens: int = 2048,
+    ) -> tuple[dict, LLMUsage]:
+        """
+        Same as generate_json, but also returns token usage so callers can attribute
+        cost per step. Image-token counts (for multimodal prompts) are included in
+        prompt_token_count.
+        """
+        raw = self._structured_request(prompt, schema, system, max_tokens)
+        parsed = self._parse_json_response(raw)
+        return parsed, _usage_from(raw)
+
+    def generate_json_multimodal_with_usage(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        schema: type,
+        system: str = "",
+        max_tokens: int = 4096,
+    ) -> tuple[dict, LLMUsage]:
+        """
+        Multimodal native structured output: send one or more images plus a text
+        prompt and get a schema-validated dict back, with token usage (image tokens
+        included in prompt_token_count). `images` is a list of (bytes, mime_type).
+        """
         from google.genai import types
 
-        raw = self._client.models.generate_content(
+        parts = [types.Part.from_bytes(data=b, mime_type=mt) for b, mt in images]
+        parts.append(types.Part(text=prompt))
+        raw = self._structured_request(prompt, schema, system, max_tokens, parts=parts)
+        return self._parse_json_response(raw), _usage_from(raw)
+
+    def _structured_request(self, prompt: str, schema: type, system: str, max_tokens: int,
+                            parts: list | None = None):
+        """Issue a native structured-output request and return the raw response.
+
+        When `parts` is given (e.g. image + text parts for a multimodal call) it is
+        used verbatim; otherwise the text `prompt` becomes the sole part.
+        """
+        from google.genai import types
+
+        if parts is None:
+            parts = [types.Part(text=prompt)]
+        return self._client.models.generate_content(
             model=self.model,
-            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 system_instruction=system or None,
                 response_mime_type="application/json",
@@ -286,6 +342,12 @@ class GeminiLLMClient:
                 ],
             ),
         )
+
+    @staticmethod
+    def _parse_json_response(raw) -> dict:
+        """Parse a structured-output response, repairing truncated JSON when possible."""
+        import json as _json
+
         text = raw.text
         if not text:
             finish_reason = None

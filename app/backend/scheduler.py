@@ -49,6 +49,10 @@ def _coerce_dt(v) -> "datetime | None":
 _scheduler: BackgroundScheduler | None = None
 _last_run_at: datetime | None = None
 _last_run_results: list = []
+
+# Hard cap on med-recon cards sent per pipeline cycle (trial period — keeps costs bounded
+# while we calibrate the feature across a 40-45 patient workspace).
+_RECON_CARD_LIMIT = 5
 _lock_fh = None   # open file handle — keeps the lock alive
 
 _LOCK_PATH = Path("/tmp/llm_wiki_scheduler.lock")
@@ -350,6 +354,30 @@ def _run_fn_detector_step(
         status["fn_detector"] = {"error": "exception"}
 
 
+def _run_med_recon_step(
+    cpmrn: str,
+    encounter: int,
+    chart: dict,
+    snapshot_at: datetime,
+    db: Any,
+    status: dict,
+) -> dict:
+    """
+    Run medication reconciliation and write result into status dict. Returns the result
+    dict so the caller can check card_sent and update the per-cycle send counter.
+    """
+    try:
+        from tools.radar_sync.med_recon.orchestrator import run_med_recon
+        result = run_med_recon(cpmrn, encounter, chart, snapshot_at, db)
+        status["med_recon"] = result
+        logger.info("pipeline: med_recon done for %s enc=%d — %s", cpmrn, encounter, result)
+        return result
+    except Exception:
+        logger.exception("pipeline: med_recon failed for %s enc=%d", cpmrn, encounter)
+        status["med_recon"] = {"error": "exception"}
+        return {"error": "exception"}
+
+
 def _collect_all(max_patients: int | None = None):
     """Run one full pipeline cycle. Pass max_patients to limit for local testing."""
     global _last_run_at, _last_run_results
@@ -420,6 +448,8 @@ def _collect_all(max_patients: int | None = None):
         logger.info("scheduler: collecting %d active patient(s)%s", len(patients),
                     f" (limited to {max_patients})" if max_patients is not None else "")
 
+        recon_cards_sent = 0  # cap med-recon sends per cycle to _RECON_CARD_LIMIT
+
         for p in patients:
             cpmrn     = p["CPMRN"]
             encounter = p.get("encounter", 1)
@@ -473,6 +503,14 @@ def _collect_all(max_patients: int | None = None):
                     pipeline_status = _run_live_pipeline(
                         cpmrn, encounter, recent["chart"], snap_ts, db
                     )
+                    if recon_cards_sent < _RECON_CARD_LIMIT:
+                        recon_result = _run_med_recon_step(cpmrn, encounter, recent["chart"], snap_ts, db, pipeline_status)
+                        if recon_result.get("card_sent"):
+                            recon_cards_sent += 1
+                    else:
+                        logger.info("pipeline: med_recon skipped for %s enc=%d — cycle limit (%d) reached",
+                                    cpmrn, encounter, _RECON_CARD_LIMIT)
+                        pipeline_status["med_recon"] = {"skipped": "cycle_limit"}
                     _last_run_results.append({
                         "cpmrn": cpmrn, "status": "pipeline_on_existing_snapshot",
                         "pipeline": pipeline_status,
@@ -501,6 +539,14 @@ def _collect_all(max_patients: int | None = None):
                     pipeline_status = _run_live_pipeline(
                         cpmrn, encounter, snap_doc["chart"], snap_ts
                     )
+                    if recon_cards_sent < _RECON_CARD_LIMIT:
+                        recon_result = _run_med_recon_step(cpmrn, encounter, snap_doc["chart"], snap_ts, db, pipeline_status)
+                        if recon_result.get("card_sent"):
+                            recon_cards_sent += 1
+                    else:
+                        logger.info("pipeline: med_recon skipped for %s enc=%d — cycle limit (%d) reached",
+                                    cpmrn, encounter, _RECON_CARD_LIMIT)
+                        pipeline_status["med_recon"] = {"skipped": "cycle_limit"}
                 else:
                     pipeline_status = {"error": "snapshot_not_found"}
 

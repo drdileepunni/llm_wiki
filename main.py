@@ -177,10 +177,13 @@ def order_action():
     chat_event = event.get("chat", {}) or {}
     user = chat_event.get("user", {}) or {}
     user_display = user.get("displayName", "unknown")
+    user_email = user.get("email", "unknown")
     payload = chat_event.get("buttonClickedPayload", {}) or {}
     message = payload.get("message", {}) or {}
+    space_name = (payload.get("space", {}) or {}).get("name", "")
 
     action_set_id = parameters.get("action_set_id", "")
+    recon_id = parameters.get("recon_id", "")
     selected_keys = selected("edit_actions") + selected("discontinue_actions") + selected("new_actions")
 
     from tools.radar_sync.order_action_store import load_action_set, select_actions
@@ -224,6 +227,34 @@ def order_action():
                 "message": {"text": "⚠️ Could not apply the order changes. Please try again."}
             }}}
         })
+
+    # Audit: one med_recon_actions row per applied action (who/what/result).
+    # select_actions filters selected_keys to those present in the set, so the
+    # filtered keys are positionally aligned with `actions` and `results`.
+    try:
+        from tools.radar_sync.med_recon.audit import write_recon_action_result
+        stored = action_set.get("actions", {}) or {}
+        applied_keys = [k for k in selected_keys if k in stored]
+        for key, res in zip(applied_keys, results):
+            write_recon_action_result({
+                "recon_id": recon_id,
+                "action_set_id": action_set_id,
+                "CPMRN": cpmrn,
+                "encounter": encounter,
+                "selected_keys": applied_keys,
+                "action_kind": res.get("kind", ""),
+                "action_key": key,
+                "order_label": stored.get(key, {}).get("label", res.get("name", "")),
+                "result_ok": res.get("ok", False),
+                "result_status": res.get("status"),
+                "result_error": res.get("error"),
+                "applied_by_email": user_email,
+                "applied_by_display": user_display,
+                "space_name": space_name,
+                "message_name": message.get("name", ""),
+            })
+    except Exception:
+        logging.exception("order-action: failed to write med_recon_actions audit for %s", action_set_id)
 
     updated_cards = replace_actions_with_results(message.get("cardsV2", []), results)
     return jsonify({

@@ -128,6 +128,8 @@ def _patch(cpmrn: str, encounter: int, leaf: str, body: dict) -> dict:
     url = f"{_post_url()}/api/patients/{cpmrn}/{encounter}/orders/{leaf}"
     resp = requests.patch(url, headers=_write_headers(), json=body, timeout=_TIMEOUT)
     ok = resp.status_code in (200, 201)
+    logger.info("order PATCH %s → HTTP %s | body_keys=%s | response=%s",
+                leaf, resp.status_code, list(body.keys()), resp.text[:400])
     if not ok:
         logger.error("order PATCH %s failed (HTTP %s): %s", leaf, resp.status_code, resp.text[:300])
     return {"ok": ok, "status": resp.status_code, "error": None if ok else resp.text[:300]}
@@ -165,7 +167,8 @@ def discontinue_order(
                 "error": f"active order {order_no!r} not found"}
 
     body = dict(order)
-    body["discontinue"] = {"reasons": reasons or [], "statement": statement}
+    body["discontinue"] = {"reasons": reasons or ["Other"], "statement": statement}
+    body["toBeDiscarded"] = True
     body["bedsideOrder"] = True
     result = _patch(cpmrn, encounter, "edit", body)
     result.update({"kind": "discontinue", "name": _order_label(order)})
