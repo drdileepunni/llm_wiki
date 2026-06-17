@@ -433,6 +433,22 @@ def _get_lab_trend(cpmrn: str, encounter: int, lab_name: str, n: int = 6) -> str
     return "\n".join(lines)
 
 
+def _lookup_lab_value_in_snapshot(cpmrn: str, encounter: int, lab_name: str) -> float | None:
+    """Return the most recent numeric value for lab_name from the latest snapshot, or None.
+
+    Reuses _get_lab_trend (n=1) so aliasing and blood-gas filtering are consistent.
+    Returns None if the lab is not found or the trend output cannot be parsed.
+    """
+    trend = _get_lab_trend(cpmrn, encounter, lab_name, n=1)
+    m = re.search(r"=\s*([\d.]+)", trend)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
 def _amt(obj: Any) -> float:
     """Safely extract a numeric amount from an I/O sub-object or scalar."""
     if obj is None:

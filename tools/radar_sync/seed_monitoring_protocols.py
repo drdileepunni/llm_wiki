@@ -229,6 +229,79 @@ PROTOCOLS = [
             "Consider urgent CT head if not already done within the last 12 hours."
         ),
     },
+    {
+        "protocol_id": "permissive-respiratory",
+        "applies_when": [
+            "hypoxia",
+            "desaturation",
+            "low spo2",
+            "low oxygen",
+            "tachypnea",
+            "tachypnoea",
+            "respiratory distress",
+            "oxygen requirement",
+            "hypoxaemia",
+        ],
+        "gate_question": (
+            "Is this patient's hypoxia or tachypnea likely to be expected and tolerable given their clinical context? "
+            "IMPORTANT: Use the SF ratio (SpO2 / FiO2%), not raw SpO2, as the primary oxygenation measure — "
+            "call get_vital_trend('SpO2') which returns SF ratio alongside each reading. "
+            "Assess each scenario below — only one needs to match to apply permissive monitoring. "
+            "If matched, do NOT alert; set next_check as specified and monitor. "
+            "A scenario is invalidated if ANY of its invalidation triggers are present. "
+            "SpO2 < 85% is NEVER permissive — alert immediately regardless of context."
+        ),
+        "scenarios": [
+            {
+                "name": "post_operative",
+                "description": (
+                    "Post-operative atelectasis, splinting, or pain-driven tachypnea in the first 48 hours — "
+                    "both mild hypoxia and isolated tachypnea are expected and usually self-resolving"
+                ),
+                "band_description": (
+                    "Mild hypoxia: SpO2 88–91% AND SF ratio ≥ 200 AND RR ≤ 30 — recheck in 1 hour. "
+                    "Isolated tachypnea (no hypoxia): RR 25–30 AND SpO2 ≥ 92% AND SF ratio ≥ 315 — recheck in 2 hours."
+                ),
+                "window": "First 48 hours from a documented surgical procedure",
+                "invalidate_if": [
+                    "SpO2 < 88% on any reading",
+                    "SF ratio < 200",
+                    "RR > 30 on two consecutive readings",
+                    "FiO2 requirement increasing across last 3 readings",
+                    "new fever > 38.5°C alongside tachypnea (raises pneumonia or PE concern)",
+                    "clinical notes document respiratory distress, accessory muscle use, or new wheeze",
+                    "new diagnosis of pneumonia, pulmonary embolism, or ARDS",
+                    "more than 48 hours since documented surgical procedure",
+                ],
+            },
+            {
+                "name": "known_baseline_hypoxia",
+                "description": (
+                    "Patient with documented chronically low resting SpO2 (COPD, interstitial lung disease, "
+                    "obesity hypoventilation) — stable at their own established baseline"
+                ),
+                "band_description": (
+                    "SpO2 at or above the patient's documented resting baseline (typically 88–93%) "
+                    "AND SF ratio ≥ 200. "
+                    "Do not alert if the patient is at their known baseline — this is not acute deterioration."
+                ),
+                "window": "Ongoing while no acute deterioration from documented baseline is present",
+                "invalidate_if": [
+                    "SpO2 drops more than 4% below the patient's documented resting baseline",
+                    "SF ratio < 200",
+                    "new respiratory complaint or clinical sign not previously documented",
+                    "FiO2 requirement increasing across last 3 readings",
+                ],
+            },
+        ],
+        "escalation_target_after_window": (
+            "If a permissive window expires without improvement, set clinical_status to 'worsening' and alert. "
+            "For hypoxia: target SpO2 ≥ 94% (or ≥ 92% for known COPD/baseline hypoxia) on stable or decreasing FiO2. "
+            "For tachypnea: target RR < 24 with a documented underlying cause. "
+            "Post-operative patients beyond 48 hours should be treated as a primary respiratory problem — "
+            "apply standard alert thresholds (SpO2 < 92%, RR > 28)."
+        ),
+    },
 ]
 
 

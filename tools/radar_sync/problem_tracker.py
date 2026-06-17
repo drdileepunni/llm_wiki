@@ -109,6 +109,12 @@ You will receive:
 For EACH problem, you must determine:
 1. Is the problem being addressed? Query notes to find documentation of a plan or treatment.
    "Being addressed" means a documented plan exists — not necessarily that it is working yet.
+   IMPORTANT: if the notes document that an intervention was considered but declined by the
+   patient or family (e.g. "dialysis declined by attendant", "family refusing surgery",
+   "patient not consenting to intubation"), set being_addressed=True and should_alert=False.
+   A documented informed refusal IS a management plan — the clinical team has evaluated the
+   situation and the decision has been made. Do not repeatedly alert for a problem where the
+   only unaddressed element is an intervention the patient/family has explicitly declined.
 2. Should you set a next_check?
    - ONLY set next_check for "worsening" or "critical" problems.
    - Do NOT set next_check for stable, improving, or resolved problems — omit the field entirely.
@@ -123,6 +129,11 @@ For EACH problem, you must determine:
        in the chart; false if it has not arrived yet.
      The system uses "fulfilled" to manage the check window — do not skip it.
      (due_after resets automatically when fulfilled=true: vital=+1h, lab=+6h, io=+1h)
+   - For SUBJECTIVE SYMPTOM problems (pain, nausea, breathlessness, etc.): the next_check
+     MUST be the objective vital sign that corroborates the alert, not an unrelated parameter.
+     If HR is the objective correlate, set vital_key="HR". If there is no objective vital
+     correlate (e.g. the problem is corroborated only by a lab or imaging finding), omit
+     next_check entirely — do NOT default to GCS or any other unrelated vital.
 3. Should we alert? Alert ONLY if ALL of the following are true:
    - clinical_status is "worsening" or "critical"  (NEVER alert for stable/improving/resolved)
    - Problem is NOT being addressed (no documented plan), OR
@@ -132,6 +143,11 @@ For EACH problem, you must determine:
 
 IMPORTANT RULES:
 - "Being addressed" = documented plan exists, even if result not yet visible (e.g. transfusion ongoing)
+- being_addressed=True ALWAYS means should_alert=False — no exceptions, not even for critical events.
+  If a clinical team is already actively responding (ACLS in progress, CPR ongoing, emergency
+  intubation underway, vasopressors being titrated), being_addressed=True and should_alert=False.
+  You do NOT alert a clinician about something they are already physically doing. The pipeline
+  adds value by catching GAPS in care — not by narrating events already in progress.
 - If get_problem_state shows a prior status of "resolved" but the current summary marks it as
   worsening/critical, treat the stored addressed_evidence as STALE — the old plan was for a
   prior episode. Query notes fresh to check if a new plan exists for the current episode
@@ -164,16 +180,25 @@ IMPORTANT RULES:
   (3) the direction of the recent trend. e.g. "BP rose from baseline 128/80 to a peak of 171/90;
   currently 157/90 — trending down from peak but still well above baseline. No updated plan."
   Never phrase the reason in a way that only compares peak vs current, as this sounds like improvement.
-- When writing alert_title, name the SPECIFIC concern in ≤8 words — not the problem category.
+- When writing alert_title, name the SPECIFIC concern in ≤10 words — not the problem category.
   The title is the first thing a clinician reads on the alert card; make it immediately actionable.
+  When the alert is driven by a specific numeric vital or lab value, include the IST timestamp
+  of that reading in parentheses so the clinician knows exactly when it was measured.
   Bad:  "Post-operative monitoring", "Hyponatremia", "Shock"
   Good: "Note contradicts stable haemodynamics", "Na=110 — no correction plan",
-        "HR 160 uncontrolled — rate plan absent", "Lactate 20 — pH discordance",
-        "Overdue ABG on CPAP", "Cr rising — no nephrology plan"
+        "HR 160 (04:12 IST) uncontrolled — no rate plan", "Lactate 20 — pH discordance",
+        "SpO2 90% (05:22 IST) — no oxygen plan", "Cr rising — no nephrology plan"
 - For vital-sign-dependent problems (Fever, Tachycardia, Hypertension, Hypotension, etc.):
   if get_vital_trend returns "Unknown vital" or "No … readings found", do NOT conclude worsening
   based on notes alone — mark as stable with addressed_evidence="vital data unavailable in
   snapshots — cannot confirm worsening" and should_alert=False
+- LAB VALUE ACCURACY RULE — do NOT state a specific numeric lab value in alert_title or
+  alert_reason unless you have called get_lab_trend and that exact value appears in the result.
+  If you have not yet called get_lab_trend for this lab, call it before setting should_alert=True.
+  If get_lab_trend returns no result within the past 24 hours, do NOT assert a current value —
+  state the last known value and its date instead:
+    CORRECT: "last known Glucose 166 mg/dL (16 Jun 11:40) — no recent result available"
+    WRONG:   "Glucose 20 mg/dL — no insulin plan"   ← fabricated value; will be suppressed
 - VITAL SIGN ALERT FLOORS — for hemodynamic and respiratory problems, do NOT set
   clinical_status="worsening" or "critical" and do NOT alert unless the CURRENT value
   (most recent reading) crosses the relevant floor:
@@ -216,6 +241,11 @@ IMPORTANT RULES:
   If none of the above are present, classify the symptom-based problem as stable and set
   should_alert=False. The adequacy of the current treatment plan is the clinician's call —
   do NOT alert purely because you judge the prescribed analgesic or antiemetic insufficient.
+  MANDATORY when alerting on a subjective symptom: you MUST explicitly state the objective
+  corroborating finding in alert_reason. Do not leave it implied. The clinician reading the
+  card has no context — they need to see both the symptom AND the objective finding that
+  supports it. Example: "Patient reports refractory abdominal pain (NRS 8/10); HR 160 bpm
+  provides objective corroboration. No revised analgesic plan documented."
 - TEMPORAL AWARENESS — notes must always be evaluated relative to the snapshot time.
   A note written on Day X that says "patient experienced episodes today" refers to events
   on Day X, not the current assessment date.
@@ -794,6 +824,29 @@ def _all_cited_notes_stale(assessment: dict, snapshot_at: datetime) -> bool:
         if ts > cutoff:
             return False  # at least one fresh note — allow alert
     return True
+
+
+def _extract_alert_lab_value(alert_title: str) -> tuple[str, float] | None:
+    """
+    Extract (lab_name, value) from an alert title if a specific numeric lab value is present.
+    Handles:  "Glucose 20 mg/dL — ...",  "Na=110 — ...",  "K 6.8 — ..."
+    Returns None if no parseable lab+number pattern is found.
+    """
+    import re as _re
+    title = alert_title.strip()
+    # "Na=110", "Glucose=20.5"
+    m = _re.match(r'^([A-Za-z][A-Za-z0-9]{0,14})\s*=\s*([\d.]+)', title)
+    if m:
+        return m.group(1), float(m.group(2))
+    # "Glucose 20 mg/dL — ...", "Lactate 20.5 —"
+    m = _re.match(
+        r'^([A-Za-z][A-Za-z0-9\s]{0,14}?)\s+([\d.]+)\s*'
+        r'(?:mg/dL|mmol/L|mEq/L|g/dL|%|IU/L|U/L|µmol/L|umol/L)?\s*[—\-–]',
+        title,
+    )
+    if m:
+        return m.group(1).strip(), float(m.group(2))
+    return None
 
 
 def _vital_improved_since_snapshot(
@@ -2116,6 +2169,22 @@ def track_problems(
         will_alert   = False
         alert_id     = ""
 
+        # Hard gate: being_addressed=True must always mean should_alert=False.
+        # If the model set both (it sometimes does for "critical" acute events),
+        # override here — alerting on something already being actively managed
+        # adds no value and degrades trust in the pipeline.
+        if should_alert and assessment.get("being_addressed", False):
+            should_alert = False
+            logger.warning(
+                "problem_tracker: alert suppressed for '%s' %s enc=%d — "
+                "model set being_addressed=True but also should_alert=True (rule violation); "
+                "suppressing as problem is already being managed",
+                problem_name, cpmrn, encounter,
+            )
+            alerts_suppressed.append(problem_name)
+            _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+            continue
+
         if should_alert:
             clinical_status = assessment.get("clinical_status", "stable")
 
@@ -2168,7 +2237,11 @@ def track_problems(
                                       "neurological deterioration", "coma", "encephalopathy")
             _problem_lc = problem_name.lower()
             _gate_not_active = _gate_verdict not in ("permissive_active",)
-            if _gate_not_active and any(kw in _problem_lc for kw in _gcs_protocol_keywords):
+            # Also trigger for any problem where the model set next_check.vital_key="GCS",
+            # e.g. "Acute Intracranial Hemorrhage" tracked via GCS — problem name won't
+            # contain GCS keywords but the alert is still GCS-driven.
+            _is_gcs_driven = (assessment.get("next_check") or {}).get("vital_key", "").upper() == "GCS"
+            if _gate_not_active and (any(kw in _problem_lc for kw in _gcs_protocol_keywords) or _is_gcs_driven):
                 try:
                     from tools.radar_sync.status_classifier import _get_gcs_6h_delta
                     _gcs_delta = _get_gcs_6h_delta(cpmrn, encounter)
@@ -2243,6 +2316,29 @@ def track_problems(
                         problem_name, cpmrn, encounter, nc_lab, _LAB_STALENESS_HOURS,
                     )
                 else:
+                    # ── Pre-send lab value cross-check ────────────────────────
+                    _lab_parse = _extract_alert_lab_value(assessment.get("alert_title") or "")
+                    if _lab_parse is not None:
+                        _lv_name, _lv_claimed = _lab_parse
+                        try:
+                            from tools.radar_sync.status_classifier import _lookup_lab_value_in_snapshot
+                            _lv_actual = _lookup_lab_value_in_snapshot(cpmrn, encounter, _lv_name)
+                            if _lv_actual is not None:
+                                _lv_tol = max(0.25 * _lv_actual, 3.0)
+                                if abs(_lv_claimed - _lv_actual) > _lv_tol:
+                                    alerts_suppressed.append(problem_name)
+                                    logger.warning(
+                                        "problem_tracker: alert suppressed for '%s' %s enc=%d — "
+                                        "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
+                                        problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
+                                    )
+                                    _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                                    continue
+                        except Exception:
+                            logger.exception(
+                                "problem_tracker: lab value cross-check failed for '%s' %s enc=%d — continuing",
+                                problem_name, cpmrn, encounter,
+                            )
                     alert_id   = str(_uuid4())
                     will_alert = True
                     assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
@@ -2270,6 +2366,29 @@ def track_problems(
                         _upsert_problem(cpmrn, encounter, assessment, now, False, db)
                         continue
 
+                # ── Pre-send lab value cross-check ────────────────────────────
+                _lab_parse = _extract_alert_lab_value(assessment.get("alert_title") or "")
+                if _lab_parse is not None:
+                    _lv_name, _lv_claimed = _lab_parse
+                    try:
+                        from tools.radar_sync.status_classifier import _lookup_lab_value_in_snapshot
+                        _lv_actual = _lookup_lab_value_in_snapshot(cpmrn, encounter, _lv_name)
+                        if _lv_actual is not None:
+                            _lv_tol = max(0.25 * _lv_actual, 3.0)
+                            if abs(_lv_claimed - _lv_actual) > _lv_tol:
+                                alerts_suppressed.append(problem_name)
+                                logger.warning(
+                                    "problem_tracker: alert suppressed for '%s' %s enc=%d — "
+                                    "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
+                                    problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
+                                )
+                                _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                                continue
+                    except Exception:
+                        logger.exception(
+                            "problem_tracker: lab value cross-check failed for '%s' %s enc=%d — continuing",
+                            problem_name, cpmrn, encounter,
+                        )
                 alert_id   = str(_uuid4())
                 will_alert = True
                 # Inject snapshot_at so the card builder can show timestamps in IST
