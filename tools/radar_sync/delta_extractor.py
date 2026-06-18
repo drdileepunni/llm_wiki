@@ -28,22 +28,24 @@ def extract_delta(chart: dict, last_snapshot_at: datetime | str | None) -> dict:
 
     Returns:
         {
-            "new_vitals": [...],      # vitals with timestamp > last_snapshot_at
-            "new_labs": [...],        # lab documents with reportedAt > last_snapshot_at
-            "delta_orders": {...},    # full active/pending orders (no good timestamp diff possible)
-            "new_notes": [...],       # notes with timestamp > last_snapshot_at
-            "io_last_24h": {...},     # total intake/output ml in last 24h window
+            "new_vitals": [...],          # vitals with timestamp > last_snapshot_at
+            "new_labs": [...],            # lab documents with reportedAt > last_snapshot_at
+            "delta_orders": {...},        # full active/pending orders (no good timestamp diff possible)
+            "new_notes": [...],           # notes with timestamp > last_snapshot_at
+            "io_last_24h": {...},         # total intake/output ml in last 24h window
+            "new_report_findings": [],    # populated by scheduler after analyze_new_reports (Phase 2)
         }
     """
     # GCS stores timestamps as ISO strings — coerce to datetime before comparing
     cutoff = _parse_ts(last_snapshot_at)
 
     return {
-        "new_vitals":   _new_vitals(chart, cutoff),
-        "new_labs":     _new_labs(chart, cutoff),
-        "delta_orders": _current_orders(chart),
-        "new_notes":    _new_notes(chart, cutoff),
-        "io_last_24h":  _io_last_24h(chart),
+        "new_vitals":          _new_vitals(chart, cutoff),
+        "new_labs":            _new_labs(chart, cutoff),
+        "delta_orders":        _current_orders(chart),
+        "new_notes":           _new_notes(chart, cutoff),
+        "io_last_24h":         _io_last_24h(chart),
+        "new_report_findings": [],  # injected by scheduler.py after analyze_new_reports
     }
 
 

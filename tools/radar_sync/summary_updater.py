@@ -214,6 +214,17 @@ def _format_delta(delta: dict) -> str:
             f"balance={io.get('balance_ml')} ml"
         )
 
+    report_findings = delta.get("new_report_findings") or []
+    if report_findings:
+        lines.append(f"New diagnostic report findings ({len(report_findings)}):")
+        for f in report_findings:
+            label    = f.get("label", "")
+            body_sys = f.get("body_system", "")
+            severity = f.get("severity", "")
+            new_dx   = " [NEW DIAGNOSIS]" if f.get("is_new_diagnosis") else ""
+            evidence = f.get("supporting_evidence", "")
+            lines.append(f"  • [{severity}] {label} ({body_sys}){new_dx} — {evidence}")
+
     return "\n".join(lines) if lines else "(no new events)"
 
 
@@ -347,6 +358,32 @@ def _extract_flagged_abnormalities(chart: dict | None, delta: dict | None) -> st
     return "\n".join(lines)
 
 
+def _extract_new_diagnosis_findings(delta: dict) -> str:
+    """
+    Build a mandatory-extraction block for is_new_diagnosis=True findings from
+    newly interpreted diagnostic reports. Returns "" when nothing to mandate.
+    """
+    findings = [f for f in (delta.get("new_report_findings") or []) if f.get("is_new_diagnosis")]
+    if not findings:
+        return ""
+    lines = [
+        "⚠ NEW DIAGNOSES FROM DIAGNOSTIC REPORTS — MANDATORY PROBLEM EXTRACTION",
+        "The following diagnoses were identified in newly resulted diagnostic reports.",
+        "Every item below MUST appear as a problem in your output — do not omit any.",
+        "If an existing problem already covers it, update that problem and set",
+        "plan_changing_event to reference the diagnostic report finding.",
+        "Only create a new problem if no existing problem already covers the diagnosis.",
+        "",
+    ]
+    for f in findings:
+        severity = (f.get("severity") or "notable").upper()
+        label    = f.get("label", "")
+        body_sys = f.get("body_system", "")
+        evidence = f.get("supporting_evidence", "")
+        lines.append(f"  [{severity}] {label} ({body_sys}) — {evidence}")
+    return "\n".join(lines)
+
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
@@ -368,6 +405,7 @@ _PROBLEM_FIELDS = """For each active clinical problem include:
 
 def _initial_prompt(cpmrn: str, delta: dict, chart: dict | None) -> str:
     flagged = _extract_flagged_abnormalities(chart, delta)
+    report_dx = _extract_new_diagnosis_findings(delta)
 
     if chart:
         context = f"""DEMOGRAPHICS: {_format_demographics(chart)}
@@ -385,10 +423,11 @@ CLINICAL NOTES:
     else:
         context = f"CLINICAL DATA:\n{_format_delta(delta)}"
 
-    flagged_block = f"\n{flagged}\n" if flagged else ""
+    flagged_block   = f"\n{flagged}\n"   if flagged   else ""
+    report_dx_block = f"\n{report_dx}\n" if report_dx else ""
 
     return f"""Patient CPMRN: {cpmrn}
-{flagged_block}
+{flagged_block}{report_dx_block}
 {context}
 
 Write a structured problem-oriented ICU summary.
@@ -404,6 +443,7 @@ suggested_actions: list of 3-5 specific, actionable clinical suggestions for the
 def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict, chart: dict | None = None) -> str:
     delta_text = _format_delta(delta)
     flagged = _extract_flagged_abnormalities(chart, delta)
+    report_dx = _extract_new_diagnosis_findings(delta)
     existing_narrative = existing_summary.get("narrative", "") if isinstance(existing_summary, dict) else existing_summary
 
     # Enumerate current problem names so the model reuses them exactly
@@ -417,10 +457,11 @@ def _update_prompt(cpmrn: str, existing_summary: dict, delta: dict, chart: dict 
     else:
         names_instruction = ""
 
-    flagged_block = f"\n{flagged}\n" if flagged else ""
+    flagged_block   = f"\n{flagged}\n"   if flagged   else ""
+    report_dx_block = f"\n{report_dx}\n" if report_dx else ""
 
     return f"""Patient CPMRN: {cpmrn}
-{flagged_block}
+{flagged_block}{report_dx_block}
 CURRENT SUMMARY:
 {existing_narrative}
 {names_instruction}
@@ -437,6 +478,10 @@ Rules:
   If an existing problem already covers it (e.g. flagged tachycardia is part of "Septic shock"),
   update that problem's current_state to include the vital value — do NOT create a duplicate.
   Only create a new problem if no existing problem already accounts for the flagged vital.
+- For every item in the ⚠ NEW DIAGNOSES FROM DIAGNOSTIC REPORTS block above: it MUST appear as a
+  problem. If an existing problem already covers it (e.g. CHF already listed), update that problem
+  and set plan_changing_event to reference the diagnostic report finding. Only create a new problem
+  if no existing problem already covers the diagnosis.
 - Set plan_changing_event if a new investigation result changed the management plan
 - Set cause if a problem is secondary to another active problem (e.g. AKI caused by Septic Shock → cause: "Septic Shock"); otherwise leave null
 - Do not lose historical context (initial presentation, key prior results)

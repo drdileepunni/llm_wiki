@@ -99,10 +99,17 @@ def _run_live_pipeline(
     Steps 2-6 of the per-patient pipeline, run synchronously after a fresh snapshot.
 
     Cost-reduction gates (evaluated in order):
-      1. Cadence gate  — skip LLM if next_run_at is not yet due (fn_detector still runs)
-      2. Delta gate    — skip LLM if no new vitals/labs/notes since last_llm_run_at
+      1. Cadence gate  — skip LLM if next_run_at is not yet due; bypassed when new reports present
+      2. Delta gate    — skip LLM if no new vitals/labs/notes/reports since last_llm_run_at
       3. Pass 1 screener — cheap call that decides if Pass 2 is needed
       4. Pass 2        — status_classifier + problem_tracker (only when Pass 1 flags)
+
+    Step 3b/3c (report selection + interpretation) run before the summary update so that
+    new diagnostic-report findings are injected into the delta and flow through the normal
+    summary → problem tracker path in the same cycle (Phase 2 same-cycle integration).
+
+    Stashes _report_analysis and _report_sel on the returned status dict for
+    _run_report_interpret_step to consume in _collect_all.
 
     fn_detector always runs at the end (zero LLM cost, safety net).
 
@@ -167,19 +174,41 @@ def _run_live_pipeline(
         logger.exception("pipeline: delta extraction failed for %s enc=%d", cpmrn, encounter)
         return status
 
+    # Step 3b: Report selection (cheap, no LLM) — before gates so new reports can bypass them
+    _report_sel: dict = {}
+    _new_reports: list = []
+    _has_new_reports = False
+    try:
+        from tools.radar_sync.report_interpret.orchestrator import select_for_cycle
+        _report_sel = select_for_cycle(cpmrn, encounter, chart, db)
+        _new_reports = _report_sel.get("new_reports") or []
+        _has_new_reports = bool(_new_reports) and _report_sel.get("status") == "ok"
+        status["report_select"] = {"n": len(_new_reports), "status": _report_sel.get("status")}
+        logger.info(
+            "pipeline: report select for %s enc=%d — %d new report(s) [%s]",
+            cpmrn, encounter, len(_new_reports), _report_sel.get("status"),
+        )
+    except Exception:
+        logger.exception("pipeline: report selection failed for %s enc=%d", cpmrn, encounter)
+
     # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
     next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
-    if next_run_at is not None:
-        if now < next_run_at:
+    if next_run_at is not None and now < next_run_at:
+        if not _has_new_reports:
             logger.info(
                 "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
                 cpmrn, encounter, next_run_at.strftime("%H:%M UTC"),
             )
             status["cadence_gate"] = "skipped"
-            # fn_detector still runs below using the last stored summary
+            status["_report_analysis"] = None
+            status["_report_sel"] = _report_sel
             new_structured = ctx.get("structured_summary") or {}
             _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
             return status
+        logger.info(
+            "pipeline: cadence gate bypassed for %s enc=%d — %d new report(s)",
+            cpmrn, encounter, len(_new_reports),
+        )
 
     # ── Gate 2: Delta gate — skip LLM if nothing new since last analysis ─────
     last_llm_run_at = _coerce_dt(last_llm_run_at_raw)
@@ -187,12 +216,14 @@ def _run_live_pipeline(
         has_new_data = any([
             delta.get("new_vitals"), delta.get("new_labs"), delta.get("new_notes"),
         ])
-        if not has_new_data:
+        if not has_new_data and not _has_new_reports:
             logger.info(
                 "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
                 cpmrn, encounter,
             )
             status["delta_gate"] = "skipped"
+            status["_report_analysis"] = None
+            status["_report_sel"] = _report_sel
             db.snapshot_schedule.update_one(
                 {"CPMRN": cpmrn, "encounter": encounter},
                 {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
@@ -200,6 +231,37 @@ def _run_live_pipeline(
             new_structured = ctx.get("structured_summary") or {}
             _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
             return status
+
+    # Step 3c: Interpret new reports (if any) — inject findings into delta before summary update
+    if _has_new_reports:
+        try:
+            from tools.radar_sync.report_interpret.orchestrator import analyze_new_reports
+            _existing = ctx.get("structured_summary") or {}
+            _pt_narrative = (
+                _existing.get("narrative") or ctx.get("running_summary") or ""
+            ).strip()
+            _analysis = analyze_new_reports(cpmrn, encounter, _new_reports, _pt_narrative, db)
+            if _analysis:
+                delta["new_report_findings"] = [
+                    f for r in _analysis.get("reports", []) for f in (r.get("findings") or [])
+                ]
+                status["_report_analysis"] = _analysis
+                logger.info(
+                    "pipeline: report interpret for %s enc=%d — %d finding(s) injected into delta",
+                    cpmrn, encounter, len(delta["new_report_findings"]),
+                )
+            else:
+                status["_report_analysis"] = None
+                logger.warning(
+                    "pipeline: report interpret returned None for %s enc=%d", cpmrn, encounter,
+                )
+        except Exception:
+            logger.exception("pipeline: report interpretation failed for %s enc=%d", cpmrn, encounter)
+            status["_report_analysis"] = None
+    else:
+        status["_report_analysis"] = None
+
+    status["_report_sel"] = _report_sel
 
     # ── Step 4: rolling summary update (gemini-3.1-flash-lite, no thinking) ───
     try:
@@ -391,16 +453,44 @@ def _run_report_interpret_step(
     send: bool,
 ) -> dict:
     """
-    Run diagnostic-report interpretation and write result into status dict. `send=False`
-    (per-cycle card cap reached) still interprets + audits but suppresses the card.
-    Returns the result dict so the caller can check card_sent and update the counter.
+    Finalize the diagnostic-report cycle. In Phase 2, the LLM analysis was pre-computed
+    inside _run_live_pipeline (Step 3c) and stashed on status["_report_analysis"]. This
+    step hosts images, builds+sends the batched card, writes audit rows, and advances the
+    watermark. `send=False` (per-cycle card cap) still runs everything except the send.
     """
+    analysis = status.pop("_report_analysis", None)
+    sel = status.pop("_report_sel", {}) or {}
+
     try:
-        from tools.radar_sync.report_interpret.orchestrator import run_report_interpret
-        result = run_report_interpret(cpmrn, encounter, chart, snapshot_at, db, send=send)
+        from tools.radar_sync.report_interpret.orchestrator import (
+            finalize_report_cycle, _run_skip_row, _advance_watermark,
+        )
+
+        if analysis is None:
+            outcome = sel.get("status") or "no_new_docs"
+            if outcome not in ("no_new_docs", "disabled", "error"):
+                outcome = "no_new_docs"
+            # First-run watermark seed — prevents bulk re-scan on next cycle
+            if outcome == "no_new_docs" and sel.get("last_report_at") is None:
+                _advance_watermark(db, cpmrn, encounter, snapshot_at, sel.get("seen_keys"), None)
+            _run_skip_row(cpmrn, encounter, snapshot_at, outcome, db)
+            result = {"outcome": outcome, "card_sent": False}
+            status["report_interpret"] = result
+            logger.info(
+                "pipeline: report_interpret skip for %s enc=%d — %s", cpmrn, encounter, outcome,
+            )
+            return result
+
+        result = finalize_report_cycle(
+            cpmrn, encounter, analysis, snapshot_at, db,
+            send=send, seen_keys=sel.get("seen_keys"),
+        )
         status["report_interpret"] = result
-        logger.info("pipeline: report_interpret done for %s enc=%d — %s", cpmrn, encounter, result)
+        logger.info(
+            "pipeline: report_interpret done for %s enc=%d — %s", cpmrn, encounter, result,
+        )
         return result
+
     except Exception:
         logger.exception("pipeline: report_interpret failed for %s enc=%d", cpmrn, encounter)
         status["report_interpret"] = {"error": "exception"}
