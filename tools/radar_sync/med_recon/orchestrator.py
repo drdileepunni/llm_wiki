@@ -56,13 +56,13 @@ def _split_for_card(action_set: dict) -> tuple[list, list, list]:
     return edits, discontinues, news
 
 
-def _step_cost(usage) -> dict:
+def _step_cost(usage, step: str = "med_recon") -> dict:
     from tools.radar_sync.study_cost_tracker import _cost
     i = getattr(usage, "input_tokens", 0)
     o = getattr(usage, "output_tokens", 0)
     t = getattr(usage, "thinking_tokens", 0)
     return {"input_tokens": i, "output_tokens": o, "thinking_tokens": t,
-            "cost_usd": round(_cost(i, o, t), 6)}
+            "cost_usd": round(_cost(step, i, o, t), 6)}
 
 
 def _trace(db, cpmrn, encounter, step, usage, final_output=None):

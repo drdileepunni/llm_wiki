@@ -151,26 +151,27 @@ def build_report_interpret_card(
     cpmrn: str,
     encounter: int,
     batch_id: str,
-    reports: list[dict],
+    report: dict,
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
 ) -> list:
     """
-    Build the cardsV2 list (one batched card). `reports` is a list of dicts:
-    {report_id, report_type, report_name, reported_at, interpretation, description,
-     findings, image_urls}.
+    Build the cardsV2 list for a single report. Google Chat caps sections at 10 per card;
+    callers must send one card per report rather than batching multiple reports into one card.
+
+    `report` is a dict: {report_id, report_type, report_name, reported_at, interpretation,
+     description, findings, image_urls}.
     """
-    n = len(reports)
     sections: list[dict] = []
 
-    # ── Shared intro + Open patient ──
+    # ── Intro + Open patient ──
     sections.append({
         "header": "Patient",
         "widgets": [
             {"textParagraph": {"text": (
-                f"<b>{n}</b> new diagnostic report{'s' if n != 1 else ''} resulted. "
-                f"Interpretation in context below; expand for the source image."
+                "New diagnostic report resulted. "
+                "Interpretation in context below; expand for the source image."
             )}},
             {"buttonList": {"buttons": [{
                 "text": "Open patient",
@@ -180,16 +181,16 @@ def build_report_interpret_card(
         ],
     })
 
-    for i, report in enumerate(reports):
-        sections.extend(_report_sections(
-            report, gchat_webhook_url, callback_url, cb_token, has_divider=(i > 0),
-        ))
+    sections.extend(_report_sections(
+        report, gchat_webhook_url, callback_url, cb_token, has_divider=False,
+    ))
 
+    report_id = report.get("report_id", batch_id)
     return [{
-        "cardId": f"cds-report-interpret-{batch_id}",
+        "cardId": f"cds-report-interpret-{report_id}",
         "card": {
             "header": {
-                "title": "🩻 New report(s) resulted",
+                "title": "🩻 New report resulted",
                 "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
                 "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/document_scanner/default/48px.svg",
                 "imageType": "CIRCLE",

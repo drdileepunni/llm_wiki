@@ -1977,7 +1977,7 @@ def evaluate_screener_flag(
         tracer.save(final_output={"error": "llm_failed"})
         return None
 
-    tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
+    tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
 
     decision_args: dict = {}
     for block in resp.content:
@@ -2291,7 +2291,7 @@ def track_problems(
             tracer.end_round()
             break
 
-        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
 
         assistant_parts: list[dict] = []
         tool_calls: list[dict] = []

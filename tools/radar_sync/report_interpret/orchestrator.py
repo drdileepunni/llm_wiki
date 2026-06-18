@@ -28,13 +28,13 @@ _SCHED = "snapshot_schedule"
 
 # ── cost helpers (mirror med_recon orchestrator) ───────────────────────────────
 
-def _step_cost(usage) -> dict:
+def _step_cost(usage, step: str = "report_interpret") -> dict:
     from tools.radar_sync.study_cost_tracker import _cost
     i = getattr(usage, "input_tokens", 0)
     o = getattr(usage, "output_tokens", 0)
     t = getattr(usage, "thinking_tokens", 0)
     return {"input_tokens": i, "output_tokens": o, "thinking_tokens": t,
-            "cost_usd": round(_cost(i, o, t), 6)}
+            "cost_usd": round(_cost(step, i, o, t), 6)}
 
 
 def _trace(db, cpmrn, encounter, step, usage, final_output=None):
@@ -199,7 +199,8 @@ def finalize_report_cycle(cpmrn: str, encounter: int, analysis: dict, snapshot_a
                 logger.exception("report_interpret: image host failed for %s", r["report_id"])
         r["image_urls"] = urls
 
-    # 2. build + send card
+    # 2. build + send one card per report (GChat caps sections at 10; batching multiple
+    #    reports into one card exceeds that limit and returns HTTP 500)
     card_sent, recipients = False, []
     if send:
         recipients = get_alert_recipients(db)
@@ -207,13 +208,22 @@ def finalize_report_cycle(cpmrn: str, encounter: int, analysis: dict, snapshot_a
             service_url = (os.getenv("GCHAT_SERVICE_URL") or "").rstrip("/")
             cds_url = (os.getenv("CDS_PUBLIC_URL") or "").rstrip("/")
             cb_token = os.getenv("ALERT_FEEDBACK_TOKEN", "")
-            cards = report_card.build_report_interpret_card(
-                cpmrn=cpmrn, encounter=encounter, batch_id=batch_id, reports=reports,
-                gchat_webhook_url=f"{service_url}/webhook",
-                callback_url=f"{cds_url}/report-feedback",
-                cb_token=cb_token,
-            )
-            card_sent = send_cards_to_recipients(cards, recipients)
+            any_sent = False
+            for r in reports:
+                cards = report_card.build_report_interpret_card(
+                    cpmrn=cpmrn, encounter=encounter, batch_id=batch_id, report=r,
+                    gchat_webhook_url=f"{service_url}/webhook",
+                    callback_url=f"{cds_url}/report-feedback",
+                    cb_token=cb_token,
+                )
+                if send_cards_to_recipients(cards, recipients):
+                    any_sent = True
+                else:
+                    logger.warning(
+                        "report_interpret: card send failed for report %s (%s enc=%d)",
+                        r.get("report_id"), cpmrn, encounter,
+                    )
+            card_sent = any_sent
         else:
             logger.warning("report_interpret: no alert recipients configured — card not sent (%s)", cpmrn)
 

@@ -1006,7 +1006,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
             tracer.end_round()
             break
 
-        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
 
         # Collect assistant content for history
         assistant_parts: list[dict] = []
