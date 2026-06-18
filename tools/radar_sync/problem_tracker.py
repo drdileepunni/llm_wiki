@@ -27,11 +27,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from uuid import uuid4 as _uuid4
-from tools.radar_sync.clinical_rules import RESPIRATORY_SF_RULE, OLIGURIA_CHARTING_RULE
 
 logger = logging.getLogger(__name__)
 
-_TRACKER_MODEL    = "gemini-2.5-flash"
+_TRACKER_MODEL    = "gemini-3.1-flash-lite"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same problem
@@ -201,15 +200,7 @@ VITAL TREND WINDOW — when assessing whether a vital is worsening or improving,
 readings within the last 6–8 hours. A change observed over days does NOT constitute acute
 worsening. If the vital has been flat/stable within the last 6–8 hours, classify as stable
 regardless of how different it looks vs. a value from 2–3 days ago. Only compare across longer
-windows for an explicit chronic trend (e.g. a 5-day post-op Hb decline) — and even then do not
-alert on it.
-
-GCS DELTA — for any problem related to GCS, consciousness, or neurological status: do NOT alert
-unless GCS has dropped ≥ 2 points within the last 6 hours. Call get_vital_trend('GCS', n=6) and
-compare the most recent reading against the reading from 6 hours ago. If the delta is < 2
-(stable or improving), should_alert=False regardless of the absolute GCS value, of whether a
-plan note exists, and of the treatment-inadequate override. A chronically low GCS is NOT a
-reason to alert. Only a negative delta ≥ 2 within the 6-hour window justifies an alert.
+windows for an explicit chronic trend — and even then do not alert on it.
 
 LAB criteria — a SINGLE clearly-abnormal lab result vs. the patient's baseline IS sufficient to
 call worsening (labs are drawn infrequently, so you rarely have two panels to compare). But:
@@ -225,20 +216,6 @@ call worsening (labs are drawn infrequently, so you rarely have two panels to co
     reflect the patient's current state. If the most recent result is >24h old, should_alert=False
     and state in addressed_evidence: "Most recent [lab] result is from [date] — >24h old; not
     alerting on stale data."
-
-SUBJECTIVE SYMPTOM RULE — do NOT set clinical_status="worsening"/"critical" and do NOT alert for
-problems whose primary evidence is a patient-reported symptom (pain, nausea, dizziness, fatigue,
-reported breathlessness, reported chest tightness) without corroborating objective evidence.
-"Patient reports severe pain", "patient complains of nausea", or "patient feels breathless"
-alone is NOT sufficient to alert. Objective evidence means at least ONE of:
-  • A validated numeric score meeting a documented threshold (e.g. NRS/VAS pain score ≥ 7/10
-    explicitly recorded)
-  • A physiological correlate that itself breaches the VITAL SIGN ALERT FLOORS above (new
-    tachycardia, hypotension, hypoxia, etc.) AND is plausibly caused by the symptom
-  • An imaging or lab finding showing objective worsening of the underlying cause
-If none are present, classify the symptom-based problem as stable and should_alert=False. The
-adequacy of the current treatment plan is the clinician's call — do NOT alert purely because you
-judge the prescribed analgesic or antiemetic insufficient.
 
 CARE-GAP / PLAN-DISCORDANCE RULE — for problems whose evidence is a documented CONTRADICTION in
 the care plan rather than a number (conflicting orders, or two notes giving incompatible plans —
@@ -259,19 +236,6 @@ TOOL USAGE  (how to read the data behind the gates)
 ════════════════════════════════════════════════════════════════════════
 - For each overdue next_check: use get_vital_trend or get_lab_trend to check whether the expected
   result has arrived.
-- {RESPIRATORY_SF_RULE}
-- FiO2 RULE — FiO2 is a clinician-controlled ventilator setting, not a patient parameter. Do NOT
-  set clinical_status="worsening"/"critical" and do NOT alert based on FiO2 changes alone. FiO2
-  increases are intentional clinical interventions — alerting on them is circular. To assess
-  oxygenation use SpO2 or SF ratio (both via get_vital_trend('SpO2')). If SpO2 is maintained ≥92%
-  despite high FiO2, oxygenation is being managed — do not alert.
-- For AKI, oliguria, anuria, or fluid-balance problems: ALWAYS call get_io before concluding
-  output is absent — the structured summary may not reflect the latest I/O data. get_io shows
-  DAILY TOTALS first, then hourly detail. If the hourly window shows 0 ml but the daily total is
-  non-zero, I/O is charted as a daily batch entry — do NOT interpret as anuria; use the daily
-  total to assess fluid balance.
-- {OLIGURIA_CHARTING_RULE} Do NOT escalate AKI, alert for anuria, or conclude oliguria on the
-  basis of 0 ml charting alone.
 - For vital-sign-dependent problems (Fever, Tachycardia, Hypertension, Hypotension, etc.): if
   get_vital_trend returns "Unknown vital" or "No … readings found", do NOT conclude worsening
   based on notes alone — mark as stable with addressed_evidence="vital data unavailable in
@@ -365,19 +329,6 @@ gate verdict is permissive_breached or permissive_ended, apply normal alert rule
 not suppress in those cases).
 
 ════════════════════════════════════════════════════════════════════════
-SCREENER FLAG — NEW PROBLEM DETECTION
-════════════════════════════════════════════════════════════════════════
-If the user message contains a "== SCREENER FLAG ==" section, the Pass 1 screener detected
-something not yet in the tracked problem list. You must:
-1. Check whether the flagged finding maps to any existing tracked problem (semantic match, not
-   just string match). Examples: "elevated blood pressure" → "Hypertension"; "worsening
-   hypoxemia" → "Acute Respiratory Desaturation" if already tracked.
-2. If it matches an existing problem: assess it under that existing name — do NOT create a duplicate.
-3. If it is genuinely new (no semantic overlap with any current problem): create a new problem
-   entry using a precise clinical name (e.g. "Hypoxemia", "Acute Respiratory Failure"). Apply
-   normal alert rules — walk the ladder for it like any other problem.
-
-════════════════════════════════════════════════════════════════════════
 TIMING RULE — Treatment response buffer  (Step 4 detail)
 ════════════════════════════════════════════════════════════════════════
 When a worsening or critical problem has a plan note documented within the buffer window of the
@@ -405,19 +356,8 @@ The user message may include:
   1. A CO-EXISTING PROBLEM STATUSES block listing all tracked problems with their current
      clinical_status and being_addressed flags.
   2. A "cause" annotation on a problem — e.g. "AKI (secondary to: Septic Shock)".
-
-When a problem is marked secondary (has a cause), apply this reasoning:
-- If the primary driver (the cause) is being_addressed=True and its clinical_status is NOT
-  "critical" or "worsening", the secondary problem should NOT generate an independent alert
-  solely because its own parameters remain abnormal. Rationale: secondary organ dysfunction (AKI,
-  coagulopathy, thrombocytopaenia) lags behind the primary problem by 24–72h. Treating the cause
-  IS the treatment.
-- Exception — DO alert for the secondary problem if ANY of the following are present regardless of
-  the primary driver's status:
-    • A rapid step-change worsening (e.g. creatinine rises >50% from last snapshot)
-    • A value in a life-threatening range (K+ ≥ 6.0, pH < 7.20, bicarb < 12)
-    • A clinical sign requiring independent intervention (RRT indication, dialysis)
-- If the primary driver is NOT being_addressed, assess the secondary problem normally.
+When a problem carries a "cause", the CATEGORY-SPECIFIC RULES section below contains the
+secondary-problem reasoning to apply.
 
 ════════════════════════════════════════════════════════════════════════
 PROBLEM CONSOLIDATION  (before finalising the assessment list)
@@ -1924,6 +1864,159 @@ def _suppress_redundant_alerts(to_alert: list[tuple[dict, str]]) -> list[tuple[d
     return [(a, aid) for a, aid in to_alert if a.get("problem_name", "").lower() not in to_remove]
 
 
+# ── Screener-flag new-finding evaluation ────────────────────────────────────────
+
+_SCREENER_EVAL_SYSTEM = """You are triaging ONE Pass-1 screener flag for an ICU patient. The \
+screener detected something potentially worth tracking. Your single job is to decide whether that \
+finding is ALREADY represented in the current problem list, is GENUINELY NEW, or is not a real new \
+problem at all.
+
+This is a focused triage — not a full assessment. Do exactly one thing: call report_finding.
+
+Decision rules:
+- maps_to_existing — the flagged finding is the same clinical concern as a problem already in the \
+list (semantic match, NOT string match). Examples: "elevated blood pressure" → "Hypertension"; \
+"worsening hypoxemia" → an existing "Acute Respiratory Failure"; "Cr 3.41 rising" → an existing \
+"Acute Kidney Injury". When it maps, return the existing problem's exact name in mapped_problem_name.
+- new_problem — the flag names a clinical concern with NO semantic overlap with any existing \
+problem. Give it a precise clinical name (e.g. "Myocardial Injury", "Hyperkalemia"), an \
+initial_status, and a one-line current_state that includes the triggering value and its timestamp \
+if present in the flag or prefetch data.
+- ignore — the flag is not a trackable clinical problem (e.g. a generic note about monitoring, a \
+value that is actually normal, or pure narrative with no abnormal finding).
+
+Bias: when a finding could plausibly map to an existing problem, prefer maps_to_existing over \
+new_problem — creating a duplicate is worse than folding it into an existing problem. Only choose \
+new_problem when you are confident no existing problem covers it."""
+
+_REPORT_FINDING_TOOL = {
+    "name": "report_finding",
+    "description": "Report the triage decision for the screener flag.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["maps_to_existing", "new_problem", "ignore"],
+            },
+            "mapped_problem_name": {
+                "type": "string",
+                "description": "If maps_to_existing: the EXACT name of the existing problem it maps to.",
+            },
+            "new_problem_name": {
+                "type": "string",
+                "description": "If new_problem: a precise clinical name (e.g. 'Myocardial Injury').",
+            },
+            "initial_status": {
+                "type": "string",
+                "enum": ["critical", "worsening", "stable"],
+                "description": "If new_problem: the initial clinical status.",
+            },
+            "current_state": {
+                "type": "string",
+                "description": "If new_problem: one line incl. the triggering value + timestamp if known.",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "One sentence explaining the decision.",
+            },
+        },
+        "required": ["decision", "rationale"],
+    },
+}
+
+
+def evaluate_screener_flag(
+    screener_flag: str,
+    problems: list[dict],
+    prefetch_block: str,
+    client: Any,
+    db: Any,
+    cpmrn: str = "",
+    encounter: int = 0,
+) -> dict | None:
+    """
+    Decide whether a Pass-1 screener flag represents a genuinely NEW problem that is not
+    yet in the tracked list. Runs as its own focused, single-shot LLM call — separate from
+    the main tracker loop — so the new-finding decision is not diluted by the full
+    problem-assessment workload (the failure mode behind missed findings like a flagged
+    troponin elevation the main loop raced past).
+
+    Returns a problem dict to append to the tracker's problem list when the flag is a
+    confirmed-new problem; returns None when it maps to an existing problem or is ignorable.
+    Because the semantic dedup happens here in isolation, appending the returned problem
+    cannot create a duplicate of an existing one.
+    """
+    if not screener_flag:
+        return None
+
+    from tools.radar_sync.react_tracer import ReActTracer
+
+    existing_names = [p.get("name", "") for p in problems]
+    user_msg = (
+        f"SCREENER FLAG:\n\"{screener_flag}\"\n\n"
+        f"CURRENT TRACKED PROBLEMS:\n"
+        + ("\n".join(f"  • {n}" for n in existing_names) if existing_names else "  (none)")
+        + (f"\n\nPRE-FETCHED VITAL / LAB DATA:\n{prefetch_block}\n" if prefetch_block else "\n")
+        + "\nCall report_finding with your decision."
+    )
+
+    tracer = ReActTracer(cpmrn, encounter, step="screener_flag_eval", db=db)
+    tracer.start_round(0)
+    try:
+        resp = client.create_message(
+            messages=[{"role": "user", "content": user_msg}],
+            tools=[_REPORT_FINDING_TOOL],
+            system=_SCREENER_EVAL_SYSTEM,
+            max_tokens=2000,
+            force_tool=True,
+        )
+    except Exception:
+        logger.exception("evaluate_screener_flag: LLM call failed for %s enc=%d", cpmrn, encounter)
+        tracer.end_round()
+        tracer.save(final_output={"error": "llm_failed"})
+        return None
+
+    tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
+
+    decision_args: dict = {}
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == "report_finding":
+            decision_args = block.input or {}
+            tracer.log_tool_call(block.name, block.input)
+        elif block.type == "thinking":
+            tracer.log_thinking(block.text)
+    tracer.end_round()
+
+    decision = decision_args.get("decision")
+    logger.info(
+        "evaluate_screener_flag: %s enc=%d → decision=%s (%s)",
+        cpmrn, encounter, decision, decision_args.get("rationale", ""),
+    )
+    tracer.save(final_output=decision_args)
+
+    if decision == "new_problem":
+        name = (decision_args.get("new_problem_name") or "").strip()
+        if not name:
+            return None
+        # Guard against a duplicate slipping through despite the semantic-match instruction.
+        if any(name.lower() == n.lower() for n in existing_names):
+            logger.info(
+                "evaluate_screener_flag: %s enc=%d — '%s' already in problem list, not appending",
+                cpmrn, encounter, name,
+            )
+            return None
+        return {
+            "name": name,
+            "status": decision_args.get("initial_status", "worsening"),
+            "current_state": decision_args.get("current_state", "Flagged by Pass-1 screener"),
+            "management": "not specified",
+            "_from_screener_flag": True,
+        }
+
+    return None
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def track_problems(
@@ -1994,6 +2087,32 @@ def track_problems(
         logger.exception("problem_tracker: prefetch failed for %s enc=%d — continuing without", cpmrn, encounter)
         prefetch_block = ""
 
+    # ── Screener-flag new-finding evaluation ──────────────────────────────────
+    # Run as its own focused call BEFORE the main loop. If it confirms a genuinely
+    # new problem, append it to the list so the main tracker assesses it on the
+    # ladder like any other problem (no separate alert path). The semantic dedup
+    # happens inside evaluate_screener_flag, so this cannot create a duplicate.
+    if screener_flag:
+        try:
+            _new_problem = evaluate_screener_flag(
+                screener_flag, problems, prefetch_block, client, db, cpmrn, encounter,
+            )
+            if _new_problem:
+                problems.append(_new_problem)
+                logger.info(
+                    "problem_tracker: screener flag added new problem '%s' for %s enc=%d",
+                    _new_problem["name"], cpmrn, encounter,
+                )
+                # Re-build prefetch so the new problem's vitals/labs are in context.
+                try:
+                    prefetch_block = _build_prefetch_block(
+                        cpmrn, encounter, problems, db, session_chunks, snapshot_at=snapshot_at,
+                    )
+                except Exception:
+                    logger.exception("problem_tracker: prefetch rebuild failed for %s enc=%d", cpmrn, encounter)
+        except Exception:
+            logger.exception("problem_tracker: screener flag eval failed for %s enc=%d", cpmrn, encounter)
+
     # ── Fix 5: Load prior reasoning fingerprints ──────────────────────────────
     try:
         fingerprint_block = _build_fingerprint_block(cpmrn, encounter, db)
@@ -2059,13 +2178,9 @@ def track_problems(
         logger.exception("problem_tracker: coexisting block failed for %s enc=%d", cpmrn, encounter)
         coexisting_block = ""
 
-    screener_block = (
-        "== SCREENER FLAG ==\n"
-        f"The Pass 1 screener flagged: \"{screener_flag}\"\n"
-        "Before creating a new problem for this finding, check whether it maps to an\n"
-        "existing tracked problem (semantic match). Only create a new problem if there\n"
-        "is no overlap with any problem already in the list above.\n"
-    ) if screener_flag else ""
+    # NOTE: the Pass-1 screener flag is handled upstream by evaluate_screener_flag()
+    # (a focused, separate call). Any confirmed-new problem is already in `problems`,
+    # so the main loop assesses it like any other — no in-prompt screener block here.
 
     # ── Lab alert rules — dynamic system prompt injection ─────────────────────
     # Load all rules from GCS, filter to labs present in this patient's prefetch
@@ -2113,8 +2228,31 @@ def track_problems(
         logger.exception("problem_tracker: symptom_alert_rules injection failed for %s enc=%d", cpmrn, encounter)
         _symptom_alert_block = ""
 
+    # ── Category-specific rule blocks — dynamic system prompt injection ───────
+    # Inject only the domain rule blocks (neuro/respiratory/renal/symptom/causal)
+    # relevant to the problems this patient actually has. Keeps the always-on core
+    # focused and avoids attention dilution from irrelevant domain rules.
+    try:
+        from tools.radar_sync.clinical_rule_blocks import (
+            filter_blocks_for_patient as _filter_rule_blocks,
+            format_prompt_block as _format_rule_blocks,
+            matched_categories as _matched_categories,
+        )
+        _category_blocks = _filter_rule_blocks(problems, prefetch_block)
+        _category_block = _format_rule_blocks(_category_blocks)
+        if _category_blocks:
+            logger.info(
+                "problem_tracker: clinical_rule_blocks — %d block(s) for %s enc=%d (%s)",
+                len(_category_blocks), cpmrn, encounter,
+                ", ".join(_matched_categories(problems, prefetch_block)),
+            )
+    except Exception:
+        logger.exception("problem_tracker: clinical_rule_blocks injection failed for %s enc=%d", cpmrn, encounter)
+        _category_block = ""
+
     system_prompt = (
         _SYSTEM
+        + ("\n\n" + _category_block if _category_block else "")
         + ("\n\n" + _lab_alert_block if _lab_alert_block else "")
         + ("\n\n" + _symptom_alert_block if _symptom_alert_block else "")
     )
@@ -2129,7 +2267,6 @@ def track_problems(
         + (f"{fingerprint_block}\n\n" if fingerprint_block else "")
         + (f"{gate_block}\n\n" if gate_block else "")
         + f"Current problems from summary:\n{problem_block}\n{new_block}\n\n"
-        + (f"{screener_block}\n" if screener_block else "")
         + "Review each problem. The pre-fetched context above is your primary source — "
         + "only call tools for data not listed there. Call set_all_assessments when done."
     )

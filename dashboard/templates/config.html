@@ -62,8 +62,12 @@
 <div id="tab-protocols">
   <div class="d-flex align-items-center mb-2">
     <p class="text-muted small mb-0">
-      Monitoring protocols define when a high blood pressure (or similar condition) is <em>intentionally permissive</em>.
-      The problem tracker uses these to gate alerts — if a scenario applies, the alert is suppressed.
+      Monitoring protocols define when a clinical finding is <em>intentionally permissive</em> — expected, tolerable, or already managed.
+      The problem tracker gates alerts against these: if a scenario applies, the alert is suppressed.
+      Each protocol matches patients via <code>applies_when</code> substrings (editable in the JSON).
+      Currently active: hypertension, GCS, respiratory, haemoglobin, lactate.
+      <br><span class="text-warning-emphasis">Note: category-matching keywords for domain rule injection
+      (<code>clinical_rule_blocks.py</code>) are not stored in GCS — editing them requires a code change and redeploy.</span>
     </p>
     <button class="btn btn-sm btn-outline-primary ms-3 flex-shrink-0"
       onclick="openEditProtocols()">

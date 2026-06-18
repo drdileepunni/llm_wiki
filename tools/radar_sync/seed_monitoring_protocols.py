@@ -308,6 +308,154 @@ PROTOCOLS = [
             "apply standard alert thresholds (SpO2 < 92%, RR > 28)."
         ),
     },
+    {
+        "protocol_id": "haemoglobin-alert-criteria",
+        "applies_when": [
+            "anemia",
+            "anaemia",
+            "low hemoglobin",
+            "low haemoglobin",
+            "low hb",
+            "hb drop",
+            "hemoglobin",
+            "haemoglobin",
+            "bleeding",
+            "blood loss",
+        ],
+        "gate_question": (
+            "Should this patient's anaemia / low Hb trigger an alert? "
+            "This protocol defines the ONLY two conditions under which a Hb alert is warranted. "
+            "IMPORTANT: call get_lab_trend('Hb') first to get the full trend. "
+            "A scenario is ACTIVE (suppress alert) if its band conditions are met and no invalidation trigger fires. "
+            "A scenario is BREACHED (alert) if any invalidation trigger fires. "
+            "If no scenario matches this patient's context, apply normal alert rules."
+        ),
+        "scenarios": [
+            {
+                "name": "stable_hb_general",
+                "description": (
+                    "General patient without active myocardial ischaemia — "
+                    "Hb is acceptable as long as it has not fallen > 1.0 g/dL in the last 24 hours "
+                    "and remains above the absolute floor of 7.0 g/dL"
+                ),
+                "band_description": (
+                    "Current Hb ≥ 7.0 g/dL "
+                    "AND drop from highest Hb value in the last 24 hours to current Hb is ≤ 1.0 g/dL. "
+                    "To compute the 24h drop: from get_lab_trend('Hb'), identify the highest value "
+                    "in the last 24 hours and subtract the current value. "
+                    "If only one reading exists in 24 hours, compare to the most recent prior reading."
+                ),
+                "window": (
+                    "Ongoing while no active myocardial ischaemia or ACS diagnosis is present"
+                ),
+                "invalidate_if": [
+                    "current Hb < 7.0 g/dL (absolute floor — always alert)",
+                    "Hb has dropped > 1.0 g/dL from the highest value in the last 24 hours",
+                    "active myocardial ischaemia or ACS is documented (use the cardiac_ischaemia scenario instead)",
+                ],
+            },
+            {
+                "name": "stable_hb_cardiac_ischaemia",
+                "description": (
+                    "Patient with active myocardial ischaemia or ACS — "
+                    "higher Hb floor applies because myocardium has reduced tolerance for anaemia. "
+                    "Hb ≥ 8.0 g/dL is required AND no drop > 1.0 g/dL in 24 hours."
+                ),
+                "band_description": (
+                    "Current Hb ≥ 8.0 g/dL "
+                    "AND drop from highest Hb in the last 24 hours to current Hb is ≤ 1.0 g/dL. "
+                    "Active myocardial ischaemia or ACS must be a current documented diagnosis."
+                ),
+                "window": (
+                    "While active myocardial ischaemia, NSTEMI, STEMI, or ACS is a current active diagnosis"
+                ),
+                "invalidate_if": [
+                    "current Hb < 8.0 g/dL (tighter floor for cardiac ischaemia — always alert)",
+                    "Hb has dropped > 1.0 g/dL from the highest value in the last 24 hours",
+                    "myocardial ischaemia / ACS diagnosis resolves or is no longer active",
+                ],
+            },
+        ],
+        "escalation_target_after_window": (
+            "When a scenario is breached: set clinical_status='worsening' and alert immediately. "
+            "For a rapid drop (> 1.0 g/dL in 24h): investigate active bleeding — review I/O, drain outputs, "
+            "surgical site, and GI symptoms. "
+            "For absolute floor breach (Hb < 7.0 general, < 8.0 cardiac): assess transfusion need. "
+            "Target: Hb ≥ 8.0 g/dL for general patients post-transfusion; Hb ≥ 9.0 g/dL for active cardiac ischaemia."
+        ),
+    },
+    {
+        "protocol_id": "lactate-alert-criteria",
+        "applies_when": [
+            "lactate",
+            "hyperlactatemia",
+            "lactic acidosis",
+            "hypoperfusion",
+            "shock",
+            "septic shock",
+        ],
+        "gate_question": (
+            "Does this patient's lactate situation require an alert? "
+            "HARD RULE — check get_lab_trend('Lactate') first. "
+            "If the most recent lactate result is MORE THAN 12 HOURS OLD, STOP immediately: "
+            "do NOT comment on, alert on, or reference lactate at all — treat as if no lactate data exists. "
+            "Also call get_vital_trend('MAP') to assess for hypotensive events. "
+            "Then evaluate the two scenarios below. "
+            "A scenario is ACTIVE (suppress alert) if its band conditions are met. "
+            "A scenario is BREACHED (alert) if its invalidation triggers are met."
+        ),
+        "scenarios": [
+            {
+                "name": "elevated_lactate_with_hypoperfusion",
+                "description": (
+                    "Elevated lactate requires haemodynamic corroboration before alerting — "
+                    "except when critically high (> 4 mmol/L), which is shock-level regardless of MAP. "
+                    "Lactate 2–4 mmol/L without MAP < 65 events is likely an isolated lab finding and should not alert."
+                ),
+                "band_description": (
+                    "Suppress alert if ANY of the following: "
+                    "(a) lactate ≤ 2.0 mmol/L; "
+                    "(b) lactate 2.0–4.0 mmol/L AND no MAP < 65 event in the last 6 hours; "
+                    "(c) lactate > 2.0 mmol/L AND a plan note addressing lactate or hypoperfusion "
+                    "exists within 6 hours of the lactate result time."
+                ),
+                "window": "Result must be within 12 hours — older lactate results are ignored entirely",
+                "invalidate_if": [
+                    "lactate > 4.0 mmol/L AND no plan note within 6 hours of the result (alert regardless of MAP)",
+                    "lactate 2.0–4.0 mmol/L AND at least one MAP < 65 event in the last 6 hours "
+                    "AND no plan note within 6 hours of the lactate result",
+                    "lactate result is more than 12 hours old (stop — do not alert, do not comment)",
+                ],
+            },
+            {
+                "name": "persistent_hypotension_without_lactate_workup",
+                "description": (
+                    "Persistent hypotension without a lactate result is a missed workup — "
+                    "a single MAP dip is not sufficient (too transient); "
+                    "requires at least 2 consecutive MAP < 65 readings to confirm persistence."
+                ),
+                "band_description": (
+                    "Suppress alert if ANY of the following: "
+                    "(a) fewer than 2 consecutive MAP < 65 readings in the last 6 hours; "
+                    "(b) a lactate result exists within the last 6 hours (workup done)."
+                ),
+                "window": "Ongoing — evaluated on each run where MAP trend data is available",
+                "invalidate_if": [
+                    "2 or more consecutive MAP < 65 readings in the last 6 hours "
+                    "AND no lactate result within the last 6 hours",
+                ],
+            },
+        ],
+        "escalation_target_after_window": (
+            "Scenario 1 breach — alert with: "
+            "'Lactate [X] mmol/L ([time IST]) — [with MAP < 65 events / critically elevated] — no management plan documented.' "
+            "Investigate for occult hypoperfusion, sepsis, mesenteric ischaemia, or hepatic failure. "
+            "Scenario 2 breach — alert with: "
+            "'Persistent hypotension (≥ 2 consecutive MAP < 65 readings) — no lactate resulted in 6h. Lactate workup required.' "
+            "12h staleness — if lactate > 12h old, suppress all lactate alerts and note: "
+            "'Most recent lactate is > 12h old — cannot assess current perfusion status.'"
+        ),
+    },
 ]
 
 

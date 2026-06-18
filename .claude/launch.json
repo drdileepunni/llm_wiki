@@ -14,6 +14,13 @@
       "runtimeArgs": ["node_modules/.bin/vite", "--port", "5173"],
       "cwd": "/Users/drdileepunni/github_/llm_wiki/app/frontend",
       "port": 5173
+    },
+    {
+      "name": "CDS Dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["run_dashboard.py"],
+      "cwd": "/Users/drdileepunni/github_/llm_wiki",
+      "port": 8050
     }
   ]
 }

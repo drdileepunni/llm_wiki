@@ -36,14 +36,14 @@ INITIAL_RULES = [
     {
         "lab": "hemoglobin",
         "aliases": ["hemoglobin", "haemoglobin", "hb", "hgb"],
-        "absolute_floor": 7.0,
+        "absolute_floor": None,
         "absolute_ceiling": None,
         "delta_pct": None,
         "delta_abs": 1.0,
         "delta_direction": "drop",
         "logic": "floor_OR_delta",
         "unit": "g/dL",
-        "notes": "Alert if < 7.0 g/dL OR drop > 1.0 g/dL from prior value",
+        "notes": "Alert if drop > 1.0 g/dL from prior value. Absolute floor managed by haemoglobin-alert-criteria monitoring protocol (7.0 general / 8.0 active cardiac ischaemia).",
     },
     {
         "lab": "TLC",

@@ -196,9 +196,42 @@ The repo uses two GCS buckets. Getting them confused causes silent failures.
 
 **Whenever you seed data that must reach live patients, always prefix the command with `GCS_BUCKET=patientview-cds-pipeline-ops`.**
 
-### Adding a monitoring protocol
-1. Add the new protocol document to `PROTOCOLS` in `tools/radar_sync/seed_monitoring_protocols.py`.
-2. Run: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols`
-3. Verify with: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols --dry-run`
+### Model
+Production model (set via `cloudbuild.yaml` `--set-env-vars` and defaulted in `app/backend/config.py`): **`gemini-3.1-flash-lite`** for both `MODEL` and `REASONING_MODEL`. The problem tracker uses `gemini-3.1-flash-lite` (hardcoded as `_TRACKER_MODEL` in `problem_tracker.py`) — intentional and separate from these env vars.
 
-Omitting `GCS_BUCKET` writes to the wrong bucket. The pipeline will continue running with the old protocol set and no error will be logged.
+### Monitoring protocols
+Protocols live in `tools/radar_sync/seed_monitoring_protocols.py` and are seeded to MongoDB `monitoring_protocols`. Matched against patient problem names via `applies_when` substring list. Gate verdicts: `permissive_active` (suppress), `permissive_breached` (alert), `permissive_ended` (permanent close), `no_permissive_context` (normal rules).
+
+**Current protocols (5):**
+
+| Protocol slug | Scenarios | Purpose |
+|---|---|---|
+| `permissive-hypertension` | 7 | Suppress BP alerts in expected/managed hypertension contexts |
+| `established-low-gcs` | 4 | Suppress GCS alerts for chronically low GCS |
+| `permissive-respiratory` | 2 (`post_operative`, `known_baseline_hypoxia`) | Suppress hypoxia/tachypnea alerts in expected post-op or chronic baseline contexts |
+| `haemoglobin-alert-criteria` | 2 (`stable_hb_general`, `stable_hb_cardiac_ischaemia`) | Suppress Hb alerts unless ≥1 g/dL drop in 24h or below floor (7.0 general / 8.0 active cardiac ischaemia) |
+| `lactate-alert-criteria` | 2 (`elevated_lactate_with_hypoperfusion`, `persistent_hypotension_without_lactate_workup`) | Alert lactate >4 always; lactate 2–4 needs MAP <65; ≥2 consecutive MAP <65 with no lactate in 6h |
+
+**Adding a monitoring protocol:**
+1. Add the new protocol document to `PROTOCOLS` in `tools/radar_sync/seed_monitoring_protocols.py`.
+2. Run: `source .venv/bin/activate && GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols`
+3. Verify: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols --dry-run`
+
+Omitting `GCS_BUCKET` writes to the wrong bucket — pipeline keeps running with old protocols, no error logged. Omitting `source .venv/bin/activate` causes `ModuleNotFoundError: No module named 'google'`.
+
+**Protocol / hardcoded rule conflicts:** When adding a protocol for a vital or lab parameter, audit `pass1_screener.py` (danger threshold list) and `problem_tracker.py` (VITAL SIGN ALERT FLOORS section) for hardcoded references to the same parameter and remove them. The protocol is authoritative; hardcoded thresholds alongside it cause double-alerting or missed suppression.
+
+### Dynamic domain rule injection (`clinical_rule_blocks.py`)
+`tools/radar_sync/clinical_rule_blocks.py` holds domain-specific reasoning rules (GCS delta, SF-ratio/FiO2, renal I/O, subjective symptom, causal/secondary) injected into the problem tracker system prompt **only when the patient has a problem of that category**. Prevents attention dilution from sending irrelevant rules on every run.
+
+- Category detection: keyword substring match against problem names + prefetch_block text.
+- Keyword lists bias toward **inclusion** — over-inject costs minor attention; under-inject risks a missed safety rule.
+- Core `problem_tracker._SYSTEM` keeps all universal rules. Blocks here are domain refinements only.
+- Adding a new domain block: add to `_CATEGORIES` in `clinical_rule_blocks.py`, and remove the corresponding text from `_SYSTEM`.
+
+### Screener flag evaluation
+`evaluate_screener_flag()` in `problem_tracker.py` runs a focused LLM call **before** the main tracker loop to decide whether the Pass-1 screener flag is a new problem not already tracked. Confirmed new problems are injected into the list before the main loop, guaranteeing they are assessed on the alert decision ladder. Logs as `screener_flag_eval` trace step.
+
+### Key alert rules in `problem_tracker._SYSTEM`
+- **GCS DELTA RULE** — no GCS alert without ≥2-point drop in the last 6 hours, regardless of absolute value, plan status, or treatment-inadequate override.
+- **NOTE FRESHNESS RULE** — a plan note <24h old is always a current active plan (`being_addressed=True`, `should_alert=False`). Apply the treatment-inadequate override only when the most recent plan note is >24h old AND the problem is worsening.

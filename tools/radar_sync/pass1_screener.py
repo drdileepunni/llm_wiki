@@ -63,7 +63,7 @@ Decide if a full clinical re-analysis (with deep reasoning) is needed right now.
 Flag needs_full_analysis=true if ANY of:
 - Any problem newly worsening or critical compared to prior state
 - A vital or lab crossed a danger threshold: SpO2 <92%, K+ >5.5 mmol/L,
-  lactate >2 mmol/L, Cr rising >20% vs prior, Hb <7 g/dL, MAP <60 mmHg
+  lactate >2 mmol/L, Cr rising >20% vs prior, MAP <60 mmHg
 - A new clinical note documents a new problem, a plan change, or treatment failure
 - A worsening/critical problem has no documented management plan
 
@@ -81,7 +81,7 @@ Apply HEIGHTENED sensitivity — flag for full analysis even on borderline chang
 Flag needs_full_analysis=true if ANY of:
 - Any problem newly worsening or critical compared to prior state
 - A vital or lab crossed a danger threshold: SpO2 <92%, K+ >5.5 mmol/L,
-  lactate >2 mmol/L, Cr rising >20% vs prior, Hb <7 g/dL, MAP <60 mmHg
+  lactate >2 mmol/L, Cr rising >20% vs prior, MAP <60 mmHg
 - A new clinical note documents a new problem, a plan change, or treatment failure
 - A worsening/critical problem has no documented management plan
 - ANY new lab or vital for a problem that was worsening/critical in the last run

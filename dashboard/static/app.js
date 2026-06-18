@@ -644,8 +644,8 @@ async function loadDocsList() {
         ${escHtml(d.title)}
       </a>`).join('');
     if (docs.length) {
-      const first = el.querySelector('.doc-link');
-      if (first) first.click();
+      const preferred = el.querySelector('[onclick*="pipeline_overview"]') || el.querySelector('.doc-link');
+      if (preferred) preferred.click();
     }
   } catch (e) {
     document.getElementById('doc-list').innerHTML =

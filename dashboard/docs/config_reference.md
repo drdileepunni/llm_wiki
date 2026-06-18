@@ -7,7 +7,11 @@ All pipeline configuration is stored as JSON blobs in the GCS bucket `patientvie
 ```
 patientview-cds-pipeline-ops/
 ├── monitoring_protocols/
-│   └── permissive-hypertension.json   <- pathway definitions
+│   ├── permissive-hypertension.json          <- 7 scenarios: BP suppression
+│   ├── established-low-gcs.json              <- 4 scenarios: chronic low GCS suppression
+│   ├── permissive-respiratory.json           <- 2 scenarios: post-op / baseline hypoxia
+│   ├── haemoglobin-alert-criteria.json       <- 2 scenarios: Hb drop thresholds
+│   └── lactate-alert-criteria.json           <- 2 scenarios: lactate + MAP hypoperfusion
 ├── app_settings/
 │   ├── lab_alert_rules.json           <- per-lab thresholds
 │   ├── symptom_alert_rules.json       <- objective criteria for symptoms
@@ -27,7 +31,17 @@ Each protocol has:
 - `scenarios[]` — each with a `band_description`, `window`, and `invalidate_if` list
 - `escalation_target_after_window` — guidance once the permissive window closes
 
-Seed with: `python -m tools.radar_sync.seed_monitoring_protocols`
+Seed with: `source .venv/bin/activate && GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols`
+
+**Current protocols:**
+
+| Slug | Scenarios | Suppresses alerts when… |
+|---|---|---|
+| `permissive-hypertension` | 7 | BP elevation is expected/managed |
+| `established-low-gcs` | 4 | GCS is chronically low with no acute change |
+| `permissive-respiratory` | 2 | Post-op hypoxia/tachypnea or known baseline low SpO2 |
+| `haemoglobin-alert-criteria` | 2 | Hb stable (drop ≤1 g/dL in 24h and above floor) |
+| `lactate-alert-criteria` | 2 | Lactate 2–4 with no MAP <65; or MAP <65 with lactate already worked up |
 
 ## Lab Alert Rules
 
