@@ -70,10 +70,14 @@ def _sign(blob) -> str:
     raise RuntimeError("no signing method available")
 
 
-def host_chart_images(cpmrn: str, encounter: int, recon_id: str, images: list[dict]) -> list[str]:
+def host_chart_images(cpmrn: str, encounter: int, recon_id: str, images: list[dict],
+                      prefix: str = "med_recon_images") -> list[str]:
     """
-    Upload valid images to gs://{ops}/med_recon_images/{cpmrn}/{enc}/{recon_id}/{i}.{ext}
+    Upload valid images to gs://{ops}/{prefix}/{cpmrn}/{enc}/{recon_id}/{i}.{ext}
     and return signed URLs. Returns [] on any failure (card omits images, recon proceeds).
+
+    `prefix` selects the GCS folder — defaults to med_recon_images; the report-interpret
+    module passes "report_images" so the two features don't share a path.
     """
     valid = [im for im in images if im.get("bytes")]
     if not valid:
@@ -90,7 +94,7 @@ def host_chart_images(cpmrn: str, encounter: int, recon_id: str, images: list[di
     for i, im in enumerate(valid):
         mime = im.get("mime_type") or "image/jpeg"
         ext = _EXT.get(mime, "jpg")
-        blob_path = f"med_recon_images/{cpmrn}/{encounter}/{recon_id}/{i}.{ext}"
+        blob_path = f"{prefix}/{cpmrn}/{encounter}/{recon_id}/{i}.{ext}"
         try:
             blob = bucket.blob(blob_path)
             blob.upload_from_string(im["bytes"], content_type=mime)

@@ -53,6 +53,9 @@ _last_run_results: list = []
 # Hard cap on med-recon cards sent per pipeline cycle (trial period — keeps costs bounded
 # while we calibrate the feature across a 40-45 patient workspace).
 _RECON_CARD_LIMIT = 5
+# Hard cap on report-interpret cards sent per pipeline cycle. Bounds card volume only —
+# when reached we still interpret + audit (send=False) so nothing is silently dropped.
+_REPORT_CARD_LIMIT = 5
 _lock_fh = None   # open file handle — keeps the lock alive
 
 _LOCK_PATH = Path("/tmp/llm_wiki_scheduler.lock")
@@ -378,6 +381,32 @@ def _run_med_recon_step(
         return {"error": "exception"}
 
 
+def _run_report_interpret_step(
+    cpmrn: str,
+    encounter: int,
+    chart: dict,
+    snapshot_at: datetime,
+    db: Any,
+    status: dict,
+    send: bool,
+) -> dict:
+    """
+    Run diagnostic-report interpretation and write result into status dict. `send=False`
+    (per-cycle card cap reached) still interprets + audits but suppresses the card.
+    Returns the result dict so the caller can check card_sent and update the counter.
+    """
+    try:
+        from tools.radar_sync.report_interpret.orchestrator import run_report_interpret
+        result = run_report_interpret(cpmrn, encounter, chart, snapshot_at, db, send=send)
+        status["report_interpret"] = result
+        logger.info("pipeline: report_interpret done for %s enc=%d — %s", cpmrn, encounter, result)
+        return result
+    except Exception:
+        logger.exception("pipeline: report_interpret failed for %s enc=%d", cpmrn, encounter)
+        status["report_interpret"] = {"error": "exception"}
+        return {"error": "exception"}
+
+
 def _collect_all(max_patients: int | None = None):
     """Run one full pipeline cycle. Pass max_patients to limit for local testing."""
     global _last_run_at, _last_run_results
@@ -448,7 +477,8 @@ def _collect_all(max_patients: int | None = None):
         logger.info("scheduler: collecting %d active patient(s)%s", len(patients),
                     f" (limited to {max_patients})" if max_patients is not None else "")
 
-        recon_cards_sent = 0  # cap med-recon sends per cycle to _RECON_CARD_LIMIT
+        recon_cards_sent = 0   # cap med-recon sends per cycle to _RECON_CARD_LIMIT
+        report_cards_sent = 0  # cap report-interpret sends per cycle to _REPORT_CARD_LIMIT
 
         for p in patients:
             cpmrn     = p["CPMRN"]
@@ -511,6 +541,13 @@ def _collect_all(max_patients: int | None = None):
                         logger.info("pipeline: med_recon skipped for %s enc=%d — cycle limit (%d) reached",
                                     cpmrn, encounter, _RECON_CARD_LIMIT)
                         pipeline_status["med_recon"] = {"skipped": "cycle_limit"}
+                    # report-interpret: always run (interpret + audit); cap only the card send
+                    report_result = _run_report_interpret_step(
+                        cpmrn, encounter, recent["chart"], snap_ts, db, pipeline_status,
+                        send=(report_cards_sent < _REPORT_CARD_LIMIT),
+                    )
+                    if report_result.get("card_sent"):
+                        report_cards_sent += 1
                     _last_run_results.append({
                         "cpmrn": cpmrn, "status": "pipeline_on_existing_snapshot",
                         "pipeline": pipeline_status,
@@ -547,6 +584,13 @@ def _collect_all(max_patients: int | None = None):
                         logger.info("pipeline: med_recon skipped for %s enc=%d — cycle limit (%d) reached",
                                     cpmrn, encounter, _RECON_CARD_LIMIT)
                         pipeline_status["med_recon"] = {"skipped": "cycle_limit"}
+                    # report-interpret: always run (interpret + audit); cap only the card send
+                    report_result = _run_report_interpret_step(
+                        cpmrn, encounter, snap_doc["chart"], snap_ts, db, pipeline_status,
+                        send=(report_cards_sent < _REPORT_CARD_LIMIT),
+                    )
+                    if report_result.get("card_sent"):
+                        report_cards_sent += 1
                 else:
                     pipeline_status = {"error": "snapshot_not_found"}
 

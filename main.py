@@ -264,6 +264,121 @@ def order_action():
     })
 
 
+@app.route("/report-feedback", methods=["POST"])
+def report_feedback():
+    """
+    Receive a Google Chat Submit click from a diagnostic-report-interpretation card.
+
+    The card's per-report Submit button carries parameters (action=report_feedback_submit,
+    report_id, cb_token) and form inputs (rating 1-5, optional feedback_text). Stores the
+    rating in cds_study.report_interpret_feedback and returns a hostAppDataAction that
+    replaces that report's rating section in place.
+    """
+    import os
+
+    event = request.get_json(silent=True) or {}
+    common = event.get("commonEventObject", {}) or {}
+    parameters = common.get("parameters", {}) or {}
+    form_inputs = common.get("formInputs", {}) or {}
+
+    expected_token = os.getenv("ALERT_FEEDBACK_TOKEN", "")
+    if not expected_token or parameters.get("cb_token") != expected_token:
+        logging.warning("report-feedback: rejected request with bad/missing cb_token")
+        return jsonify({"error": "unauthorized"}), 401
+
+    def form_value(name):
+        values = form_inputs.get(name, {}).get("stringInputs", {}).get("value", [])
+        return values[0].strip() if values else ""
+
+    chat_event = event.get("chat", {}) or {}
+    user = chat_event.get("user", {}) or {}
+    user_email = user.get("email", "unknown")
+    user_display = user.get("displayName", "unknown")
+    payload = chat_event.get("buttonClickedPayload", {}) or {}
+    message = payload.get("message", {}) or {}
+    space_name = (payload.get("space", {}) or {}).get("name", "")
+
+    report_id = parameters.get("report_id", "")
+    rating = form_value("rating")
+    note = form_value("feedback_text")
+
+    if not rating:
+        return jsonify({
+            "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                "message": {"text": f"⚠️ {user_display}, please select a rating (1–5) before submitting."}
+            }}}
+        })
+
+    logging.info(
+        "report-feedback: report_id=%s rated %s/5 by %s (note=%r)",
+        report_id, rating, user_email, note,
+    )
+
+    from backend.services.bq_store import get_bq_store
+    store = get_bq_store()
+
+    # Validate report_id against report_interpret_audit. A stale/test card → reject.
+    cpmrn, encounter, report_type, batch_id = "", None, "", ""
+    try:
+        rows = store.find_report_interpret({"report_id": report_id})
+        if rows:
+            cpmrn = rows[0].get("CPMRN", "")
+            encounter = rows[0].get("encounter")
+            report_type = rows[0].get("report_type", "")
+            batch_id = rows[0].get("batch_id", "")
+        else:
+            logging.warning(
+                "report-feedback: report_id=%r not found in report_interpret_audit — "
+                "rejecting feedback from stale/test card",
+                report_id,
+            )
+            return jsonify({
+                "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                    "message": {"text": (
+                        "⚠️ This report card is outdated and can no longer accept feedback. "
+                        "Please rate from the current card."
+                    )}
+                }}}
+            })
+    except Exception:
+        logging.exception("report-feedback: report_interpret_audit lookup failed for %s", report_id)
+
+    try:
+        store.insert_report_feedback({
+            "report_id": report_id,
+            "batch_id": batch_id,
+            "CPMRN": cpmrn,
+            "encounter": encounter,
+            "report_type": report_type,
+            "rating": int(rating),
+            "feedback_text": note or None,
+            "user_email": user_email,
+            "user_display": user_display,
+            "space_name": space_name,
+            "message_name": message.get("name", ""),
+        })
+    except Exception:
+        logging.exception("report-feedback: BQ insert failed for %s", report_id)
+        return jsonify({
+            "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                "message": {"text": "⚠️ Could not record your feedback. Please try again later."}
+            }}}
+        })
+
+    status_text = f"{'⭐' * int(rating)} Rated <b>{rating}/5</b> by {user_display}"
+    if note:
+        status_text += f"<br>💬 <i>{note}</i>"
+
+    from tools.radar_sync.report_interpret.report_card import replace_rating_section_with_status
+    updated_cards = replace_rating_section_with_status(message.get("cardsV2", []), report_id, status_text)
+
+    return jsonify({
+        "hostAppDataAction": {"chatDataAction": {"updateMessageAction": {
+            "message": {"cardsV2": updated_cards}
+        }}}
+    })
+
+
 @app.route("/test-bq", methods=["GET"])
 def test_bq():
     """Smoke-test: query prod-tech BQ directly and return a few rows from latest_sbar_fact."""

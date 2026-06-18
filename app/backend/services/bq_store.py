@@ -297,6 +297,79 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.med_recon_actions` (
 OPTIONS (description = "Applied med-recon order actions — who/what/when/result")
 """
 
+_DDL["report_interpret_audit"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.report_interpret_audit` (
+  report_id          STRING    NOT NULL,
+  batch_id           STRING,
+  CPMRN              STRING,
+  encounter          INT64,
+  snapshot_at        TIMESTAMP,
+  interpreted_at     TIMESTAMP,
+  document_file_key  STRING,
+  document_category  STRING,
+  document_name      STRING,
+  reported_at        STRING,
+  selection_reason   STRING,
+  download_ok        BOOL,
+  interpret_ok       BOOL,
+  summary_narrative  STRING,
+  raw_description    STRING,
+  interpretation     STRING,
+  report_type        STRING,
+  confidence         STRING,
+  findings           STRING,
+  image_urls         STRING,
+  model              STRING,
+  card_sent          BOOL,
+  recipients         STRING,
+  step_costs         STRING,
+  created_at         TIMESTAMP
+)
+OPTIONS (description = "Diagnostic-report interpretation audit — one row per interpreted report")
+"""
+
+_DDL["report_interpret_runs"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.report_interpret_runs` (
+  run_id                STRING    NOT NULL,
+  batch_id              STRING,
+  CPMRN                 STRING,
+  encounter             INT64,
+  cycle_started_at      TIMESTAMP,
+  evaluated_at          TIMESTAMP,
+  outcome               STRING,
+  n_reports_found       INT64,
+  n_reports_interpreted INT64,
+  findings_injected     INT64,
+  problems_touched      INT64,
+  card_sent             BOOL,
+  recipients            STRING,
+  watermark_before      TIMESTAMP,
+  watermark_after       TIMESTAMP,
+  cost_usd              FLOAT64,
+  error_detail          STRING,
+  created_at            TIMESTAMP
+)
+OPTIONS (description = "Report-interpret per-patient-per-cycle run outcome — written on every path")
+"""
+
+_DDL["report_interpret_feedback"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.report_interpret_feedback` (
+  report_id      STRING,
+  batch_id       STRING,
+  CPMRN          STRING,
+  encounter      INT64,
+  report_type    STRING,
+  rating         INT64,
+  feedback_text  STRING,
+  user_email     STRING,
+  user_display   STRING,
+  space_name     STRING,
+  message_name   STRING,
+  created_at     TIMESTAMP
+)
+OPTIONS (description = "Clinician 1-5 usefulness ratings from report-interpret chat cards")
+"""
+
 _DDL["fn_adjudications"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.fn_adjudications` (
   record_id        STRING,
@@ -826,6 +899,133 @@ class BQStudyStore:
             bigquery.ScalarQueryParameter("pricing",        "STRING",    _to_json_col(doc.get("pricing"))),
         ])
 
+    # ── report_interpret ──────────────────────────────────────────────────────
+
+    def insert_report_interpret(self, doc: dict) -> str:
+        """Insert one report-interpretation audit row. Returns the report_id."""
+        self._ensure_table("report_interpret_audit")
+        report_id = doc.get("report_id") or _new_id()
+        sql = f"""
+        INSERT INTO {self._fqn("report_interpret_audit")}
+          (report_id, batch_id, CPMRN, encounter, snapshot_at, interpreted_at,
+           document_file_key, document_category, document_name, reported_at, selection_reason,
+           download_ok, interpret_ok, summary_narrative, raw_description, interpretation,
+           report_type, confidence, findings, image_urls, model, card_sent, recipients,
+           step_costs, created_at)
+        VALUES
+          (@report_id, @batch_id, @CPMRN, @encounter, @snapshot_at, @interpreted_at,
+           @document_file_key, @document_category, @document_name, @reported_at, @selection_reason,
+           @download_ok, @interpret_ok, @summary_narrative, @raw_description, @interpretation,
+           @report_type, @confidence, @findings, @image_urls, @model, @card_sent, @recipients,
+           @step_costs, @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("report_id",         "STRING",    report_id),
+            bigquery.ScalarQueryParameter("batch_id",          "STRING",    doc.get("batch_id", "")),
+            bigquery.ScalarQueryParameter("CPMRN",             "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",         "INT64",     doc.get("encounter", 1)),
+            bigquery.ScalarQueryParameter("snapshot_at",       "TIMESTAMP", _dt_to_iso(doc.get("snapshot_at"))),
+            bigquery.ScalarQueryParameter("interpreted_at",    "TIMESTAMP", _dt_to_iso(doc.get("interpreted_at"))),
+            bigquery.ScalarQueryParameter("document_file_key", "STRING",    doc.get("document_file_key", "")),
+            bigquery.ScalarQueryParameter("document_category", "STRING",    doc.get("document_category", "")),
+            bigquery.ScalarQueryParameter("document_name",     "STRING",    doc.get("document_name", "")),
+            bigquery.ScalarQueryParameter("reported_at",       "STRING",    _to_json_col(doc.get("reported_at")) if not isinstance(doc.get("reported_at"), str) else doc.get("reported_at")),
+            bigquery.ScalarQueryParameter("selection_reason",  "STRING",    doc.get("selection_reason", "")),
+            bigquery.ScalarQueryParameter("download_ok",       "BOOL",      bool(doc.get("download_ok", False))),
+            bigquery.ScalarQueryParameter("interpret_ok",      "BOOL",      bool(doc.get("interpret_ok", False))),
+            bigquery.ScalarQueryParameter("summary_narrative", "STRING",    doc.get("summary_narrative")),
+            bigquery.ScalarQueryParameter("raw_description",   "STRING",    doc.get("raw_description")),
+            bigquery.ScalarQueryParameter("interpretation",    "STRING",    doc.get("interpretation")),
+            bigquery.ScalarQueryParameter("report_type",       "STRING",    doc.get("report_type", "")),
+            bigquery.ScalarQueryParameter("confidence",        "STRING",    doc.get("confidence", "")),
+            bigquery.ScalarQueryParameter("findings",          "STRING",    _to_json_col(doc.get("findings"))),
+            bigquery.ScalarQueryParameter("image_urls",        "STRING",    _to_json_col(doc.get("image_urls"))),
+            bigquery.ScalarQueryParameter("model",             "STRING",    doc.get("model", "")),
+            bigquery.ScalarQueryParameter("card_sent",         "BOOL",      bool(doc.get("card_sent", False))),
+            bigquery.ScalarQueryParameter("recipients",        "STRING",    _to_json_col(doc.get("recipients"))),
+            bigquery.ScalarQueryParameter("step_costs",        "STRING",    _to_json_col(doc.get("step_costs"))),
+            bigquery.ScalarQueryParameter("created_at",        "TIMESTAMP", _now_iso()),
+        ])
+        return report_id
+
+    def insert_report_run(self, doc: dict):
+        """Insert one report-interpret run-outcome row (one per patient per cycle)."""
+        self._ensure_table("report_interpret_runs")
+        sql = f"""
+        INSERT INTO {self._fqn("report_interpret_runs")}
+          (run_id, batch_id, CPMRN, encounter, cycle_started_at, evaluated_at, outcome,
+           n_reports_found, n_reports_interpreted, findings_injected, problems_touched,
+           card_sent, recipients, watermark_before, watermark_after, cost_usd, error_detail,
+           created_at)
+        VALUES
+          (@run_id, @batch_id, @CPMRN, @encounter, @cycle_started_at, @evaluated_at, @outcome,
+           @n_reports_found, @n_reports_interpreted, @findings_injected, @problems_touched,
+           @card_sent, @recipients, @watermark_before, @watermark_after, @cost_usd, @error_detail,
+           @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("run_id",                "STRING",    doc.get("run_id") or _new_id()),
+            bigquery.ScalarQueryParameter("batch_id",              "STRING",    doc.get("batch_id", "")),
+            bigquery.ScalarQueryParameter("CPMRN",                 "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",             "INT64",     doc.get("encounter", 1)),
+            bigquery.ScalarQueryParameter("cycle_started_at",      "TIMESTAMP", _dt_to_iso(doc.get("cycle_started_at"))),
+            bigquery.ScalarQueryParameter("evaluated_at",          "TIMESTAMP", _dt_to_iso(doc.get("evaluated_at"))),
+            bigquery.ScalarQueryParameter("outcome",               "STRING",    doc.get("outcome", "")),
+            bigquery.ScalarQueryParameter("n_reports_found",       "INT64",     doc.get("n_reports_found", 0)),
+            bigquery.ScalarQueryParameter("n_reports_interpreted", "INT64",     doc.get("n_reports_interpreted", 0)),
+            bigquery.ScalarQueryParameter("findings_injected",     "INT64",     doc.get("findings_injected", 0)),
+            bigquery.ScalarQueryParameter("problems_touched",      "INT64",     doc.get("problems_touched", 0)),
+            bigquery.ScalarQueryParameter("card_sent",             "BOOL",      bool(doc.get("card_sent", False))),
+            bigquery.ScalarQueryParameter("recipients",            "STRING",    _to_json_col(doc.get("recipients"))),
+            bigquery.ScalarQueryParameter("watermark_before",      "TIMESTAMP", _dt_to_iso(doc.get("watermark_before"))),
+            bigquery.ScalarQueryParameter("watermark_after",       "TIMESTAMP", _dt_to_iso(doc.get("watermark_after"))),
+            bigquery.ScalarQueryParameter("cost_usd",              "FLOAT64",   float(doc.get("cost_usd", 0.0) or 0.0)),
+            bigquery.ScalarQueryParameter("error_detail",          "STRING",    doc.get("error_detail", "")),
+            bigquery.ScalarQueryParameter("created_at",            "TIMESTAMP", _now_iso()),
+        ])
+
+    def insert_report_feedback(self, doc: dict):
+        """Insert a clinician rating row from a report-interpret chat card."""
+        self._ensure_table("report_interpret_feedback")
+        sql = f"""
+        INSERT INTO {self._fqn("report_interpret_feedback")}
+          (report_id, batch_id, CPMRN, encounter, report_type, rating, feedback_text,
+           user_email, user_display, space_name, message_name, created_at)
+        VALUES
+          (@report_id, @batch_id, @CPMRN, @encounter, @report_type, @rating, @feedback_text,
+           @user_email, @user_display, @space_name, @message_name, @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("report_id",     "STRING",    doc.get("report_id", "")),
+            bigquery.ScalarQueryParameter("batch_id",      "STRING",    doc.get("batch_id", "")),
+            bigquery.ScalarQueryParameter("CPMRN",         "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",     "INT64",     doc.get("encounter")),
+            bigquery.ScalarQueryParameter("report_type",   "STRING",    doc.get("report_type", "")),
+            bigquery.ScalarQueryParameter("rating",        "INT64",     doc.get("rating")),
+            bigquery.ScalarQueryParameter("feedback_text", "STRING",    doc.get("feedback_text")),
+            bigquery.ScalarQueryParameter("user_email",    "STRING",    doc.get("user_email", "")),
+            bigquery.ScalarQueryParameter("user_display",  "STRING",    doc.get("user_display", "")),
+            bigquery.ScalarQueryParameter("space_name",    "STRING",    doc.get("space_name", "")),
+            bigquery.ScalarQueryParameter("message_name",  "STRING",    doc.get("message_name", "")),
+            bigquery.ScalarQueryParameter("created_at",    "TIMESTAMP", _now_iso()),
+        ])
+
+    def find_report_interpret(self, filter: dict) -> list[dict]:
+        """SELECT report_interpret_audit rows matching filter."""
+        self._ensure_table("report_interpret_audit")
+        clauses, params = _build_where("report_interpret_audit", filter)
+        where = " AND ".join(clauses) if clauses else "TRUE"
+        sql = f"SELECT * FROM {self._fqn('report_interpret_audit')} WHERE {where}"
+        return self._query(sql, params)
+
+    def find_report_runs(self, filter: dict) -> list[dict]:
+        """SELECT report_interpret_runs rows matching filter."""
+        self._ensure_table("report_interpret_runs")
+        clauses, params = _build_where("report_interpret_runs", filter)
+        where = " AND ".join(clauses) if clauses else "TRUE"
+        sql = f"SELECT * FROM {self._fqn('report_interpret_runs')} WHERE {where}"
+        return self._query(sql, params)
+
 
 # ── where-clause builder ──────────────────────────────────────────────────────
 
@@ -837,6 +1037,8 @@ _FILTERABLE: dict[str, set[str]] = {
     "study_suppressed_events": {"CPMRN", "encounter", "suppressed_at"},
     "med_recon_audit":  {"recon_id", "CPMRN", "encounter", "recon_at", "action_set_id"},
     "med_recon_actions":{"recon_id", "CPMRN", "encounter", "action_set_id"},
+    "report_interpret_audit": {"report_id", "batch_id", "CPMRN", "encounter", "report_type"},
+    "report_interpret_runs":  {"run_id", "batch_id", "CPMRN", "encounter", "outcome"},
 }
 
 

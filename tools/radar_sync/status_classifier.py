@@ -15,13 +15,15 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from tools.radar_sync.clinical_rules import RESPIRATORY_SF_RULE, OLIGURIA_CHARTING_RULE
+
 logger = logging.getLogger(__name__)
 
 _CLASSIFIER_MODEL = "gemini-2.5-flash"  # reasoning model with thinking
 _MAX_TOOL_ROUNDS  = 8                   # max tool calls before forcing final answer
 _THINKING_BUDGET  = 8000               # tokens for Gemini thinking
 
-_SYSTEM = """You are a senior ICU clinician reviewing automatically-assigned clinical problem statuses.
+_SYSTEM = f"""You are a senior ICU clinician reviewing automatically-assigned clinical problem statuses.
 
 A prior model labelled each problem from a single snapshot. Your job is to VERIFY these labels by \
 checking TREND DATA — not just the latest value. You have tools to pull vital and lab trends, \
@@ -54,10 +56,7 @@ RULES:
 - Always check at least vital trend OR lab trend before finalising worsening/critical.
 - For labs: always pull the last 3-4 values to establish the patient's own baseline
   before deciding if the current result represents a change.
-- For respiratory problems: NEVER judge SpO2 in isolation. get_vital_trend('SpO2') now
-  returns the SF ratio (SpO2 / FiO2%) alongside each reading. Use the SF ratio trend,
-  not raw SpO2, to assess oxygenation. If FiO2 was reduced and SF ratio is stable or
-  improved, SpO2 dropping is planned weaning — mark as stable or improving, NOT worsening.
+- {RESPIRATORY_SF_RULE}
 - A problem already on appropriate treatment with controlled values → stable, not worsening.
 - Chronic hypertension at 150/90 with no recent change → stable.
 - Tachycardia HR 105 if prior 4 readings were all 100-110 → stable (known baseline).
@@ -68,11 +67,7 @@ RULES:
 - If a problem is already marked "resolved" by the prior stage, you need OBJECTIVE data showing
   clear deterioration (not just a note mentioning past treatment) to upgrade it to worsening.
   If vital trends are normal, keep the problem resolved or stable.
-- I/O charting in ICUs is frequently incomplete or entered retrospectively. Zero urine output
-  in the chart — even across several consecutive hours — does NOT reliably indicate true anuria
-  or oliguria. Always treat recorded 0 ml output as "possible missed charting" unless ALL three
-  of the following are true: (1) the daily total is also 0 ml, (2) clinical notes explicitly
-  document anuria or oliguria, AND (3) creatinine is rising. Do NOT label AKI as worsening or
+- {OLIGURIA_CHARTING_RULE} Do NOT label AKI as worsening or
   critical on the basis of 0 ml charting alone.
 - If your tool data directly contradicts the label assigned by the prior stage, TRUST YOUR
   TOOL DATA and override it. Examples:
