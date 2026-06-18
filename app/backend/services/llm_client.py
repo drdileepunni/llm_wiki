@@ -24,11 +24,22 @@ Usage
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+import time as _time_module
 from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger("wiki.llm_client")
+
+# ── Gemini context-cache registry ───────────────────────────────────────────
+# Shared across all GeminiLLMClient instances in the process.
+# Maps (model + system_prompt_hash) → (cache_name, expires_at_unix)
+_context_cache: dict[str, tuple[str, float]] = {}
+_context_cache_lock = threading.Lock()
+_CACHE_TTL_S   = 3600   # 1-hour TTL — comfortably spans a full pipeline batch
+_CACHE_MIN_CHARS = 4096  # ≈ 1 024 tokens; below this the API call overhead outweighs savings
 
 
 # ── Shared response types ────────────────────────────────────────────────────
@@ -39,15 +50,17 @@ class LLMUsage:
     input_tokens: int
     output_tokens: int
     thinking_tokens: int = 0   # Gemini 2.5: thoughts_token_count from usage_metadata
+    cached_tokens: int  = 0    # tokens served from context cache (subset of input_tokens)
 
 
 def _usage_from(raw) -> "LLMUsage":
     """Build an LLMUsage from a Gemini response's usage_metadata."""
     meta = getattr(raw, "usage_metadata", None)
-    in_tok    = getattr(meta, "prompt_token_count",     0) or 0
-    out_tok   = getattr(meta, "candidates_token_count", 0) or 0
-    think_tok = getattr(meta, "thoughts_token_count",   0) or 0
-    return LLMUsage(in_tok, out_tok, thinking_tokens=think_tok)
+    in_tok     = getattr(meta, "prompt_token_count",          0) or 0
+    out_tok    = getattr(meta, "candidates_token_count",      0) or 0
+    think_tok  = getattr(meta, "thoughts_token_count",        0) or 0
+    cached_tok = getattr(meta, "cached_content_token_count",  0) or 0
+    return LLMUsage(in_tok, out_tok, thinking_tokens=think_tok, cached_tokens=cached_tok)
 
 
 @dataclass
@@ -414,6 +427,39 @@ class GeminiLLMClient:
             gemini_tools    = []
             gemini_tool_cfg = None
 
+        # ── context cache (large static system prompts only) ─────────────────
+        # When the system prompt exceeds ~1 024 tokens, cache it at the API
+        # level so subsequent patients in the same batch hit the cheap cached
+        # rate instead of full input pricing.  Falls back silently on error.
+        _cache_name: str | None = None
+        if system and len(system) >= _CACHE_MIN_CHARS:
+            _cache_key = f"{self.model}:{hashlib.md5(system.encode()).hexdigest()}"
+            _now = _time_module.time()
+            with _context_cache_lock:
+                _entry = _context_cache.get(_cache_key)
+                if _entry and _entry[1] > _now:
+                    _cache_name = _entry[0]
+                else:
+                    try:
+                        _cache = self._client.caches.create(
+                            model=self.model,
+                            config=types.CreateCachedContentConfig(
+                                system_instruction=system,
+                                ttl=f"{_CACHE_TTL_S}s",
+                            ),
+                        )
+                        _cache_name = _cache.name
+                        # Expire a minute early to avoid using a stale entry
+                        _context_cache[_cache_key] = (_cache_name, _now + _CACHE_TTL_S - 60)
+                        log.info(
+                            "Gemini context cache created: model=%s suffix=...%s",
+                            self.model, _cache_key[-8:],
+                        )
+                    except Exception as _ce:
+                        log.warning(
+                            "Gemini context cache creation failed — continuing without cache: %s", _ce
+                        )
+
         # ── convert messages to Gemini format ────────────────────────────────
         gemini_contents = []
         for msg in messages:
@@ -481,9 +527,13 @@ class GeminiLLMClient:
         _temperature = temperature if temperature is not None else 0.0
 
         def _make_config(attempt: int) -> "types.GenerateContentConfig":
+            # When a context cache is active, system_instruction is already
+            # baked into the cache — passing it again raises an API error.
+            sys_instr = None if _cache_name else (system or None)
             if attempt == 1:
                 return types.GenerateContentConfig(
-                    system_instruction=system or None,
+                    cached_content=_cache_name,
+                    system_instruction=sys_instr,
                     tools=gemini_tools or None,
                     tool_config=gemini_tool_cfg,
                     max_output_tokens=max_tokens,
@@ -496,7 +546,8 @@ class GeminiLLMClient:
                     function_calling_config=types.FunctionCallingConfig(mode="AUTO")
                 ) if fn_decls else None
                 return types.GenerateContentConfig(
-                    system_instruction=system or None,
+                    cached_content=_cache_name,
+                    system_instruction=sys_instr,
                     tools=gemini_tools or None,
                     tool_config=auto_cfg,
                     max_output_tokens=max_tokens,
@@ -505,7 +556,8 @@ class GeminiLLMClient:
                 )
             # attempt 3: no tools at all — plain text, caller handles JSON extraction
             return types.GenerateContentConfig(
-                system_instruction=system or None,
+                cached_content=_cache_name,
+                system_instruction=sys_instr,
                 max_output_tokens=max_tokens,
                 thinking_config=no_thinking,
                 temperature=_temperature,
@@ -597,14 +649,18 @@ class GeminiLLMClient:
 
         # ── usage ────────────────────────────────────────────────────────────
         meta         = raw.usage_metadata
-        in_tok       = getattr(meta, "prompt_token_count",    0) or 0
-        out_tok      = getattr(meta, "candidates_token_count", 0) or 0
-        think_tok    = getattr(meta, "thoughts_token_count",   0) or 0
+        in_tok       = getattr(meta, "prompt_token_count",          0) or 0
+        out_tok      = getattr(meta, "candidates_token_count",      0) or 0
+        think_tok    = getattr(meta, "thoughts_token_count",        0) or 0
+        cached_tok   = getattr(meta, "cached_content_token_count",  0) or 0
+
+        if cached_tok:
+            log.debug("Gemini cache hit: %d/%d input tokens from cache", cached_tok, in_tok)
 
         return LLMResponse(
             stop_reason=stop_reason,
             content=content,
-            usage=LLMUsage(in_tok, out_tok, thinking_tokens=think_tok),
+            usage=LLMUsage(in_tok, out_tok, thinking_tokens=think_tok, cached_tokens=cached_tok),
         )
 
 

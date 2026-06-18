@@ -19,7 +19,7 @@ from tools.radar_sync.clinical_rules import RESPIRATORY_SF_RULE, OLIGURIA_CHARTI
 
 logger = logging.getLogger(__name__)
 
-_CLASSIFIER_MODEL = "gemini-3.1-flash-lite"  # reasoning model with thinking
+_CLASSIFIER_MODEL = "gemini-2.5-flash"  # reasoning model with thinking
 _MAX_TOOL_ROUNDS  = 8                   # max tool calls before forcing final answer
 _THINKING_BUDGET  = 8000               # tokens for Gemini thinking
 
@@ -1006,7 +1006,7 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
             tracer.end_round()
             break
 
-        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
 
         # Collect assistant content for history
         assistant_parts: list[dict] = []

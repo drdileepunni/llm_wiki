@@ -30,7 +30,7 @@ from uuid import uuid4 as _uuid4
 
 logger = logging.getLogger(__name__)
 
-_TRACKER_MODEL    = "gemini-3.1-flash-lite"
+_TRACKER_MODEL    = "gemini-2.5-flash"
 _MAX_TOOL_ROUNDS  = 10
 _THINKING_BUDGET  = 8000
 _ALERT_COOLDOWN_H      = 8   # minimum hours between repeat alerts for same problem
@@ -1977,7 +1977,7 @@ def evaluate_screener_flag(
         tracer.save(final_output={"error": "llm_failed"})
         return None
 
-    tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
+    tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
 
     decision_args: dict = {}
     for block in resp.content:
@@ -2291,7 +2291,7 @@ def track_problems(
             tracer.end_round()
             break
 
-        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens)
+        tracer.log_tokens(resp.usage.input_tokens, resp.usage.output_tokens, resp.usage.thinking_tokens, resp.usage.cached_tokens)
 
         assistant_parts: list[dict] = []
         tool_calls: list[dict] = []
@@ -2395,6 +2395,12 @@ def track_problems(
 
     for assessment in final_assessments:
         problem_name = assessment.get("problem_name", "")
+        if not problem_name:
+            logger.warning(
+                "problem_tracker: skipping malformed assessment (no problem_name) for %s enc=%d — keys=%s",
+                cpmrn, encounter, list(assessment.keys()),
+            )
+            continue
         should_alert = assessment.get("should_alert", False)
         will_alert   = False
         alert_id     = ""
