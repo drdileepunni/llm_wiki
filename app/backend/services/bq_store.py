@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from google.cloud import bigquery
@@ -64,6 +64,7 @@ def _new_id() -> str:
 # ── DDL ───────────────────────────────────────────────────────────────────────
 
 _DDL: dict[str, str] = {}
+_ALTER_DDL: dict[str, str] = {}  # ALTER TABLE migrations run once after table is ensured
 
 _DDL["study_alerts"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.study_alerts` (
@@ -213,9 +214,15 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.pipeline_run_costs` (
   model            STRING,
   totals           STRING,
   by_step          STRING,
-  pricing          STRING
+  pricing          STRING,
+  patient_tiers    STRING
 )
 OPTIONS (description = "Per-run LLM token costs")
+"""
+
+_ALTER_DDL["pipeline_run_costs"] = f"""
+ALTER TABLE `{_PROJECT}.{_DATASET}.pipeline_run_costs`
+ADD COLUMN IF NOT EXISTS patient_tiers STRING
 """
 
 _DDL["study_adjudications"] = f"""
@@ -436,6 +443,13 @@ class BQStudyStore:
             self._tables_ensured.add(table)
         except Exception:
             log.exception("bq_store: failed to ensure table %s", table)
+        alter_ddl = _ALTER_DDL.get(table)
+        if alter_ddl:
+            try:
+                self._client.query(alter_ddl, location=self._location).result()
+                log.info("bq_store: applied alter migration for %s.%s", self._dataset, table)
+            except Exception:
+                log.exception("bq_store: alter migration failed for %s (may already exist)", table)
 
     def _query(self, sql: str, params: list | None = None) -> list[dict]:
         """Execute a SELECT and return rows as list of dicts."""
@@ -619,6 +633,141 @@ class BQStudyStore:
         sql = f"SELECT COUNT(*) AS n FROM {self._fqn('study_sbar_import')} WHERE {where}"
         rows = self._query(sql, params)
         return rows[0]["n"] if rows else 0
+
+    def batch_upsert_sbars(self, docs: list[dict]) -> tuple[int, int]:
+        """Insert new SBAR rows in a single round-trip. Returns (inserted, skipped)."""
+        if not docs:
+            return 0, 0
+        self._ensure_table("study_sbar_import")
+        sbar_ids = [d["sbar_id"] for d in docs if d.get("sbar_id")]
+        if not sbar_ids:
+            return 0, len(docs)
+
+        # One SELECT to find which ids already exist
+        id_params = [bigquery.ScalarQueryParameter(f"eid_{i}", "STRING", sid)
+                     for i, sid in enumerate(sbar_ids)]
+        id_placeholders = ", ".join(f"@eid_{i}" for i in range(len(sbar_ids)))
+        existing = {
+            r["sbar_id"]
+            for r in self._query(
+                f"SELECT sbar_id FROM {self._fqn('study_sbar_import')} WHERE sbar_id IN ({id_placeholders})",
+                id_params,
+            )
+        }
+
+        new_docs = [d for d in docs if d.get("sbar_id") and d["sbar_id"] not in existing]
+        skipped = len(docs) - len(new_docs)
+        if not new_docs:
+            return 0, skipped
+
+        # Chunk into batches of 200 rows to stay within BQ parameter limits
+        inserted = 0
+        synced_at = _now_iso()
+        for chunk_start in range(0, len(new_docs), 200):
+            chunk = new_docs[chunk_start: chunk_start + 200]
+            params: list = []
+            selects: list[str] = []
+            for i, doc in enumerate(chunk):
+                p = f"s{chunk_start}_{i}_"
+                params += [
+                    bigquery.ScalarQueryParameter(f"{p}sbar_id",          "STRING",    doc["sbar_id"]),
+                    bigquery.ScalarQueryParameter(f"{p}CPMRN",            "STRING",    doc.get("CPMRN", "")),
+                    bigquery.ScalarQueryParameter(f"{p}encounter",        "INT64",     doc.get("encounter", 1)),
+                    bigquery.ScalarQueryParameter(f"{p}hospital_name",    "STRING",    doc.get("hospital_name", "")),
+                    bigquery.ScalarQueryParameter(f"{p}unit_name",        "STRING",    doc.get("unit_name", "")),
+                    bigquery.ScalarQueryParameter(f"{p}urgency",          "STRING",    doc.get("urgency", "")),
+                    bigquery.ScalarQueryParameter(f"{p}issues",           "STRING",    doc.get("issues", "")),
+                    bigquery.ScalarQueryParameter(f"{p}module",           "STRING",    doc.get("module", "")),
+                    bigquery.ScalarQueryParameter(f"{p}create_dt",        "TIMESTAMP", _dt_to_iso(doc.get("create_date_time"))),
+                    bigquery.ScalarQueryParameter(f"{p}is_reviewed",      "BOOL",      bool(doc.get("is_reviewed", False))),
+                    bigquery.ScalarQueryParameter(f"{p}reviewer_name",    "STRING",    doc.get("reviewer_name", "")),
+                    bigquery.ScalarQueryParameter(f"{p}action",           "STRING",    doc.get("action", "")),
+                    bigquery.ScalarQueryParameter(f"{p}window_expires_at","TIMESTAMP", _dt_to_iso(doc.get("window_expires_at"))),
+                    bigquery.ScalarQueryParameter(f"{p}match_status",     "STRING",    doc.get("match_status", "pending")),
+                ]
+                selects.append(
+                    f"SELECT @{p}sbar_id AS sbar_id, @{p}CPMRN AS CPMRN,"
+                    f" @{p}encounter AS encounter, @{p}hospital_name AS hospital_name,"
+                    f" @{p}unit_name AS unit_name, @{p}urgency AS urgency,"
+                    f" @{p}issues AS issues, @{p}module AS module,"
+                    f" @{p}create_dt AS create_date_time, @{p}is_reviewed AS is_reviewed,"
+                    f" @{p}reviewer_name AS reviewer_name, @{p}action AS action,"
+                    f" @{p}window_expires_at AS window_expires_at,"
+                    f" @{p}match_status AS match_status, NULL AS matched_alert_id,"
+                    f" TIMESTAMP('{synced_at}') AS synced_at"
+                )
+            sql = (
+                f"INSERT INTO {self._fqn('study_sbar_import')}"
+                f" (sbar_id, CPMRN, encounter, hospital_name, unit_name, urgency, issues, module,"
+                f" create_date_time, is_reviewed, reviewer_name, action, window_expires_at,"
+                f" match_status, matched_alert_id, synced_at)"
+                f" {' UNION ALL '.join(selects)}"
+            )
+            inserted += self._execute(sql, params)
+
+        return inserted, skipped
+
+    def find_alerts_for_sbars(
+        self,
+        sbars: list[dict],
+        window_before_h: int = 6,
+        window_after_h: int = 2,
+    ) -> dict[str, list[dict]]:
+        """
+        One BQ round-trip: return {sbar_id: [matching alert rows]} for all pending SBARs.
+        Only returns SBARs that have at least one candidate alert.
+        """
+        if not sbars:
+            return {}
+        self._ensure_table("study_alerts")
+
+        # Build inline SBAR window table as UNION ALL SELECTs
+        params: list = []
+        window_rows: list[str] = []
+        for i, sbar in enumerate(sbars):
+            create_dt = sbar.get("create_date_time")
+            if isinstance(create_dt, datetime):
+                pass
+            else:
+                continue
+            if create_dt.tzinfo is None:
+                create_dt = create_dt.replace(tzinfo=timezone.utc)
+            ws = (create_dt - timedelta(hours=window_before_h)).isoformat()
+            we = (create_dt + timedelta(hours=window_after_h)).isoformat()
+            params += [
+                bigquery.ScalarQueryParameter(f"sw_sid_{i}",  "STRING",    sbar["sbar_id"]),
+                bigquery.ScalarQueryParameter(f"sw_cpm_{i}",  "STRING",    sbar.get("CPMRN", "")),
+                bigquery.ScalarQueryParameter(f"sw_enc_{i}",  "INT64",     sbar.get("encounter", 1)),
+                bigquery.ScalarQueryParameter(f"sw_ws_{i}",   "TIMESTAMP", ws),
+                bigquery.ScalarQueryParameter(f"sw_we_{i}",   "TIMESTAMP", we),
+            ]
+            window_rows.append(
+                f"SELECT @sw_sid_{i} AS sbar_id, @sw_cpm_{i} AS CPMRN,"
+                f" @sw_enc_{i} AS encounter, @sw_ws_{i} AS window_start, @sw_we_{i} AS window_end"
+            )
+
+        if not window_rows:
+            return {}
+
+        sql = f"""
+        WITH sbar_windows AS ({" UNION ALL ".join(window_rows)})
+        SELECT a.*, sw.sbar_id AS _sbar_id
+        FROM {self._fqn("study_alerts")} a
+        JOIN sbar_windows sw
+          ON  a.CPMRN     = sw.CPMRN
+          AND a.encounter = sw.encounter
+          AND a.alerted_at >= sw.window_start
+          AND a.alerted_at <= sw.window_end
+          AND a.match_status IN ('pending', 'fp_candidate')
+        """
+        rows = self._query(sql, params)
+
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            sbar_id = row.pop("_sbar_id", None)
+            if sbar_id:
+                result.setdefault(sbar_id, []).append(row)
+        return result
 
     # ── study_task_import ─────────────────────────────────────────────────────
 
@@ -884,19 +1033,22 @@ class BQStudyStore:
         self._ensure_table("pipeline_run_costs")
         sql = f"""
         INSERT INTO {self._fqn("pipeline_run_costs")}
-          (run_started_at, computed_at, patient_count, trace_count, model, totals, by_step, pricing)
+          (run_started_at, computed_at, patient_count, trace_count, model,
+           totals, by_step, pricing, patient_tiers)
         VALUES
-          (@run_started_at, @computed_at, @patient_count, @trace_count, @model, @totals, @by_step, @pricing)
+          (@run_started_at, @computed_at, @patient_count, @trace_count, @model,
+           @totals, @by_step, @pricing, @patient_tiers)
         """
         self._execute(sql, [
-            bigquery.ScalarQueryParameter("run_started_at", "TIMESTAMP", _dt_to_iso(doc.get("run_started_at"))),
-            bigquery.ScalarQueryParameter("computed_at",    "TIMESTAMP", _dt_to_iso(doc.get("computed_at"))),
-            bigquery.ScalarQueryParameter("patient_count",  "INT64",     doc.get("patient_count", 0)),
-            bigquery.ScalarQueryParameter("trace_count",    "INT64",     doc.get("trace_count", 0)),
-            bigquery.ScalarQueryParameter("model",          "STRING",    doc.get("model", "")),
-            bigquery.ScalarQueryParameter("totals",         "STRING",    _to_json_col(doc.get("totals"))),
-            bigquery.ScalarQueryParameter("by_step",        "STRING",    _to_json_col(doc.get("by_step"))),
-            bigquery.ScalarQueryParameter("pricing",        "STRING",    _to_json_col(doc.get("pricing"))),
+            bigquery.ScalarQueryParameter("run_started_at",  "TIMESTAMP", _dt_to_iso(doc.get("run_started_at"))),
+            bigquery.ScalarQueryParameter("computed_at",     "TIMESTAMP", _dt_to_iso(doc.get("computed_at"))),
+            bigquery.ScalarQueryParameter("patient_count",   "INT64",     doc.get("patient_count", 0)),
+            bigquery.ScalarQueryParameter("trace_count",     "INT64",     doc.get("trace_count", 0)),
+            bigquery.ScalarQueryParameter("model",           "STRING",    doc.get("model", "")),
+            bigquery.ScalarQueryParameter("totals",          "STRING",    _to_json_col(doc.get("totals"))),
+            bigquery.ScalarQueryParameter("by_step",         "STRING",    _to_json_col(doc.get("by_step"))),
+            bigquery.ScalarQueryParameter("pricing",         "STRING",    _to_json_col(doc.get("pricing"))),
+            bigquery.ScalarQueryParameter("patient_tiers",   "STRING",    _to_json_col(doc.get("patient_tiers"))),
         ])
 
     # ── report_interpret ──────────────────────────────────────────────────────

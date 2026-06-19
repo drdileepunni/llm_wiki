@@ -276,6 +276,66 @@ def get_alerts_per_run(from_date: str | None = None, to_date: str | None = None)
     }
 
 
+# ── per-run details ───────────────────────────────────────────────────────────
+
+def get_runs(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
+    """Return one row per pipeline run with patient tier breakdown, cost, and alerts."""
+    date_filter = _date_clause("r.run_started_at", from_date, to_date)
+    sql = f"""
+    WITH runs AS (
+      SELECT
+        run_started_at,
+        patient_count,
+        trace_count,
+        totals,
+        patient_tiers,
+        LEAD(run_started_at) OVER (ORDER BY run_started_at) AS next_run
+      FROM {fqn("pipeline_run_costs")}
+      WHERE 1=1 {date_filter}
+    ),
+    run_alerts AS (
+      SELECT
+        r.run_started_at,
+        COUNT(DISTINCT a.alert_id) AS alerts_sent
+      FROM runs r
+      LEFT JOIN {fqn("study_alerts")} a
+        ON a.alerted_at >= r.run_started_at
+        AND (r.next_run IS NULL OR a.alerted_at < r.next_run)
+      GROUP BY 1
+    )
+    SELECT
+      r.run_started_at,
+      r.patient_count,
+      r.trace_count,
+      r.totals,
+      r.patient_tiers,
+      COALESCE(ra.alerts_sent, 0) AS alerts_sent
+    FROM runs r
+    LEFT JOIN run_alerts ra USING (run_started_at)
+    ORDER BY r.run_started_at DESC
+    """
+    rows = query(sql)
+    result = []
+    for r in rows:
+        totals = parse_json_col(r.get("totals"))
+        tiers  = parse_json_col(r.get("patient_tiers"))
+        ts = r.get("run_started_at")
+        result.append({
+            "run_started_at":        ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "patient_count":         int(r.get("patient_count") or 0),
+            "trace_count":           int(r.get("trace_count") or 0),
+            "alerts_sent":           int(r.get("alerts_sent") or 0),
+            "cost_usd":              round(float(totals.get("cost_usd") or 0), 4),
+            "expensive_count":       int(tiers.get("expensive_count") or 0) if tiers else None,
+            "cheap_count":           int(tiers.get("cheap_count") or 0) if tiers else None,
+            "skipped_count":         int(tiers.get("skipped_count") or 0) if tiers else None,
+            "total_scheduled":       int(tiers.get("total_scheduled") or 0) if tiers else None,
+            "avg_cost_expensive_usd": round(float(tiers.get("avg_cost_expensive_usd") or 0), 6) if tiers else None,
+            "avg_cost_cheap_usd":    round(float(tiers.get("avg_cost_cheap_usd") or 0), 6) if tiers else None,
+        })
+    return result
+
+
 # ── feedback comments ─────────────────────────────────────────────────────────
 
 def get_comments(limit: int = 50, from_date: str | None = None, to_date: str | None = None) -> list[dict]:

@@ -808,20 +808,24 @@ def _collect_all(max_patients: int | None = None):
                 )
                 _last_run_results.append({"cpmrn": cpmrn, "status": "error", "error": str(e)})
                 logger.exception("scheduler: collect failed for %s", cpmrn)
-        # ── Study pipeline — runs after all patients are processed ───────────
-        try:
-            from tools.radar_sync.study_runner import run_study_jobs
-            study_result = run_study_jobs(db)
-            _last_run_results.append({"step": "study_jobs", **study_result})
-            logger.info("scheduler: study jobs done — %s", study_result)
-        except Exception:
-            logger.exception("scheduler: study jobs failed")
-            _last_run_results.append({"step": "study_jobs", "error": "exception"})
+        # ── Study pipeline — runs only when explicitly enabled ───────────────
+        if _study_pipeline_enabled(db):
+            try:
+                from tools.radar_sync.study_runner import run_study_jobs
+                study_result = run_study_jobs(db)
+                _last_run_results.append({"step": "study_jobs", **study_result})
+                logger.info("scheduler: study jobs done — %s", study_result)
+            except Exception:
+                logger.exception("scheduler: study jobs failed")
+                _last_run_results.append({"step": "study_jobs", "error": "exception"})
+        else:
+            logger.info("scheduler: study pipeline disabled — skipping study jobs")
+            _last_run_results.append({"step": "study_jobs", "status": "disabled"})
 
         # ── Cost tracker — aggregate LLM token costs for this run ────────────
         try:
             from tools.radar_sync.study_cost_tracker import compute_run_cost
-            cost_doc = compute_run_cost(db, _last_run_at)
+            cost_doc = compute_run_cost(db, _last_run_at, total_patients_scheduled=len(patients))
             totals = cost_doc.get("totals", {})
             _last_run_results.append({
                 "step":          "cost_summary",
@@ -860,15 +864,31 @@ def start_scheduler():
     threading.Thread(target=_try_start, daemon=True, name="scheduler-init").start()
 
 
+def _study_pipeline_enabled(db=None) -> bool:
+    """Return True only when study_pipeline_enabled is explicitly set to True in app_settings."""
+    try:
+        if db is None:
+            from backend.services.emr.db import get_db
+            db = get_db()
+        doc = db["app_settings"].find_one({"_id": "study_pipeline_enabled"})
+        return bool(doc and doc.get("enabled", False))
+    except Exception:
+        logger.exception("scheduler: could not read study_pipeline_enabled — defaulting to disabled")
+        return False
+
+
 def _run_study_jobs():
     """Run SBAR + task sync, LLM matching, FP candidacy, and metrics. Called 10 min after each hourly snapshot."""
     try:
         from backend.services.emr.db import get_db
+        db = get_db()
+        if not _study_pipeline_enabled(db):
+            logger.info("study_jobs: study pipeline disabled — skipping")
+            return
         from tools.radar_sync.study_sbar_syncer import sync_sbars
         from tools.radar_sync.study_task_syncer import sync_tasks
         from tools.radar_sync.study_matcher import run_llm_matching
         from tools.radar_sync.study_metrics import compute_metrics
-        db = get_db()
         sbar_sync_result = sync_sbars(db)
         task_sync_result = sync_tasks(db)
         match_result     = run_llm_matching(db)

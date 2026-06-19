@@ -65,22 +65,18 @@ def sync_sbars(db: Any) -> dict:
         logger.exception("study_sbar_syncer: BigQuery query failed")
         return {"sbar_sync": "error", "upserted": 0, "skipped": 0}
 
-    upserted = skipped = 0
+    docs = []
     for row in rows:
         sbar_id = row["sbar_id"]
         if not sbar_id:
-            skipped += 1
             continue
-
         try:
             encounter = int(row["encounter_str"] or 1)
         except (TypeError, ValueError):
             encounter = 1
-
         create_dt = parse_bq_dt(row["create_date_time"])
         window_expires_at = create_dt + timedelta(hours=_WINDOW_HOURS) if create_dt else now + timedelta(hours=_WINDOW_HOURS)
-
-        doc = {
+        docs.append({
             "sbar_id":           sbar_id,
             "CPMRN":             row["cpmrn"] or "",
             "encounter":         encounter,
@@ -95,15 +91,9 @@ def sync_sbars(db: Any) -> dict:
             "action":            row["action"] or "",
             "window_expires_at": window_expires_at,
             "match_status":      "pending",
-        }
+        })
 
-        inserted = bq_store.upsert_sbar(doc)
-        if inserted:
-            upserted += 1
-            logger.debug("study_sbar_syncer: new SBAR %s CPMRN=%s", sbar_id, doc["CPMRN"])
-        else:
-            skipped += 1  # already exists — match_status preserved
-
+    upserted, skipped = bq_store.batch_upsert_sbars(docs)
     logger.info(
         "study_sbar_syncer: %d new SBARs upserted, %d already present",
         upserted, skipped,

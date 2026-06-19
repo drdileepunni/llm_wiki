@@ -66,10 +66,16 @@ def _cost(step: str, input_tok: int, output_tok: int, thinking_tok: int) -> floa
     )
 
 
-def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
+_EXPENSIVE_STEPS = {"problem_tracker"}
+
+
+def compute_run_cost(db: Any, run_started_at: datetime, total_patients_scheduled: int = 0) -> dict:
     """
     Aggregate token usage for all pipeline_traces created at or after
     run_started_at, compute USD cost, persist to pipeline_run_costs.
+
+    total_patients_scheduled: total number of active patients the scheduler
+    attempted to process (for computing skipped count).
 
     Returns the summary dict (same shape as stored doc, minus _id).
     """
@@ -84,14 +90,16 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
     )
 
     by_step: dict[str, dict] = {}
-    patients: set[str] = set()
+    # per_patient maps CPMRN -> {steps: set, cost_usd: float}
+    per_patient: dict[str, dict] = {}
 
     for t in traces:
-        step = t.get("step", "unknown")
-        tok  = t.get("total_tokens") or {}
-        inp  = tok.get("in",      0) or 0
-        out  = tok.get("out",     0) or 0
-        thk  = tok.get("thinking", 0) or 0
+        step  = t.get("step", "unknown")
+        tok   = t.get("total_tokens") or {}
+        inp   = tok.get("in",       0) or 0
+        out   = tok.get("out",      0) or 0
+        thk   = tok.get("thinking", 0) or 0
+        trace_cost = _cost(step, inp, out, thk)
 
         if step not in by_step:
             by_step[step] = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
@@ -102,7 +110,10 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
 
         cpmrn = t.get("CPMRN")
         if cpmrn:
-            patients.add(cpmrn)
+            if cpmrn not in per_patient:
+                per_patient[cpmrn] = {"steps": set(), "cost_usd": 0.0}
+            per_patient[cpmrn]["steps"].add(step)
+            per_patient[cpmrn]["cost_usd"] += trace_cost
 
     # Compute cost per step and totals
     total_in, total_out, total_thk = 0, 0, 0
@@ -120,14 +131,37 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
 
     total_cost = round(sum(agg["cost_usd"] for agg in by_step.values()), 6)
 
+    # Classify patients into cheap (pass1 only) vs expensive (ran problem_tracker)
+    expensive_costs = []
+    cheap_costs     = []
+    for info in per_patient.values():
+        if info["steps"] & _EXPENSIVE_STEPS:
+            expensive_costs.append(info["cost_usd"])
+        else:
+            cheap_costs.append(info["cost_usd"])
+
+    expensive_count = len(expensive_costs)
+    cheap_count     = len(cheap_costs)
+    skipped_count   = max(0, total_patients_scheduled - expensive_count - cheap_count)
+
+    patient_tiers = {
+        "expensive_count":       expensive_count,
+        "cheap_count":           cheap_count,
+        "skipped_count":         skipped_count,
+        "total_scheduled":       total_patients_scheduled,
+        "avg_cost_expensive_usd": round(sum(expensive_costs) / expensive_count, 6) if expensive_count else 0.0,
+        "avg_cost_cheap_usd":    round(sum(cheap_costs)     / cheap_count,     6) if cheap_count     else 0.0,
+    }
+
     now = datetime.now(timezone.utc)
 
     doc = {
-        "run_started_at": run_started_at,
-        "computed_at":    now,
-        "patient_count":  len(patients),
-        "trace_count":    len(traces),
-        "by_step":        by_step,
+        "run_started_at":  run_started_at,
+        "computed_at":     now,
+        "patient_count":   len(per_patient),
+        "trace_count":     len(traces),
+        "patient_tiers":   patient_tiers,
+        "by_step":         by_step,
         "totals": {
             "input_tokens":    total_in,
             "output_tokens":   total_out,
@@ -147,9 +181,11 @@ def compute_run_cost(db: Any, run_started_at: datetime) -> dict:
         from backend.services.bq_store import get_bq_store
         get_bq_store().insert_run_cost(doc)
         logger.info(
-            "cost_tracker: run %s — %d traces, %d patients, total $%.4f USD "
+            "cost_tracker: run %s — %d traces, %d patients "
+            "(expensive=%d cheap=%d skipped=%d), total $%.4f USD "
             "(in=%d out=%d thinking=%d)",
-            run_started_at.isoformat(), len(traces), len(patients), total_cost,
+            run_started_at.isoformat(), len(traces), len(per_patient),
+            expensive_count, cheap_count, skipped_count, total_cost,
             total_in, total_out, total_thk,
         )
     except Exception:

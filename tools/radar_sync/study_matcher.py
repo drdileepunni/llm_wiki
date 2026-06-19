@@ -28,6 +28,7 @@ E. Window closure (Tasks)
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -134,32 +135,23 @@ def run_llm_matching(db: Any) -> dict:
     pending_sbars = bq_store.find_sbars({"match_status": "pending"})
     logger.info("study_matcher: %d pending SBARs to match", len(pending_sbars))
 
-    for sbar in pending_sbars:
-        cpmrn    = sbar.get("CPMRN", "")
-        encounter = sbar.get("encounter", 1)
-        create_dt = sbar.get("create_date_time")
-        if isinstance(create_dt, datetime) and create_dt.tzinfo is None:
-            create_dt = create_dt.replace(tzinfo=timezone.utc)
-        if not create_dt:
-            continue
+    # One BQ round-trip to get all candidate alerts for all pending SBARs at once
+    sbar_by_id = {s["sbar_id"]: s for s in pending_sbars}
+    candidates_by_sbar = bq_store.find_alerts_for_sbars(
+        pending_sbars,
+        window_before_h=_ALERT_WINDOW_BEFORE,
+        window_after_h=_ALERT_WINDOW_AFTER,
+    )
+    logger.info(
+        "study_matcher: candidate lookup done — %d SBARs have at least one candidate alert",
+        len(candidates_by_sbar),
+    )
 
-        window_start = create_dt - timedelta(hours=_ALERT_WINDOW_BEFORE)
-        window_end   = create_dt + timedelta(hours=_ALERT_WINDOW_AFTER)
-
-        candidates = bq_store.find_alerts({
-            "CPMRN":        cpmrn,
-            "encounter":    encounter,
-            "match_status": {"$in": ["pending", "fp_candidate"]},
-            "alerted_at":   {"$gte": window_start, "$lte": window_end},
-        })
-
-        if not candidates:
-            continue
-
-        best_match     = None
-        best_conf      = 0.0
-        best_reasoning = ""
-
+    def _match_one_sbar(sbar_id: str, candidates: list[dict]) -> dict:
+        """Run LLM matching for one SBAR against its candidates. Thread-safe."""
+        sbar = sbar_by_id[sbar_id]
+        best_match, best_conf, best_reasoning = None, 0.0, ""
+        calls, errors = 0, 0
         for alert in candidates:
             try:
                 result = _llm_match(
@@ -167,54 +159,66 @@ def run_llm_matching(db: Any) -> dict:
                     alert_reason=alert.get("alert_reason", ""),
                     sbar_issues=sbar.get("issues", ""),
                 )
-                llm_calls += 1
+                calls += 1
                 logger.debug(
                     "study_matcher: SBAR %s ↔ alert %s — related=%s conf=%.2f",
-                    sbar["sbar_id"], alert["alert_id"], result.related, result.confidence,
+                    sbar_id, alert["alert_id"], result.related, result.confidence,
                 )
                 if result.related and result.confidence > best_conf:
-                    best_conf      = result.confidence
-                    best_match     = alert
-                    best_reasoning = result.reasoning
+                    best_conf, best_match, best_reasoning = result.confidence, alert, result.reasoning
             except Exception:
-                llm_errors += 1
-                logger.exception(
-                    "study_matcher: LLM call failed for SBAR %s alert %s",
-                    sbar.get("sbar_id"), alert.get("alert_id"),
+                errors += 1
+                logger.exception("study_matcher: LLM call failed for SBAR %s alert %s", sbar_id, alert.get("alert_id"))
+        return {"sbar_id": sbar_id, "best_match": best_match, "best_conf": best_conf,
+                "best_reasoning": best_reasoning, "calls": calls, "errors": errors}
+
+    # Parallelize LLM calls across SBARs that have candidates
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = {
+            pool.submit(_match_one_sbar, sbar_id, candidates): sbar_id
+            for sbar_id, candidates in candidates_by_sbar.items()
+        }
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+            except Exception:
+                logger.exception("study_matcher: _match_one_sbar thread crashed")
+                continue
+            llm_calls  += res["calls"]
+            llm_errors += res["errors"]
+            sbar        = sbar_by_id[res["sbar_id"]]
+            best_match  = res["best_match"]
+            best_conf   = res["best_conf"]
+            best_reasoning = res["best_reasoning"]
+            if best_match and best_conf >= _MATCH_THRESHOLD:
+                bq_store.update_sbar(res["sbar_id"], {
+                    "match_status":         "matched",
+                    "matched_alert_id":     best_match["alert_id"],
+                    "llm_match_confidence": best_conf,
+                    "llm_match_reasoning":  best_reasoning,
+                    "matched_at":           now,
+                })
+                bq_store.update_alert(best_match["alert_id"], {
+                    "match_status":         "matched",
+                    "matched_sbar_id":      res["sbar_id"],
+                    "llm_match_confidence": best_conf,
+                    "llm_match_reasoning":  best_reasoning,
+                })
+                matched_count += 1
+                logger.info(
+                    "study_matcher: MATCHED SBAR %s ↔ alert %s (conf=%.2f) — %s",
+                    res["sbar_id"], best_match["alert_id"], best_conf, best_reasoning,
                 )
 
-        if best_match and best_conf >= _MATCH_THRESHOLD:
-            bq_store.update_sbar(sbar["sbar_id"], {
-                "match_status":         "matched",
-                "matched_alert_id":     best_match["alert_id"],
-                "llm_match_confidence": best_conf,
-                "llm_match_reasoning":  best_reasoning,
-                "matched_at":           now,
-            })
-            bq_store.update_alert(best_match["alert_id"], {
-                "match_status":         "matched",
-                "matched_sbar_id":      sbar["sbar_id"],
-                "llm_match_confidence": best_conf,
-                "llm_match_reasoning":  best_reasoning,
-            })
-            matched_count += 1
-            logger.info(
-                "study_matcher: MATCHED SBAR %s ↔ alert %s (conf=%.2f) — %s",
-                sbar["sbar_id"], best_match["alert_id"], best_conf, best_reasoning,
-            )
-
     # ── B. Window closure → confirmed_fn or excluded_downtime ────────────────
-    # An SBAR whose window expired is only a true FN if the system was actively
-    # monitoring the patient during that window. If no snapshot exists for the
-    # patient in [create_date_time - ALERT_WINDOW_BEFORE, window_expires_at],
-    # the scheduler was down — mark excluded_downtime so the metric stays clean.
     expired_sbars = bq_store.find_sbars({
         "match_status":      "pending",
         "window_expires_at": {"$lt": now},
     })
-    downtime_count = 0
-    for sbar in expired_sbars:
-        cpmrn    = sbar.get("CPMRN", "")
+
+    def _close_sbar(sbar: dict) -> str:
+        """Check monitoring and return verdict. Thread-safe (read-only MongoDB query)."""
+        cpmrn     = sbar.get("CPMRN", "")
         encounter = sbar.get("encounter", 1)
         create_dt = sbar.get("create_date_time")
         if isinstance(create_dt, datetime) and create_dt.tzinfo is None:
@@ -222,29 +226,37 @@ def run_llm_matching(db: Any) -> dict:
         win_expires = sbar.get("window_expires_at")
         if isinstance(win_expires, datetime) and win_expires.tzinfo is None:
             win_expires = win_expires.replace(tzinfo=timezone.utc)
-
         monitor_start = (create_dt - timedelta(hours=_ALERT_WINDOW_BEFORE)) if create_dt else None
-        was_monitored = False
         if monitor_start and win_expires and cpmrn:
             was_monitored = db["snapshots"].count_documents({
                 "CPMRN":       cpmrn,
                 "encounter":   encounter,
                 "snapshot_at": {"$gte": monitor_start, "$lte": win_expires},
             }) > 0
-
-        if was_monitored:
-            bq_store.update_sbar(sbar["sbar_id"], {
-                "match_status":   "confirmed_fn",
-                "confirmed_fn_at": now,
-            })
-            fn_count += 1
         else:
-            bq_store.update_sbar(sbar["sbar_id"], {
-                "match_status":     "excluded_downtime",
-                "excluded_at":      now,
-                "exclusion_reason": "no snapshot activity during SBAR window — system was not monitoring",
-            })
-            downtime_count += 1
+            was_monitored = False
+        return "confirmed_fn" if was_monitored else "excluded_downtime"
+
+    downtime_count = 0
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        verdict_futures = {pool.submit(_close_sbar, sbar): sbar for sbar in expired_sbars}
+        for future in as_completed(verdict_futures):
+            sbar = verdict_futures[future]
+            try:
+                verdict = future.result()
+            except Exception:
+                logger.exception("study_matcher: _close_sbar thread crashed for %s", sbar.get("sbar_id"))
+                continue
+            if verdict == "confirmed_fn":
+                bq_store.update_sbar(sbar["sbar_id"], {"match_status": "confirmed_fn", "confirmed_fn_at": now})
+                fn_count += 1
+            else:
+                bq_store.update_sbar(sbar["sbar_id"], {
+                    "match_status":     "excluded_downtime",
+                    "excluded_at":      now,
+                    "exclusion_reason": "no snapshot activity during SBAR window — system was not monitoring",
+                })
+                downtime_count += 1
 
     if fn_count:
         logger.info("study_matcher: %d SBARs confirmed as FN (window expired, patient was monitored)", fn_count)

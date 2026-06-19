@@ -258,6 +258,41 @@ async function loadAgreement() {
   } catch (e) { console.error('loadAgreement', e); }
 }
 
+async function loadRuns() {
+  const tbody = document.querySelector('#tbl-runs tbody');
+  try {
+    const rows = await apiFetch('/api/metrics/runs' + dateParams());
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="text-muted text-center py-3">No runs in range</td></tr>';
+      return;
+    }
+    const hasTiers = rows.some(r => r.expensive_count !== null);
+    tbody.innerHTML = rows.map(r => {
+      const ts = r.run_started_at.slice(0, 16).replace('T', ' ');
+      const scheduled  = hasTiers && r.total_scheduled   != null ? fmt(r.total_scheduled)   : '—';
+      const skipped    = hasTiers && r.skipped_count      != null ? fmt(r.skipped_count)     : '—';
+      const cheap      = hasTiers && r.cheap_count        != null ? fmt(r.cheap_count)       : '—';
+      const expensive  = hasTiers && r.expensive_count    != null ? fmt(r.expensive_count)   : '—';
+      const avgCheap   = hasTiers && r.avg_cost_cheap_usd    != null ? usd(r.avg_cost_cheap_usd)    : '—';
+      const avgExp     = hasTiers && r.avg_cost_expensive_usd != null ? usd(r.avg_cost_expensive_usd) : '—';
+      return `<tr>
+        <td class="text-muted">${ts}</td>
+        <td class="text-end">${scheduled}</td>
+        <td class="text-end">${skipped}</td>
+        <td class="text-end">${cheap}</td>
+        <td class="text-end">${expensive}</td>
+        <td class="text-end">${fmt(r.alerts_sent)}</td>
+        <td class="text-end fw-semibold">${usdShort(r.cost_usd)}</td>
+        <td class="text-end text-muted">${avgCheap}</td>
+        <td class="text-end text-muted">${avgExp}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-danger text-center py-3">Error loading runs</td></tr>';
+    console.error('loadRuns', e);
+  }
+}
+
 async function loadComments() {
   try {
     const d = await apiFetch('/api/feedback/comments' + dateParams());
@@ -286,7 +321,7 @@ async function loadAll() {
   if (el) el.textContent = 'Loading…';
   await Promise.all([
     loadSummary(), loadTimeseries(), loadAlertsPerRun(),
-    loadCost(), loadRaters(), loadAgreement(), loadComments(),
+    loadCost(), loadRaters(), loadAgreement(), loadComments(), loadRuns(),
   ]);
   if (el) el.textContent = 'Updated ' + ts;
 }
@@ -491,10 +526,36 @@ async function loadLabStaleness() {
   }
 }
 
+async function saveStudyPipeline(enabled) {
+  const card = document.getElementById('study-pipeline-card');
+  const toggle = document.getElementById('study-pipeline-toggle');
+  toggle.disabled = true;
+  try {
+    await fetch('/api/config/study-pipeline', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled}),
+    });
+    card.className = `card mb-3 border-2 border-${enabled ? 'success' : 'secondary'}`;
+  } catch (e) {
+    console.error('saveStudyPipeline', e);
+    toggle.checked = !enabled; // revert on failure
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
 async function loadOpsSettings() {
   const el = document.getElementById('ops-content');
   try {
     const d = await apiFetch('/api/config/operational');
+    // Populate study pipeline toggle
+    const toggle = document.getElementById('study-pipeline-toggle');
+    const card   = document.getElementById('study-pipeline-card');
+    if (toggle) {
+      toggle.checked = !!d.study_pipeline_enabled;
+      card.className = `card mb-3 border-2 border-${d.study_pipeline_enabled ? 'success' : 'secondary'}`;
+    }
     let html = '';
 
     function editBtn(settingId, doc) {

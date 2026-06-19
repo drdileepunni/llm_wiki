@@ -13,7 +13,7 @@ from .config_writer import save_app_setting, save_monitoring_protocol
 from .metrics import (
     get_summary, get_timeseries, get_by_problem,
     get_by_rater, get_cost, get_comments, get_ratings_per_alert,
-    get_alerts_per_run,
+    get_alerts_per_run, get_runs,
 )
 from .agreement import compute_agreement
 from .config_reader import (
@@ -109,6 +109,14 @@ def create_app() -> Flask:
             return _ok(get_alerts_per_run(*_date_params()))
         except Exception as e:
             log.exception("api_alerts_per_run failed")
+            return _err(e)
+
+    @app.route("/api/metrics/runs")
+    def api_runs():
+        try:
+            return _ok(get_runs(*_date_params()))
+        except Exception as e:
+            log.exception("api_runs failed")
             return _err(e)
 
     @app.route("/api/metrics/agreement")
@@ -228,6 +236,19 @@ def create_app() -> Flask:
             return _err(str(e), 400)
         except Exception as e:
             log.exception("api_save_lab_staleness_overrides failed")
+            return _err(e)
+
+    @app.route("/api/config/study-pipeline", methods=["PUT"])
+    def api_save_study_pipeline():
+        try:
+            doc = _parse_body()
+            enabled = bool(doc.get("enabled", False))
+            save_app_setting("study_pipeline_enabled", {"enabled": enabled})
+            return _ok({"saved": "study_pipeline_enabled", "enabled": enabled})
+        except ValueError as e:
+            return _err(str(e), 400)
+        except Exception as e:
+            log.exception("api_save_study_pipeline failed")
             return _err(e)
 
     @app.route("/api/config/operational/<setting_id>", methods=["PUT"])

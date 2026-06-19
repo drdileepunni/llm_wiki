@@ -20,7 +20,8 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["run_dashboard.py"],
       "cwd": "/Users/drdileepunni/github_/llm_wiki",
-      "port": 8050
+      "port": 8050,
+      "autoPort": false
     }
   ]
 }
