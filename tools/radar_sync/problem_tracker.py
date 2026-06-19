@@ -39,20 +39,47 @@ _VITAL_CARD_WARNING_HOURS   = 2   # vitals older than this → soft warning in p
 _LAB_STALENESS_HOURS        = 24  # labs older than this are considered stale for alert purposes
 _CITED_NOTE_STALENESS_HOURS = 48  # if ALL cited notes are older than this, suppress — chronic audit issue not urgent alert
 
-_NEXT_CHECK_HOURS = {"vital": 1, "io": 1}   # lab handled per-key below
-# Labs that turn around clinically fast — recheck sooner
-_FAST_LAB_KEYS = {
-    "hb", "hemoglobin", "haemoglobin",
+# ── next_check interval config ────────────────────────────────────────────────
+# Base intervals (hours) before backoff is applied.
+# "lab_fast"    → labs that turn around quickly and need tight follow-up
+# "lab_default" → all other labs
+_BASE_INTERVAL_H: dict[str, int] = {"vital": 1, "io": 1, "lab_fast": 6, "lab_default": 24}
+
+_FAST_LAB_KEYS: frozenset[str] = frozenset({
+    "hb", "hemoglobin", "haemoglobin",          # kept at 6h (transfusion buffer parity)
     "sodium", "na",
     "potassium", "k",
     "lactate", "lactic",
-}
-_LAB_NEXT_CHECK_H_FAST    = 6
-_LAB_NEXT_CHECK_H_DEFAULT = 12
+    "abg", "vbg", "blood gas",                   # ABG/VBG family
+    "ph", "pco2", "paco2",
+    "hco3", "bicarb", "base excess", "be",
+})
+
+# Exponential backoff: interval doubles each unacknowledged re-alert,
+# stopping at whichever limit is hit first.
+_BACKOFF_MAX_ATTEMPTS = 4   # growth stops after this many attempts
+_BACKOFF_CAP_H        = 24  # hard ceiling regardless of attempts
 
 
-def _lab_next_check_hours(lab_key: str) -> int:
-    return _LAB_NEXT_CHECK_H_FAST if lab_key.lower() in _FAST_LAB_KEYS else _LAB_NEXT_CHECK_H_DEFAULT
+def _base_interval_h(nc_type: str, nc_key: str) -> int:
+    if nc_type == "lab":
+        k = (nc_key or "").lower()
+        return _BASE_INTERVAL_H["lab_fast"] if any(f in k for f in _FAST_LAB_KEYS) else _BASE_INTERVAL_H["lab_default"]
+    return _BASE_INTERVAL_H.get(nc_type, 1)
+
+
+def _backoff_interval_h(nc_type: str, nc_key: str, attempts: int) -> int:
+    """
+    Compute the decayed next_check / re-alert interval.
+    Doubles each attempt; stops growing once attempts >= _BACKOFF_MAX_ATTEMPTS
+    or the 24h cap is reached (whichever comes first).
+
+    Examples (vital, base=1h): 0→1h, 1→2h, 2→4h, 3→8h, 4→16h (stops)
+    Examples (fast-lab, base=6h): 0→6h, 1→12h, 2→24h (cap, stops)
+    """
+    base = _base_interval_h(nc_type, nc_key)
+    clamped = min(attempts, _BACKOFF_MAX_ATTEMPTS)
+    return min(base * (2 ** clamped), _BACKOFF_CAP_H)
 
 # ── Treatment response buffers ────────────────────────────────────────────────
 # If a plan note is written within this window AFTER the triggering data,
@@ -1008,10 +1035,16 @@ def _vital_improved_since_snapshot(
 
 
 def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: Any) -> bool:
-    """Return True if we alerted recently and should hold off."""
+    """
+    Return True if we alerted recently and should hold off.
+
+    Uses `current_interval_h` from the stored problem doc as the cooldown window
+    so the backoff-decayed interval governs both forced-recheck cadence and
+    re-alert suppression. Falls back to _ALERT_COOLDOWN_H for legacy docs.
+    """
     doc = db["patient_problems"].find_one(
         {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
-        {"last_alerted_at": 1},
+        {"last_alerted_at": 1, "current_interval_h": 1},
     )
     if not doc:
         return False
@@ -1027,7 +1060,8 @@ def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: An
         return False
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last) < timedelta(hours=_ALERT_COOLDOWN_H)
+    cooldown_h = doc.get("current_interval_h") or _ALERT_COOLDOWN_H
+    return (datetime.now(timezone.utc) - last) < timedelta(hours=cooldown_h)
 
 
 # ── Upsert problem state ───────────────────────────────────────────────────────
@@ -1089,25 +1123,41 @@ def _upsert_problem(
         #                   so the window doesn't roll forward every hour
         fulfilled = nc_raw.get("fulfilled", True)
 
-        def _check_hours() -> int:
-            if nc_type == "lab":
-                return _lab_next_check_hours(nc_key)
-            return _NEXT_CHECK_HOURS.get(nc_type, 1)
+        # Load prior state once for both due_after and backoff computation.
+        prev_doc = db["patient_problems"].find_one(
+            {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
+            {"next_check": 1, "alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1},
+        ) or {}
+
+        # ── Backoff computation ───────────────────────────────────────────────
+        prev_attempts     = int(prev_doc.get("alert_attempts") or 0)
+        normalized        = clinical_status in ("stable", "improving", "resolved")
+        new_plan          = bool(assessment.get("being_addressed")) and not bool(prev_doc.get("being_addressed"))
+        still_bad         = clinical_status in ("worsening", "critical") and not assessment.get("being_addressed")
+
+        if normalized or new_plan:
+            alert_attempts    = 0
+            first_alerted_at  = None
+        elif alerted and still_bad:
+            alert_attempts    = prev_attempts + 1
+            prev_first        = prev_doc.get("first_alerted_at")
+            first_alerted_at  = prev_first if prev_first else now
+        else:
+            alert_attempts    = prev_attempts
+            first_alerted_at  = prev_doc.get("first_alerted_at")
+
+        interval_h = _backoff_interval_h(nc_type, nc_key, alert_attempts)
 
         if fulfilled:
-            due_after = now + timedelta(hours=_check_hours())
+            due_after = now + timedelta(hours=interval_h)
         else:
-            stored = db["patient_problems"].find_one(
-                {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
-                {"next_check": 1},
-            )
-            stored_due = ((stored or {}).get("next_check") or {}).get("due_after")
+            stored_due = (prev_doc.get("next_check") or {}).get("due_after")
             if isinstance(stored_due, datetime):
                 if stored_due.tzinfo is None:
                     stored_due = stored_due.replace(tzinfo=timezone.utc)
                 due_after = stored_due
             else:
-                due_after = now + timedelta(hours=_check_hours())
+                due_after = now + timedelta(hours=interval_h)
 
         next_check: dict | None = {
             "key":       nc_key,    # machine-readable fetch argument
@@ -1116,8 +1166,30 @@ def _upsert_problem(
             "due_after": due_after,
         }
     else:
-        # No next_check — stable/improving/resolved; clear any stored window
+        # No next_check — stable/improving/resolved; clear any stored window.
+        # Still compute backoff variables so set_fields below can reference them.
         next_check = None
+        prev_doc = db["patient_problems"].find_one(
+            {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
+            {"alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1},
+        ) or {}
+        prev_attempts    = int(prev_doc.get("alert_attempts") or 0)
+        normalized       = clinical_status in ("stable", "improving", "resolved")
+        new_plan         = bool(assessment.get("being_addressed")) and not bool(prev_doc.get("being_addressed"))
+        still_bad        = clinical_status in ("worsening", "critical") and not assessment.get("being_addressed")
+        if normalized or new_plan:
+            alert_attempts   = 0
+            first_alerted_at = None
+        elif alerted and still_bad:
+            alert_attempts   = prev_attempts + 1
+            prev_first       = prev_doc.get("first_alerted_at")
+            first_alerted_at = prev_first if prev_first else now
+        else:
+            alert_attempts   = prev_attempts
+            first_alerted_at = prev_doc.get("first_alerted_at")
+        # Use a neutral interval for problems without a next_check (alert cooldown only)
+        nc_type_fb, nc_key_fb = "vital", ""
+        interval_h = _backoff_interval_h(nc_type_fb, nc_key_fb, alert_attempts)
 
     audit_entry = {
         "assessed_at":        now,
@@ -1157,7 +1229,15 @@ def _upsert_problem(
         "addressed_evidence": assessment.get("addressed_evidence", ""),
         "next_check":         next_check,  # None clears the field
         "last_assessed_at":   now,
+        # Backoff state — drives both next_check cadence and re-alert cooldown
+        "alert_attempts":     alert_attempts,
+        "current_interval_h": interval_h,
     }
+    if first_alerted_at is not None:
+        set_fields["first_alerted_at"] = first_alerted_at
+    elif normalized or new_plan:
+        # Explicitly clear the streak timestamp on normalization/new-plan
+        set_fields["first_alerted_at"] = None
     if stored_fingerprint:
         set_fields["reasoning_fingerprint"] = stored_fingerprint
 
@@ -1403,6 +1483,7 @@ def _build_prefetch_block(
     db: Any,
     session_chunks: list,
     snapshot_at: datetime | None = None,
+    staleness_overrides: dict[str, int] | None = None,
 ) -> str:
     """
     Pre-fetch all data the model is likely to need and return it as a formatted
@@ -1576,6 +1657,7 @@ def _build_prefetch_block(
             from tools.radar_sync.status_classifier import _get_latest_lab_ts
             snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
             stale_lab_warnings: list[str] = []
+            _stale_ovr = staleness_overrides or {}
             for pname in ([p.get("name", "") for p in problems]):
                 pname_lc = pname.lower()
                 lab_key = next((lab for kw, lab in _NEW_PROBLEM_LAB.items() if kw in pname_lc), None)
@@ -1584,16 +1666,17 @@ def _build_prefetch_block(
                 latest_lt = _get_latest_lab_ts(cpmrn, encounter, lab_key)
                 if latest_lt is not None:
                     lab_age_h = (snap - latest_lt).total_seconds() / 3600
-                    if lab_age_h > _LAB_STALENESS_HOURS:
+                    staleness_limit = _stale_ovr.get(lab_key.lower(), _LAB_STALENESS_HOURS)
+                    if lab_age_h > staleness_limit:
                         stale_lab_warnings.append(
                             f"  {pname} → most recent {lab_key} is "
                             f"{latest_lt.strftime('%Y-%m-%d %H:%M UTC')} "
-                            f"({lab_age_h:.0f}h ago) — DO NOT ALERT"
+                            f"({lab_age_h:.0f}h ago, limit {staleness_limit}h) — DO NOT ALERT"
                         )
             if stale_lab_warnings:
                 lines.append(
-                    f"⚠ LAB STALENESS WARNING: The following labs are >{_LAB_STALENESS_HOURS}h "
-                    f"old and must NOT be used as the basis for any new alert:"
+                    "⚠ LAB STALENESS WARNING: The following labs are too old to alert on "
+                    "(per-lab staleness limits apply):"
                 )
                 lines.extend(stale_lab_warnings)
                 lines.append("")
@@ -2017,6 +2100,59 @@ def evaluate_screener_flag(
     return None
 
 
+def overdue_next_checks(
+    cpmrn: str,
+    encounter: int,
+    db: Any,
+    now: datetime | None = None,
+) -> list[dict]:
+    """
+    Return all patient_problems for this patient that have an overdue next_check.
+
+    A next_check is overdue when now > due_after (the stored window has elapsed).
+    Used by the scheduler to decide whether to force an expensive run even when
+    pass-1 would otherwise skip it.
+
+    Returns a list of dicts: [{problem_name, type, key, label, due_after, doc}]
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    docs = list(db["patient_problems"].find(
+        {"CPMRN": cpmrn, "encounter": encounter, "next_check": {"$ne": None}},
+        {"problem_name": 1, "next_check": 1, "clinical_status": 1},
+    ))
+
+    overdue = []
+    for doc in docs:
+        nc = doc.get("next_check") or {}
+        due = nc.get("due_after")
+        if due is None:
+            continue
+        if isinstance(due, str):
+            try:
+                due = datetime.fromisoformat(due.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if not isinstance(due, datetime):
+            continue
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        if now > due:
+            overdue.append({
+                "problem_name": doc.get("problem_name", ""),
+                "type":         nc.get("type", ""),
+                "key":          nc.get("key", ""),
+                "label":        nc.get("label", ""),
+                "due_after":    due,
+                "doc":          doc,
+            })
+
+    return overdue
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def track_problems(
@@ -2025,6 +2161,7 @@ def track_problems(
     structured_summary: dict,
     snapshot_at: datetime,
     screener_flag: str = "",
+    focus: list[dict] | None = None,
 ) -> dict:
     """
     Run the problem tracker ReAct loop for one patient.
@@ -2057,8 +2194,26 @@ def track_problems(
 
     problems: list[dict] = structured_summary.get("problems", [])
     if not problems:
-        logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
-        return {"problem_tracker": "no_problems"}
+        if focus:
+            # Forced follow-up: synthesize stub problems from stored docs so the
+            # recheck runs even when the rolling summary has no active problems.
+            problems = []
+            for f in focus:
+                stored_doc = f.get("doc") or {}
+                problems.append({
+                    "name":             f["problem_name"],
+                    "status":           stored_doc.get("clinical_status", "worsening"),
+                    "current_state":    f"Forced follow-up: {f['type']} — {f['label'] or f['key']}",
+                    "management":       stored_doc.get("addressed_evidence", "not specified"),
+                    "_from_forced_recheck": True,
+                })
+            logger.info(
+                "problem_tracker: no problems in summary for %s enc=%d — using %d forced-recheck stub(s)",
+                cpmrn, encounter, len(problems),
+            )
+        else:
+            logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
+            return {"problem_tracker": "no_problems"}
 
     # Gate: skip entirely if no clinical data has been recorded yet.
     # Newly admitted patients may have no vitals/labs; alerting on data absence is not actionable.
@@ -2078,10 +2233,19 @@ def track_problems(
     # Populated by prefetch FIRST so pre-fetched note indices are available for citation.
     session_chunks: list = []
 
+    # ── Lab staleness overrides — loaded once, used in prefetch + alert gate ──
+    _staleness_overrides: dict[str, int] = {}
+    try:
+        from tools.radar_sync.lab_staleness_overrides import load_overrides as _load_staleness_overrides
+        _staleness_overrides = _load_staleness_overrides(db)
+    except Exception:
+        logger.exception("problem_tracker: lab_staleness_overrides load failed for %s enc=%d — using defaults", cpmrn, encounter)
+
     # ── Fix 4: Pre-fetch all data and inject into first message ──────────────
     try:
         prefetch_block = _build_prefetch_block(
             cpmrn, encounter, problems, db, session_chunks, snapshot_at=snapshot_at,
+            staleness_overrides=_staleness_overrides,
         )
     except Exception:
         logger.exception("problem_tracker: prefetch failed for %s enc=%d — continuing without", cpmrn, encounter)
@@ -2107,6 +2271,7 @@ def track_problems(
                 try:
                     prefetch_block = _build_prefetch_block(
                         cpmrn, encounter, problems, db, session_chunks, snapshot_at=snapshot_at,
+                        staleness_overrides=_staleness_overrides,
                     )
                 except Exception:
                     logger.exception("problem_tracker: prefetch rebuild failed for %s enc=%d", cpmrn, encounter)
@@ -2257,9 +2422,29 @@ def track_problems(
         + ("\n\n" + _symptom_alert_block if _symptom_alert_block else "")
     )
 
+    # Build forced follow-up context block if scheduler forced this run
+    forced_block = ""
+    if focus:
+        lines = [
+            "== FORCED FOLLOW-UP ==",
+            "The scheduler has forced this run because the following planned rechecks are now overdue.",
+            "For each item below, retrieve the latest value and assess whether it has normalised,",
+            "is improving, or remains abnormal. Update the problem status and next_check accordingly.",
+            "",
+        ]
+        for f in focus:
+            label = f.get("label") or f.get("key") or f.get("type", "parameter")
+            lines.append(f"  • {f['problem_name']} — overdue {f['type']} recheck: {label}")
+        forced_block = "\n".join(lines)
+        logger.info(
+            "problem_tracker: forced follow-up block injected for %s enc=%d — %d overdue item(s)",
+            cpmrn, encounter, len(focus),
+        )
+
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        + (f"{forced_block}\n\n" if forced_block else "")
         + (f"CLINICAL CONTEXT RULES FOR THIS PATIENT:\n{context_overrides}\n\n"
            if context_overrides else "")
         + (f"{coexisting_block}\n\n" if coexisting_block else "")
@@ -2532,24 +2717,26 @@ def track_problems(
                     problem_name, cpmrn, encounter, _VITAL_STALENESS_HOURS,
                 )
             elif assessment.get("next_check", {}).get("type") == "lab":
-                # Hard gate: if the lab driving this alert is >24h old, suppress.
+                # Hard gate: if the lab driving this alert is too old, suppress.
+                # Threshold is per-lab from _staleness_overrides (GCS-backed), falling back to _LAB_STALENESS_HOURS.
                 nc_lab = (assessment.get("next_check") or {}).get("lab_name") or (assessment.get("next_check") or {}).get("key", "")
                 _lab_is_stale = False
+                _lab_staleness_limit = _staleness_overrides.get(nc_lab.lower(), _LAB_STALENESS_HOURS) if nc_lab else _LAB_STALENESS_HOURS
                 if nc_lab and snapshot_at is not None:
                     try:
                         from tools.radar_sync.status_classifier import _get_latest_lab_ts
                         _latest_lt = _get_latest_lab_ts(cpmrn, encounter, nc_lab)
                         if _latest_lt is not None:
                             _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
-                            _lab_is_stale = (_snap - _latest_lt).total_seconds() / 3600 > _LAB_STALENESS_HOURS
+                            _lab_is_stale = (_snap - _latest_lt).total_seconds() / 3600 > _lab_staleness_limit
                     except Exception:
                         logger.exception("problem_tracker: lab staleness check failed for '%s' %s enc=%d", problem_name, cpmrn, encounter)
                 if _lab_is_stale:
                     alerts_suppressed.append(problem_name)
                     logger.info(
                         "problem_tracker: alert suppressed for '%s' %s enc=%d "
-                        "(stale lab '%s' — >%dh old)",
-                        problem_name, cpmrn, encounter, nc_lab, _LAB_STALENESS_HOURS,
+                        "(stale lab '%s' — >%dh old, limit %dh)",
+                        problem_name, cpmrn, encounter, nc_lab, _lab_staleness_limit, _lab_staleness_limit,
                     )
                 else:
                     # ── Pre-send lab value cross-check ────────────────────────

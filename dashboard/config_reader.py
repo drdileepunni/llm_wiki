@@ -116,6 +116,35 @@ def _seed_symptom_rules() -> dict[str, Any]:
         return {"_id": "symptom_alert_rules", "enabled": False, "rules": []}
 
 
+# ── lab staleness overrides ────────────────────────────────────────────────────
+
+def get_lab_staleness_overrides() -> dict[str, Any]:
+    """
+    Return the lab staleness overrides doc. Falls back to seed-script defaults if not in GCS.
+    """
+    try:
+        db = _get_db()
+        doc = db["app_settings"].find_one({"_id": "lab_staleness_overrides"})
+        if doc:
+            return doc
+    except Exception:
+        log.exception("config_reader: could not read lab_staleness_overrides")
+
+    log.info("config_reader: lab_staleness_overrides not in GCS — loading from seed script")
+    try:
+        import sys
+        from pathlib import Path
+        _root = Path(__file__).resolve().parents[1]
+        for p in [str(_root / "app"), str(_root)]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        from tools.radar_sync.seed_lab_staleness_overrides import INITIAL_OVERRIDES
+        return {"_id": "lab_staleness_overrides", "enabled": True, "overrides": INITIAL_OVERRIDES, "_source": "seed_script"}
+    except Exception:
+        log.exception("config_reader: could not import INITIAL_OVERRIDES from staleness seed script")
+    return {"_id": "lab_staleness_overrides", "enabled": True, "overrides": {}}
+
+
 # ── operational settings ───────────────────────────────────────────────────────
 
 def get_operational_settings() -> dict[str, Any]:

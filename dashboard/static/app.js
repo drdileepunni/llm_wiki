@@ -293,7 +293,7 @@ async function loadAll() {
 
 // ── CONFIG PAGE ───────────────────────────────────────────────────────────────
 function showTab(name, linkEl) {
-  ['protocols','lab','symptom','ops'].forEach(t => {
+  ['protocols','lab','symptom','staleness','ops'].forEach(t => {
     document.getElementById('tab-' + t)?.classList.toggle('d-none', t !== name);
   });
   document.querySelectorAll('#config-tabs .nav-link').forEach(l => l.classList.remove('active'));
@@ -303,7 +303,7 @@ function showTab(name, linkEl) {
 async function loadConfig() {
   if (window.PAGE !== 'config') return;
   await Promise.all([
-    loadProtocols(), loadLabRules(), loadSymptomRules(), loadOpsSettings()
+    loadProtocols(), loadLabRules(), loadSymptomRules(), loadLabStaleness(), loadOpsSettings()
   ]);
 }
 
@@ -452,6 +452,45 @@ async function loadSymptomRules() {
   }
 }
 
+async function loadLabStaleness() {
+  const el = document.getElementById('staleness-content');
+  try {
+    const d = await apiFetch('/api/config/lab-staleness-overrides');
+    const overrides = d.overrides || {};
+    const enabled = d.enabled !== false;
+    const fromSeed = d._source === 'seed_script';
+    const entries = Object.entries(overrides);
+    el.innerHTML = `
+      <div class="mb-2 small">
+        <span class="enabled-dot enabled-dot--${enabled?'on':'off'}"></span>
+        <strong>${enabled ? 'Enabled' : 'Disabled'}</strong> — ${entries.length} override(s)
+        ${fromSeed ? '<span class="badge bg-warning text-dark source-badge ms-2">seed script defaults</span>' : ''}
+      </div>
+      ${entries.length ? `
+      <div class="table-responsive">
+        <table class="table table-sm table-hover" style="max-width:480px">
+          <thead><tr>
+            <th>Lab</th><th>Max age</th><th class="text-muted">Global default</th>
+          </tr></thead>
+          <tbody>
+            ${entries.map(([lab, hours]) => `
+              <tr>
+                <td><strong>${escHtml(lab)}</strong></td>
+                <td><code>${hours}h</code></td>
+                <td class="text-muted">24h</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '<div class="text-muted small">No overrides defined — global default of 24h applies to all labs.</div>'}
+      <span class="raw-json-toggle" onclick="toggleRaw(this)">
+        <i class="bi bi-code me-1"></i>Show raw JSON
+      </span>
+      <div class="raw-json-block d-none mt-1">${escHtml(JSON.stringify(d, null, 2))}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(e))}</div>`;
+  }
+}
+
 async function loadOpsSettings() {
   const el = document.getElementById('ops-content');
   try {
@@ -590,6 +629,15 @@ async function openEditSymptomRules() {
       'Saves to gs://patientview-cds-pipeline-ops/app_settings/symptom_alert_rules.json',
       loadSymptomRules);
   } catch (e) { alert('Could not load current rules: ' + e.message); }
+}
+
+async function openEditLabStaleness() {
+  try {
+    const d = await apiFetch('/api/config/lab-staleness-overrides');
+    _openEditModal('Edit Lab Staleness Overrides', d, '/api/config/lab-staleness-overrides',
+      'Saves to gs://patientview-cds-pipeline-ops/app_settings/lab_staleness_overrides.json',
+      loadLabStaleness);
+  } catch (e) { alert('Could not load current overrides: ' + e.message); }
 }
 
 function openEditProtocol(protocolJson) {

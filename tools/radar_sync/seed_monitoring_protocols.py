@@ -456,6 +456,56 @@ PROTOCOLS = [
             "'Most recent lactate is > 12h old — cannot assess current perfusion status.'"
         ),
     },
+    {
+        "protocol_id": "acknowledged-myocardial-injury",
+        "applies_when": [
+            "troponin",
+            "myocardial injury",
+            "nstemi",
+            "acs",
+            "acute coronary",
+            "elevated troponin",
+            "troponin elevation",
+            "myocardial infarction",
+            "cardiac enzyme",
+        ],
+        "gate_question": (
+            "Has the care team acknowledged this patient's troponin elevation or myocardial injury? "
+            "Call get_patient_notes() and check for any note from a care provider that references "
+            "troponin, myocardial injury, ACS, NSTEMI, or cardiac enzymes within 24 hours of the "
+            "most recent troponin result. "
+            "A note that acknowledges the finding — even without a formal management plan — is "
+            "sufficient to suppress the alert. Evaluate the scenario below."
+        ),
+        "scenarios": [
+            {
+                "name": "care_team_acknowledgment_within_24h",
+                "description": (
+                    "Troponin elevation is known to and acknowledged by the care team. "
+                    "A clinician note referencing the troponin result within 24 hours of the lab draw "
+                    "confirms awareness — no specific management plan is required for suppression."
+                ),
+                "band_description": (
+                    "Suppress alert if: a care provider note exists within 24 hours of the most recent "
+                    "troponin result that references troponin, myocardial injury, ACS, NSTEMI, or cardiac "
+                    "enzymes. Acknowledgment alone is sufficient — a formal plan is not required."
+                ),
+                "window": "24 hours from the most recent troponin result",
+                "invalidate_if": [
+                    "no care provider note referencing troponin or myocardial injury exists within "
+                    "24 hours of the result",
+                    "troponin is rising serially (delta-positive trend) AND the most recent note does not "
+                    "acknowledge the rising trend specifically — a note written before the upward trend "
+                    "was detected does not count as acknowledgment of the new trend",
+                ],
+            },
+        ],
+        "escalation_target_after_window": (
+            "Alert with: 'Troponin elevation — no care team acknowledgment documented in the last 24 hours.' "
+            "If troponin is rising, note the trend explicitly. "
+            "Once the 24-hour window has passed without an acknowledging note, alert regardless of absolute value."
+        ),
+    },
 ]
 
 

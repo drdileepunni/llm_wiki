@@ -151,6 +151,42 @@ def compute_news2(vitals_row: dict) -> tuple[int, dict]:
     return total, components
 
 
+def _coerce_float(val) -> float | None:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_vital_row_normal(vrow: dict) -> bool:
+    """
+    Return True if a single vitals row is clinically unremarkable — i.e. nothing
+    needs LLM attention this cycle.
+
+    Uses NEWS2 scoring with the supplemental-O2 component stripped: a stable
+    ventilated patient with otherwise-normal vitals should be skippable.
+    Also blocks on Netra camera abnormal_list flags and any GCS < 15 (NEWS2
+    doesn't capture altered consciousness from the vitals row alone).
+    """
+    _, components = compute_news2(vrow)
+    total_no_o2 = sum(v for k, v in components.items() if k != "O2")
+    if total_no_o2 != 0:
+        return False
+    if vrow.get("abnormal_list"):
+        return False
+    gcs = _coerce_float(vrow.get("daysGCS"))
+    if gcs is not None and gcs < 15:
+        return False
+    return True
+
+
+def all_new_vitals_normal(new_vitals: list[dict]) -> bool:
+    """Return True if every new vital row is within normal bounds (no LLM needed)."""
+    if not new_vitals:
+        return True
+    return all(is_vital_row_normal(v) for v in new_vitals)
+
+
 def _get_latest_vitals_row(cpmrn: str, encounter: int, db: Any) -> dict | None:
     """Return the most recent vitals row from the latest snapshot."""
     snap = db.snapshots.find_one(

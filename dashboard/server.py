@@ -19,6 +19,7 @@ from .agreement import compute_agreement
 from .config_reader import (
     get_monitoring_protocols, get_lab_alert_rules,
     get_symptom_alert_rules, get_operational_settings,
+    get_lab_staleness_overrides,
 )
 
 log = logging.getLogger(__name__)
@@ -155,6 +156,14 @@ def create_app() -> Flask:
             log.exception("api_symptom_rules failed")
             return _err(e)
 
+    @app.route("/api/config/lab-staleness-overrides")
+    def api_lab_staleness_overrides():
+        try:
+            return _ok(get_lab_staleness_overrides())
+        except Exception as e:
+            log.exception("api_lab_staleness_overrides failed")
+            return _err(e)
+
     @app.route("/api/config/operational")
     def api_operational():
         try:
@@ -199,6 +208,26 @@ def create_app() -> Flask:
             return _err(str(e), 400)
         except Exception as e:
             log.exception("api_save_symptom_rules failed")
+            return _err(e)
+
+    @app.route("/api/config/lab-staleness-overrides", methods=["PUT"])
+    def api_save_lab_staleness_overrides():
+        try:
+            doc = _parse_body()
+            if "overrides" not in doc:
+                return _err("Missing 'overrides' key", 400)
+            if not isinstance(doc["overrides"], dict):
+                return _err("'overrides' must be a JSON object mapping lab name to hours", 400)
+            # Validate values are positive integers
+            for lab, hours in doc["overrides"].items():
+                if not isinstance(hours, (int, float)) or hours <= 0:
+                    return _err(f"Invalid value for '{lab}': must be a positive number of hours", 400)
+            save_app_setting("lab_staleness_overrides", doc)
+            return _ok({"saved": "lab_staleness_overrides"})
+        except ValueError as e:
+            return _err(str(e), 400)
+        except Exception as e:
+            log.exception("api_save_lab_staleness_overrides failed")
             return _err(e)
 
     @app.route("/api/config/operational/<setting_id>", methods=["PUT"])

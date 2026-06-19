@@ -191,10 +191,26 @@ def _run_live_pipeline(
     except Exception:
         logger.exception("pipeline: report selection failed for %s enc=%d", cpmrn, encounter)
 
+    # ── Prelude: check for overdue per-problem follow-ups ────────────────────
+    # Must happen before any gate so the force flag is available to all of them.
+    try:
+        from tools.radar_sync.problem_tracker import overdue_next_checks
+        _overdue = overdue_next_checks(cpmrn, encounter, db, now)
+    except Exception:
+        logger.exception("pipeline: overdue_next_checks failed for %s enc=%d — treating as empty", cpmrn, encounter)
+        _overdue = []
+    force_expensive = bool(_overdue)
+    if force_expensive:
+        logger.info(
+            "pipeline: %d overdue next_check(s) for %s enc=%d — will force expensive run",
+            len(_overdue), cpmrn, encounter,
+        )
+    status["force_expensive"] = force_expensive
+
     # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
     next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
     if next_run_at is not None and now < next_run_at:
-        if not _has_new_reports:
+        if not _has_new_reports and not force_expensive:
             logger.info(
                 "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
                 cpmrn, encounter, next_run_at.strftime("%H:%M UTC"),
@@ -205,10 +221,16 @@ def _run_live_pipeline(
             new_structured = ctx.get("structured_summary") or {}
             _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
             return status
-        logger.info(
-            "pipeline: cadence gate bypassed for %s enc=%d — %d new report(s)",
-            cpmrn, encounter, len(_new_reports),
-        )
+        if _has_new_reports:
+            logger.info(
+                "pipeline: cadence gate bypassed for %s enc=%d — %d new report(s)",
+                cpmrn, encounter, len(_new_reports),
+            )
+        elif force_expensive:
+            logger.info(
+                "pipeline: cadence gate bypassed for %s enc=%d — forced by overdue next_check",
+                cpmrn, encounter,
+            )
 
     # ── Gate 2: Delta gate — skip LLM if nothing new since last analysis ─────
     last_llm_run_at = _coerce_dt(last_llm_run_at_raw)
@@ -217,20 +239,92 @@ def _run_live_pipeline(
             delta.get("new_vitals"), delta.get("new_labs"), delta.get("new_notes"),
         ])
         if not has_new_data and not _has_new_reports:
+            if force_expensive:
+                logger.info(
+                    "pipeline: delta gate bypassed for %s enc=%d — forced by overdue next_check (no new data)",
+                    cpmrn, encounter,
+                )
+                # Fall through to forced Pass-2 below — skip the normal LLM chain
+                # by jumping directly past summary/pass-1
+                status["delta_gate"] = "bypassed_forced"
+            else:
+                logger.info(
+                    "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
+                    cpmrn, encounter,
+                )
+                status["delta_gate"] = "skipped"
+                status["_report_analysis"] = None
+                status["_report_sel"] = _report_sel
+                db.snapshot_schedule.update_one(
+                    {"CPMRN": cpmrn, "encounter": encounter},
+                    {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
+                )
+                new_structured = ctx.get("structured_summary") or {}
+                _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+                return status
+
+    # ── Gate 2.5: Vital-normal gate — skip LLM when only routine stable vitals ─
+    # Only fires when: no forced recheck, no new reports, delta is vitals-only,
+    # and every new vital row scores zero on NEWS2 (O2 component stripped).
+    if (
+        not force_expensive
+        and not _has_new_reports
+        and not status.get("delta_gate") == "bypassed_forced"
+    ):
+        new_vitals = delta.get("new_vitals") or []
+        new_labs   = delta.get("new_labs") or []
+        new_notes  = delta.get("new_notes") or []
+        new_report_findings = delta.get("new_report_findings") or []
+        vitals_only = bool(new_vitals) and not new_labs and not new_notes and not new_report_findings
+        if vitals_only:
+            try:
+                from tools.radar_sync.fn_detector import all_new_vitals_normal
+                if all_new_vitals_normal(new_vitals):
+                    logger.info(
+                        "pipeline: vital-normal gate — all %d new vital(s) normal for %s enc=%d, skipping LLM",
+                        len(new_vitals), cpmrn, encounter,
+                    )
+                    status["vital_normal_gate"] = "skipped"
+                    status["_report_analysis"] = None
+                    status["_report_sel"] = _report_sel
+                    db.snapshot_schedule.update_one(
+                        {"CPMRN": cpmrn, "encounter": encounter},
+                        {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
+                    )
+                    new_structured = ctx.get("structured_summary") or {}
+                    _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+                    return status
+            except Exception:
+                logger.exception("pipeline: vital-normal gate check failed for %s enc=%d — continuing", cpmrn, encounter)
+
+    # ── Forced-recheck shortcut (no new data) ────────────────────────────────
+    # When the delta gate was bypassed by a forced follow-up but there is genuinely
+    # no new data, skip summary+pass-1 and run problem_tracker directly using the
+    # last stored summary. The forced_block inside track_problems tells the model
+    # what to focus on.
+    if status.get("delta_gate") == "bypassed_forced":
+        new_structured = ctx.get("structured_summary") or {}
+        status["summary"] = "skipped_forced_no_data"
+        status["pass1"]   = "skipped_forced_no_data"
+        status["pass2"]   = "forced_by_overdue_next_check"
+        status["classifier"] = "skipped_forced_only"
+        try:
+            from tools.radar_sync.problem_tracker import track_problems
+            tracker_result = track_problems(
+                cpmrn, encounter, new_structured, snapshot_at,
+                screener_flag="",
+                focus=_overdue,
+            )
+            status["problem_tracker"] = tracker_result
             logger.info(
-                "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
+                "pipeline: forced recheck (no new data) — problem tracker done for %s enc=%d",
                 cpmrn, encounter,
             )
-            status["delta_gate"] = "skipped"
-            status["_report_analysis"] = None
-            status["_report_sel"] = _report_sel
-            db.snapshot_schedule.update_one(
-                {"CPMRN": cpmrn, "encounter": encounter},
-                {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
-            )
-            new_structured = ctx.get("structured_summary") or {}
-            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
-            return status
+        except Exception:
+            logger.exception("pipeline: forced recheck problem tracker failed for %s enc=%d", cpmrn, encounter)
+            status["problem_tracker"] = {"error": "exception"}
+        _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+        return status
 
     # Step 3c: Interpret new reports (if any) — inject findings into delta before summary update
     if _has_new_reports:
@@ -326,23 +420,36 @@ def _run_live_pipeline(
         logger.exception("pipeline: pass1 screener failed for %s enc=%d — running full Pass 2", cpmrn, encounter)
         pass1 = None  # type: ignore[assignment]
 
-    # If Pass 1 says not needed (and didn't fail), skip status_classifier + problem_tracker
+    # If Pass 1 says not needed (and didn't fail), skip Pass 2 — unless a forced
+    # follow-up overrides the screener verdict.
     if pass1 is not None and not pass1.needs_full_analysis:
-        logger.info("pipeline: pass1 gate — skipping Pass 2 for %s enc=%d", cpmrn, encounter)
-        status["pass2"] = "skipped_by_pass1"
-        _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
-        return status
+        if force_expensive:
+            logger.info(
+                "pipeline: pass1 gate overridden for %s enc=%d — forced by %d overdue next_check(s)",
+                cpmrn, encounter, len(_overdue),
+            )
+            status["pass2"] = "forced_by_overdue_next_check"
+        else:
+            logger.info("pipeline: pass1 gate — skipping Pass 2 for %s enc=%d", cpmrn, encounter)
+            status["pass2"] = "skipped_by_pass1"
+            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+            return status
 
-    # ── Step 4b: status classifier — Pass 2 reasoning (gemini-3.1-flash-lite + thinking) ──
-    try:
-        from tools.radar_sync.status_classifier import classify_statuses
-        new_structured = classify_statuses(cpmrn, encounter, new_structured)
-        status["classifier"] = "ok"
-        logger.info("pipeline: status classification done for %s enc=%d", cpmrn, encounter)
-    except Exception:
-        logger.exception("pipeline: status classification failed for %s enc=%d", cpmrn, encounter)
-        status["classifier"] = "error"
-        # non-fatal — continue with draft statuses
+    # ── Step 4b: status classifier — only when pass-1 flagged (not forced-only) ─
+    # A single-parameter forced recheck is driven by problem_tracker's live tool
+    # fetches; re-running the classifier over the whole summary is unnecessary cost.
+    if pass1 is None or pass1.needs_full_analysis:
+        try:
+            from tools.radar_sync.status_classifier import classify_statuses
+            new_structured = classify_statuses(cpmrn, encounter, new_structured)
+            status["classifier"] = "ok"
+            logger.info("pipeline: status classification done for %s enc=%d", cpmrn, encounter)
+        except Exception:
+            logger.exception("pipeline: status classification failed for %s enc=%d", cpmrn, encounter)
+            status["classifier"] = "error"
+            # non-fatal — continue with draft statuses
+    else:
+        status["classifier"] = "skipped_forced_only"
 
     # Persist updated context
     try:
@@ -364,7 +471,11 @@ def _run_live_pipeline(
     try:
         from tools.radar_sync.problem_tracker import track_problems
         screener_flag = pass1.flag_reason if pass1 is not None else ""
-        tracker_result = track_problems(cpmrn, encounter, new_structured, snapshot_at, screener_flag=screener_flag)
+        tracker_result = track_problems(
+            cpmrn, encounter, new_structured, snapshot_at,
+            screener_flag=screener_flag,
+            focus=_overdue if _overdue else None,
+        )
         status["problem_tracker"] = tracker_result
         logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)
     except Exception:
