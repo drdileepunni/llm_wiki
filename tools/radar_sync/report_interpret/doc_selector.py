@@ -87,7 +87,12 @@ def select_new_reports(chart: dict, cutoff, config: dict | None = None) -> list[
     excludes = cfg.get("exclude_patterns") or []
     key_field = cfg["key_field"]
 
-    out: list[dict] = []
+    # Collect all matching image documents first, then group by (name, reportedAt-minute)
+    # because Radar stores multi-image reports (e.g. ECHO) as one document per image file,
+    # all with the same name and reportedAt but different file keys. Without grouping,
+    # each image would be interpreted and alerted on independently.
+    from collections import defaultdict
+    candidates: list[dict] = []
     for d in (chart.get("documents") or []):
         if (d.get("category") or "").lower() not in cats:
             continue
@@ -98,18 +103,45 @@ def select_new_reports(chart: dict, cutoff, config: dict | None = None) -> list[
         if matched is None:
             continue
         reported = _parse_ts(d.get("reportedAt"))
-        if reported is None or reported <= cutoff_dt:  # strict > : at-most-once per doc
+        if reported is None or reported <= cutoff_dt:
             continue
         file_key = d.get(key_field)
         if not file_key:
             logger.warning("doc_selector: matched report %r has no %s field", d.get("name"), key_field)
             continue
-        out.append({
+        name = d.get("name", "") or d.get("label", "")
+        # Minute-precision timestamp for grouping — sub-minute differences are the same exam
+        ts_minute = str(d.get("reportedAt", ""))[:16]
+        candidates.append({
             "file_key": file_key,
             "reported_at": d.get("reportedAt"),
-            "name": d.get("name", "") or d.get("label", ""),
+            "name": name,
             "category": d.get("category", ""),
-            "doc_id": file_key,  # file key is a stable identity
             "selection_reason": f"matched:{matched}",
+            "_group_key": f"{name.lower()}|{ts_minute}",
+        })
+
+    # Group candidates by (name, reported-minute) → one report entry per group
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for c in candidates:
+        groups[c["_group_key"]].append(c)
+
+    out: list[dict] = []
+    for group_key, docs in groups.items():
+        primary = docs[0]
+        all_file_keys = [d["file_key"] for d in docs]
+        if len(docs) > 1:
+            logger.info(
+                "doc_selector: grouped %d images into one report '%s' (reported_at=%s)",
+                len(docs), primary["name"], primary["reported_at"],
+            )
+        out.append({
+            "file_key": primary["file_key"],       # primary image key (backwards compat)
+            "all_file_keys": all_file_keys,        # all image keys for this report group
+            "reported_at": primary["reported_at"],
+            "name": primary["name"],
+            "category": primary["category"],
+            "doc_id": group_key,                   # stable across runs: name+timestamp-minute
+            "selection_reason": primary["selection_reason"],
         })
     return out

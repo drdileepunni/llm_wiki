@@ -195,14 +195,18 @@ def _run_live_pipeline(
     # Must happen before any gate so the force flag is available to all of them.
     try:
         from tools.radar_sync.problem_tracker import overdue_next_checks
-        _overdue = overdue_next_checks(cpmrn, encounter, db, now)
+        _overdue_all = overdue_next_checks(cpmrn, encounter, db, now)
+        # Vital-type next_checks recheck every 1h and are covered by the normal
+        # Pass-1 screener each cycle. Only non-vital (lab, io) overdue checks
+        # force an expensive run — they have longer intervals and may be missed.
+        _overdue = [o for o in _overdue_all if o.get("type") == "lab"]
     except Exception:
         logger.exception("pipeline: overdue_next_checks failed for %s enc=%d — treating as empty", cpmrn, encounter)
         _overdue = []
     force_expensive = bool(_overdue)
     if force_expensive:
         logger.info(
-            "pipeline: %d overdue next_check(s) for %s enc=%d — will force expensive run",
+            "pipeline: %d overdue lab next_check(s) for %s enc=%d — will force expensive run",
             len(_overdue), cpmrn, encounter,
         )
     status["force_expensive"] = force_expensive

@@ -65,11 +65,17 @@ def _narrative(cpmrn: str, encounter: int) -> str:
         return ""
 
 
-def _advance_watermark(db, cpmrn, encounter, snapshot_at, seen_keys, file_keys):
-    """Advance last_report_at and extend the interpreted-doc ledger (bounded 200)."""
+def _advance_watermark(db, cpmrn, encounter, snapshot_at, seen_keys, file_keys, doc_ids=None):
+    """Advance last_report_at and extend the interpreted-doc ledger (bounded 200).
+
+    Stores both individual file_keys AND composite doc_ids (name|ts-minute) so the
+    select_for_cycle dedup filter works correctly after grouping was introduced.
+    """
     updated = set(seen_keys or [])
     if file_keys:
         updated.update(file_keys)
+    if doc_ids:
+        updated.update(doc_ids)
     ledger = list(updated)[-200:]
     try:
         db[_SCHED].update_one(
@@ -124,15 +130,21 @@ def analyze_new_reports(cpmrn: str, encounter: int, new_reports: list[dict],
         from tools.radar_sync.report_interpret import interpreter
 
         batch_id = uuid.uuid4().hex
-        file_keys = [r["file_key"] for r in new_reports]
-        downloaded = image_downloader.download_all(cpmrn, file_keys)
+        # Flatten all image file_keys across all report groups for a single download batch
+        all_file_keys_flat = [
+            fk for r in new_reports
+            for fk in (r.get("all_file_keys") or [r["file_key"]])
+        ]
+        downloaded = image_downloader.download_all(cpmrn, all_file_keys_flat)
         by_key = {d["file_key"]: d for d in downloaded}
 
         reports: list[dict] = []
         total = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cost_usd": 0.0}
         for r in new_reports:
-            img = by_key.get(r["file_key"])
-            images = [img] if img else []
+            # Pass ALL images for this report group — multi-image exams (e.g. ECHO with 3 frames)
+            # are grouped by doc_selector so they reach the interpreter together as one report.
+            group_keys = r.get("all_file_keys") or [r["file_key"]]
+            images = [by_key[k] for k in group_keys if k in by_key and by_key[k].get("bytes")]
             out = interpreter.interpret_report(images, r["name"], narrative, cpmrn)
             res = out["result"]
             usage = out["usage"]
@@ -145,7 +157,8 @@ def analyze_new_reports(cpmrn: str, encounter: int, new_reports: list[dict],
             _trace(db, cpmrn, encounter, "report_interpret", usage,
                    final_output={"batch_id": batch_id, "report_id": report_id,
                                  "report_type": res.get("report_type"),
-                                 "n_findings": len(res.get("findings") or [])})
+                                 "n_findings": len(res.get("findings") or []),
+                                 "n_images": len(images)})
             reports.append({
                 "report_id": report_id,
                 "report_type": res.get("report_type", "other"),
@@ -153,16 +166,18 @@ def analyze_new_reports(cpmrn: str, encounter: int, new_reports: list[dict],
                 "reported_at": r.get("reported_at"),
                 "category": r.get("category", ""),
                 "file_key": r["file_key"],
+                "all_file_keys": group_keys,
+                "doc_id": r.get("doc_id"),         # composite group key for watermark dedup
                 "selection_reason": r.get("selection_reason", ""),
                 "description": res.get("description", ""),
                 "interpretation": res.get("interpretation", ""),
                 "findings": res.get("findings", []) or [],
                 "confidence": res.get("confidence", "medium"),
-                "download_ok": bool(img and img.get("bytes")),
-                "image": img,  # raw download dict (bytes) for hosting; stripped before BQ
+                "download_ok": bool(images),
+                "image": images[0] if images else None,  # primary image for card hosting
             })
 
-        return {"batch_id": batch_id, "reports": reports, "file_keys": file_keys,
+        return {"batch_id": batch_id, "reports": reports, "file_keys": all_file_keys_flat,
                 "step_costs": total}
     except Exception:
         logger.exception("report_interpret: analyze failed for %s enc=%d", cpmrn, encounter)
@@ -254,8 +269,10 @@ def finalize_report_cycle(cpmrn: str, encounter: int, analysis: dict, snapshot_a
             "step_costs": analysis.get("step_costs", {}),
         })
 
-    # 4. advance watermark
-    _advance_watermark(db, cpmrn, encounter, snapshot_at, seen_keys, file_keys)
+    # 4. advance watermark — include composite doc_ids so the grouping-based dedup filter
+    #    correctly skips these reports on the next cycle even if the watermark is reset.
+    doc_ids = [r.get("doc_id") for r in reports if r.get("doc_id")]
+    _advance_watermark(db, cpmrn, encounter, snapshot_at, seen_keys, file_keys, doc_ids=doc_ids or None)
 
     # 5. run-outcome row
     audit.write_report_run({

@@ -251,6 +251,29 @@ def create_app() -> Flask:
             log.exception("api_save_study_pipeline failed")
             return _err(e)
 
+    @app.route("/api/config/med-recon", methods=["PUT"])
+    def api_save_med_recon():
+        try:
+            doc = _parse_body()
+            enabled = bool(doc.get("enabled", True))
+            # med_recon_config also carries categories/name_patterns/key_field — read-merge
+            # so toggling `enabled` never clobbers the discovery config.
+            from .config_reader import _get_db
+            existing = {}
+            try:
+                existing = _get_db()["app_settings"].find_one({"_id": "med_recon_config"}) or {}
+            except Exception:
+                log.exception("api_save_med_recon: could not read existing med_recon_config")
+            existing = dict(existing)
+            existing["enabled"] = enabled
+            save_app_setting("med_recon_config", existing)
+            return _ok({"saved": "med_recon_config", "enabled": enabled})
+        except ValueError as e:
+            return _err(str(e), 400)
+        except Exception as e:
+            log.exception("api_save_med_recon failed")
+            return _err(e)
+
     @app.route("/api/config/operational/<setting_id>", methods=["PUT"])
     def api_save_operational(setting_id: str):
         allowed = {"alert_recipients", "gchat_webhook", "monitored_workspaces"}

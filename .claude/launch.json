@@ -17,7 +17,7 @@
     },
     {
       "name": "CDS Dashboard",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": "/Users/drdileepunni/github_/llm_wiki/.venv/bin/python",
       "runtimeArgs": ["run_dashboard.py"],
       "cwd": "/Users/drdileepunni/github_/llm_wiki",
       "port": 8050,

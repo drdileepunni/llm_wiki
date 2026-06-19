@@ -545,6 +545,25 @@ async function saveStudyPipeline(enabled) {
   }
 }
 
+async function saveMedRecon(enabled) {
+  const card = document.getElementById('med-recon-card');
+  const toggle = document.getElementById('med-recon-toggle');
+  toggle.disabled = true;
+  try {
+    await fetch('/api/config/med-recon', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled}),
+    });
+    card.className = `card mb-3 border-2 border-${enabled ? 'success' : 'secondary'}`;
+  } catch (e) {
+    console.error('saveMedRecon', e);
+    toggle.checked = !enabled; // revert on failure
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
 async function loadOpsSettings() {
   const el = document.getElementById('ops-content');
   try {
@@ -555,6 +574,13 @@ async function loadOpsSettings() {
     if (toggle) {
       toggle.checked = !!d.study_pipeline_enabled;
       card.className = `card mb-3 border-2 border-${d.study_pipeline_enabled ? 'success' : 'secondary'}`;
+    }
+    // Populate med-recon toggle
+    const mrToggle = document.getElementById('med-recon-toggle');
+    const mrCard   = document.getElementById('med-recon-card');
+    if (mrToggle) {
+      mrToggle.checked = !!d.med_recon_enabled;
+      mrCard.className = `card mb-3 border-2 border-${d.med_recon_enabled ? 'success' : 'secondary'}`;
     }
     let html = '';
 

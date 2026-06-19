@@ -173,11 +173,8 @@ def screen_patient(
     from backend.services.llm_client import GeminiLLMClient
     from tools.radar_sync.react_tracer import ReActTracer
 
-    # Select sensitivity mode based on prior problem states
-    has_prior_worsening = any(
-        p.get("clinical_status") in ("worsening", "critical") for p in last_problems
-    )
-    system = _SYSTEM_HIGH_SENSITIVITY if has_prior_worsening else _SYSTEM_STANDARD
+    has_prior_worsening = False
+    system = _SYSTEM_STANDARD
 
     # Build compact delta — strip huge IO data, keep essentials
     delta_compact = {
@@ -302,9 +299,9 @@ def screen_patient(
 
 
 def _fallback(structured_summary: dict, reason: str) -> Pass1Result:
-    """Safe fallback when screener fails — always request full analysis."""
+    """Fallback when screener fails — skip Pass 2 rather than burning the expensive model."""
     return Pass1Result(
-        needs_full_analysis=True,
+        needs_full_analysis=False,
         next_run_hours=1,
         flag_reason=reason,
         lightweight_summary={

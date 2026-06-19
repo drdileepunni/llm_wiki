@@ -53,6 +53,121 @@ def _lab_followup_label(lab_key: str) -> str:
     return "6 hours" if lab_key.lower() in _FAST_LAB_KEYS_CARD else "12 hours"
 
 
+INSULIN_SECTION_HEADER = "💉 Insulin guidance"
+
+
+def _build_insulin_sections(
+    insulin_order: dict,
+    gchat_webhook_url: str,
+    order_callback_url: str,
+    cb_token: str,
+) -> list[dict]:
+    """
+    Build one or two card sections for a computed insulin recommendation:
+      1. Advisory text (dose, algorithm, inputs used, clinical caveat).
+      2. Checkbox + button for SC placeable orders (omitted for IV advisory-only).
+    """
+    reco = insulin_order.get("reco", {})
+    sourced = insulin_order.get("sourced", {})
+    current_grbs = insulin_order.get("current_grbs", 0)
+    action_set_id = insulin_order.get("action_set_id")
+    advisory_only = insulin_order.get("advisory_only", True)
+
+    dose = reco.get("Suggested_insulin_dose", "?")
+    unit = reco.get("unit", "IU")
+    route_str = "IV infusion" if reco.get("Suggested_route") == "iv" else "SC injection"
+    algo = reco.get("algorithm_used", "?")
+    level = reco.get("level", "?")
+    next_check_h = reco.get("next_grbs_after", "?")
+    action_text = reco.get("action", "")
+
+    # Build advisory lines
+    lines = [
+        f"<b>Glucose: {int(current_grbs)} mg/dL</b>",
+        f"Recommendation: <b>{dose} {unit}</b> — {route_str} ({algo}, Level {level})",
+        f"Action: {action_text}",
+        f"Next glucose check in <b>{next_check_h} hours</b>",
+    ]
+
+    # Input provenance — flag assumed values
+    input_lines = []
+    for field in ("grbs", "insulin", "route", "diet", "dual_inotropes"):
+        info = sourced.get(field, {})
+        if info.get("label"):
+            prefix = "⚠ " if info.get("assumed") else "  "
+            input_lines.append(prefix + info["label"])
+    if input_lines:
+        lines.append("\n<i>Inputs used:</i>")
+        lines.extend(input_lines)
+
+    if advisory_only and reco.get("Suggested_route") == "iv":
+        lines.append(
+            "\n<i>⚠ IV infusion — order placement not supported in v1. "
+            "Please adjust infusion rate at bedside.</i>"
+        )
+    elif advisory_only:
+        lines.append("\n<i>⚠ Order could not be prepared — please dose manually.</i>")
+
+    lines.append(
+        "\n<i>This is clinical decision support only. "
+        "Verify glucose value and patient context before administering insulin.</i>"
+    )
+
+    sections: list[dict] = [
+        {
+            "header": INSULIN_SECTION_HEADER,
+            "widgets": [{"textParagraph": {"text": "\n".join(lines)}}],
+        }
+    ]
+
+    # SC placeable: add checkbox + submit button (default un-ticked — high-risk opt-in)
+    if not advisory_only and action_set_id and order_callback_url and gchat_webhook_url:
+        label = insulin_order.get("label", f"Regular Insulin {dose} {unit} SC")
+        sections.append({
+            "header": "Place insulin order",
+            "widgets": [
+                {
+                    "selectionInput": {
+                        "name": "new_actions",
+                        "type": "CHECK_BOX",
+                        "items": [
+                            {
+                                "text": label,
+                                "value": "insulin:0",
+                                "selected": False,  # un-ticked: clinician must consciously opt in
+                            }
+                        ],
+                    }
+                },
+                {
+                    "buttonList": {
+                        "buttons": [
+                            {
+                                "text": "Place selected insulin order",
+                                "type": "FILLED",
+                                "icon": {"materialIcon": {"name": "medication"}},
+                                "onClick": {
+                                    "action": {
+                                        "function": gchat_webhook_url,
+                                        "parameters": [
+                                            {"key": "action", "value": "order_recon_submit"},
+                                            {"key": "action_set_id", "value": action_set_id},
+                                            {"key": "recon_id", "value": ""},
+                                            {"key": "callback_url", "value": order_callback_url},
+                                            {"key": "cb_token", "value": cb_token},
+                                        ],
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                },
+            ],
+        })
+
+    return sections
+
+
 def _build_problem_body_sections(
     cpmrn: str,
     encounter: int,
@@ -63,6 +178,7 @@ def _build_problem_body_sections(
     callback_url: str,
     cb_token: str,
     *,
+    order_callback_url: str = "",
     rating_label: str = RATING_SECTION_HEADER,
     include_open_patient: bool = True,
 ) -> list[dict]:
@@ -122,6 +238,13 @@ def _build_problem_body_sections(
             "header": "Why alerting",
             "widgets": [{"textParagraph": {"text": alert_reason}}],
         })
+
+    # ── Insulin dosing guidance ───────────────────────────────────────────────
+    insulin_order = assessment.get("_insulin_order")
+    if insulin_order:
+        sections.extend(_build_insulin_sections(
+            insulin_order, gchat_webhook_url, order_callback_url, cb_token
+        ))
 
     # ── Vital data staleness warning ──────────────────────────────────────────
     if vital_age_hours is not None and vital_age_hours > _VITAL_CARD_WARN_H:
@@ -285,6 +408,7 @@ def build_alert_card(
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
+    order_callback_url: str = "",
 ) -> list:
     """
     Build the cardsV2 payload for a single problem alert.
@@ -312,6 +436,7 @@ def build_alert_card(
     sections.extend(_build_problem_body_sections(
         cpmrn, encounter, assessment, all_problems, alert_id,
         gchat_webhook_url, callback_url, cb_token,
+        order_callback_url=order_callback_url,
         include_open_patient=True,
     ))
 
@@ -337,6 +462,7 @@ def build_batched_alert_card(
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
+    order_callback_url: str = "",
 ) -> list:
     """
     Build ONE combined cardsV2 card for multiple alerting problems on the same patient.
@@ -392,6 +518,7 @@ def build_batched_alert_card(
         body_sections = _build_problem_body_sections(
             cpmrn, encounter, assessment, all_problems, alert_id,
             gchat_webhook_url, callback_url, cb_token,
+            order_callback_url=order_callback_url,
             rating_label=f"Rate: {problem_name}",
             include_open_patient=False,
         )

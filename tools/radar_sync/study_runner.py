@@ -29,6 +29,15 @@ def run_study_jobs(db: Any) -> dict:
         logger.exception("study_runner: SBAR sync failed")
         result["sbar_sync"] = {"sbar_sync": "error"}
 
+    # 1b. Sync abnormal-vital escalation tasks from BigQuery
+    try:
+        from tools.radar_sync.study_task_syncer import sync_tasks
+        result["task_sync"] = sync_tasks(db)
+        logger.info("study_runner: task sync done — %s", result["task_sync"])
+    except Exception:
+        logger.exception("study_runner: task sync failed")
+        result["task_sync"] = {"task_sync": "error"}
+
     # 2. LLM matching + window closure + FP candidacy
     try:
         from tools.radar_sync.study_matcher import run_llm_matching

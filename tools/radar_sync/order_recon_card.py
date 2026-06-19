@@ -24,7 +24,8 @@ _CHART_BASE = "https://cloudphysicianworld.com/patient"
 _EDIT_HEADER = "✏️ Edit these orders"
 _DISCONTINUE_HEADER = "🛑 Discontinue these orders"
 _NEW_HEADER = "➕ Create these orders"
-_ACTION_HEADERS = (_EDIT_HEADER, _DISCONTINUE_HEADER, _NEW_HEADER)
+_INSULIN_ORDER_HEADER = "Place insulin order"
+_ACTION_HEADERS = (_EDIT_HEADER, _DISCONTINUE_HEADER, _NEW_HEADER, _INSULIN_ORDER_HEADER)
 
 
 _IMAGE_HEADER = "📄 Treatment chart images"

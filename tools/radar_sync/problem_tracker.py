@@ -2854,6 +2854,14 @@ def track_problems(
     to_alert = _suppress_redundant_alerts(to_alert)
     for assessment, _ in to_alert:
         _maybe_append_charting_caveat(cpmrn, encounter, assessment)
+        try:
+            from tools.radar_sync.insulin_advice import attach_insulin_order
+            attach_insulin_order(cpmrn, encounter, assessment)
+        except Exception:
+            logger.exception(
+                "problem_tracker: insulin_advice enrichment failed for '%s' %s",
+                assessment.get("problem_name", ""), cpmrn,
+            )
     if to_alert:
         try:
             from tools.radar_sync.chat_card_sender import (

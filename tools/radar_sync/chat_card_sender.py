@@ -52,6 +52,7 @@ def _build_cards_v2(
     """
     gchat_webhook_url = f"{service_url}/webhook"
     callback_url      = f"{cds_url}/alert-feedback"
+    order_callback_url = f"{cds_url}/order-action"
 
     if len(alerts) > 1:
         return build_batched_alert_card(
@@ -62,6 +63,7 @@ def _build_cards_v2(
             gchat_webhook_url=gchat_webhook_url,
             callback_url=callback_url,
             cb_token=cb_token,
+            order_callback_url=order_callback_url,
         )
 
     assessment, alert_id = alerts[0]
@@ -74,6 +76,7 @@ def _build_cards_v2(
         gchat_webhook_url=gchat_webhook_url,
         callback_url=callback_url,
         cb_token=cb_token,
+        order_callback_url=order_callback_url,
     )
 
 

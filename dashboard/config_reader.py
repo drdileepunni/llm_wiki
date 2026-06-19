@@ -148,7 +148,8 @@ def get_lab_staleness_overrides() -> dict[str, Any]:
 # ── operational settings ───────────────────────────────────────────────────────
 
 def get_operational_settings() -> dict[str, Any]:
-    """Return alert_recipients, gchat_webhook, monitored_workspaces, study_pipeline_enabled from GCS."""
+    """Return alert_recipients, gchat_webhook, monitored_workspaces, study_pipeline_enabled,
+    med_recon_enabled from GCS."""
     result: dict[str, Any] = {}
     setting_ids = ["alert_recipients", "gchat_webhook", "monitored_workspaces"]
     try:
@@ -160,6 +161,9 @@ def get_operational_settings() -> dict[str, Any]:
         # Study pipeline flag — stored separately, default False
         flag_doc = db["app_settings"].find_one({"_id": "study_pipeline_enabled"})
         result["study_pipeline_enabled"] = bool(flag_doc and flag_doc.get("enabled", False))
+        # Med-recon flag — lives inside med_recon_config, default True (enabled)
+        mr_doc = db["app_settings"].find_one({"_id": "med_recon_config"})
+        result["med_recon_enabled"] = bool(mr_doc.get("enabled", True)) if mr_doc else True
     except Exception:
         log.exception("config_reader: could not read operational settings")
     return result
