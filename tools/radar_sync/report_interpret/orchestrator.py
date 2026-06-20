@@ -117,20 +117,32 @@ def select_for_cycle(cpmrn: str, encounter: int, chart: dict, db) -> dict:
     }
 
 
+_XRAY_PATTERNS = ("xr ", " xr", "xr_", "x-ray", "xray", "radiograph", "chest pa", "chest ap",
+                   "chest view", "chest x")
+
+
+def _is_xray(name: str) -> bool:
+    n = (name or "").lower()
+    return any(p in n for p in _XRAY_PATTERNS)
+
+
 def analyze_new_reports(cpmrn: str, encounter: int, new_reports: list[dict],
                         narrative: str, db) -> dict | None:
     """
     Download + interpret each selected report. Returns the analysis object (carrying the
     in-memory image bytes for hosting) or None when there is nothing to do. Never raises.
+
+    X-rays skip the LLM entirely — image is downloaded and passed through but no
+    interpretation, findings, or description are generated.
     """
     if not new_reports:
         return None
     try:
         from tools.radar_sync.med_recon import image_downloader
         from tools.radar_sync.report_interpret import interpreter
+        from backend.services.llm_client import LLMUsage
 
         batch_id = uuid.uuid4().hex
-        # Flatten all image file_keys across all report groups for a single download batch
         all_file_keys_flat = [
             fk for r in new_reports
             for fk in (r.get("all_file_keys") or [r["file_key"]])
@@ -141,40 +153,47 @@ def analyze_new_reports(cpmrn: str, encounter: int, new_reports: list[dict],
         reports: list[dict] = []
         total = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cost_usd": 0.0}
         for r in new_reports:
-            # Pass ALL images for this report group — multi-image exams (e.g. ECHO with 3 frames)
-            # are grouped by doc_selector so they reach the interpreter together as one report.
             group_keys = r.get("all_file_keys") or [r["file_key"]]
             images = [by_key[k] for k in group_keys if k in by_key and by_key[k].get("bytes")]
-            out = interpreter.interpret_report(images, r["name"], narrative, cpmrn)
-            res = out["result"]
-            usage = out["usage"]
-            sc = _step_cost(usage)
-            for k in ("input_tokens", "output_tokens", "thinking_tokens"):
-                total[k] += sc[k]
-            total["cost_usd"] = round(total["cost_usd"] + sc["cost_usd"], 6)
-
             report_id = uuid.uuid4().hex
+
+            if _is_xray(r["name"]):
+                # X-ray: image only, no LLM call
+                res = {"report_type": "xray", "description": "", "interpretation": "",
+                       "findings": [], "confidence": "n/a"}
+                usage = LLMUsage(0, 0)
+                logger.info("report_interpret: skipping LLM for X-ray %s (%s enc=%d)",
+                            r["name"], cpmrn, encounter)
+            else:
+                out = interpreter.interpret_report(images, r["name"], narrative, cpmrn)
+                res   = out["result"]
+                usage = out["usage"]
+                sc = _step_cost(usage)
+                for k in ("input_tokens", "output_tokens", "thinking_tokens"):
+                    total[k] += sc[k]
+                total["cost_usd"] = round(total["cost_usd"] + sc["cost_usd"], 6)
+
             _trace(db, cpmrn, encounter, "report_interpret", usage,
                    final_output={"batch_id": batch_id, "report_id": report_id,
                                  "report_type": res.get("report_type"),
                                  "n_findings": len(res.get("findings") or []),
                                  "n_images": len(images)})
             reports.append({
-                "report_id": report_id,
-                "report_type": res.get("report_type", "other"),
-                "report_name": r["name"],
-                "reported_at": r.get("reported_at"),
-                "category": r.get("category", ""),
-                "file_key": r["file_key"],
-                "all_file_keys": group_keys,
-                "doc_id": r.get("doc_id"),         # composite group key for watermark dedup
+                "report_id":       report_id,
+                "report_type":     res.get("report_type", "other"),
+                "report_name":     r["name"],
+                "reported_at":     r.get("reported_at"),
+                "category":        r.get("category", ""),
+                "file_key":        r["file_key"],
+                "all_file_keys":   group_keys,
+                "doc_id":          r.get("doc_id"),
                 "selection_reason": r.get("selection_reason", ""),
-                "description": res.get("description", ""),
-                "interpretation": res.get("interpretation", ""),
-                "findings": res.get("findings", []) or [],
-                "confidence": res.get("confidence", "medium"),
-                "download_ok": bool(images),
-                "image": images[0] if images else None,  # primary image for card hosting
+                "description":     res.get("description", ""),
+                "interpretation":  res.get("interpretation", ""),
+                "findings":        res.get("findings", []) or [],
+                "confidence":      res.get("confidence", "n/a"),
+                "download_ok":     bool(images),
+                "image":           images[0] if images else None,
             })
 
         return {"batch_id": batch_id, "reports": reports, "file_keys": all_file_keys_flat,
@@ -230,6 +249,7 @@ def finalize_report_cycle(cpmrn: str, encounter: int, analysis: dict, snapshot_a
                     gchat_webhook_url=f"{service_url}/webhook",
                     callback_url=f"{cds_url}/report-feedback",
                     cb_token=cb_token,
+                    patient_narrative=analysis.get("narrative", ""),
                 )
                 if send_cards_to_recipients(cards, recipients):
                     any_sent = True

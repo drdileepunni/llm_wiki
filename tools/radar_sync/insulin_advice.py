@@ -65,31 +65,44 @@ def gather_inputs(cpmrn: str, encounter: int) -> tuple[dict, dict]:
     engine_input: dict = {}
     sourced: dict = {}
 
+    # ── Active medications (fetch first — needed regardless of glucose) ───────
+    meds = _read_meds(cpmrn, encounter)
+
     # ── Glucose trend ──────────────────────────────────────────────────────────
     grbs_values: list[float] = []
+    grbs_readings: list[dict] = []  # [{"value": float, "ts_ist": str}, ...]
     try:
         from tools.radar_sync.status_classifier import _get_lab_trend as _glt
         trend_str = _glt(cpmrn, encounter, "glucose", n=5) or ""
-        # Parse numeric values from trend string: "glucose = 280 mg/dL" etc.
-        grbs_values = [float(m) for m in re.findall(r"=\s*([\d.]+)", trend_str)]
+        # Trend line format: "  [Jun 19, 3:30 PM IST] Glucose = 280 mg/dL"
+        for line in trend_str.splitlines():
+            ts_m = re.search(r"\[([^\]]+)\]", line)
+            val_m = re.search(r"=\s*([\d.]+)", line)
+            if val_m:
+                val = float(val_m.group(1))
+                grbs_values.append(val)
+                grbs_readings.append({
+                    "value": val,
+                    "ts_ist": ts_m.group(1) if ts_m else "",
+                })
     except Exception:
         pass
 
     if not grbs_values:
-        # Nothing to compute from — caller should bail.
-        sourced["grbs"] = {"values": [], "assumed": False, "found": False}
-        return {}, sourced
-
-    engine_input["GRBS"] = grbs_values
-    sourced["grbs"] = {
-        "values": grbs_values,
-        "found": True,
-        "assumed": False,
-        "label": f"Glucose {', '.join(str(int(v)) for v in grbs_values)} mg/dL (newest first)",
-    }
-
-    # ── Active medications ─────────────────────────────────────────────────────
-    meds = _read_meds(cpmrn, encounter)
+        # No glucose in snapshot — caller should not compute, but return full sourced
+        # so the demo script can still display what was found in EMR.
+        sourced["grbs"] = {"values": [], "readings": [], "assumed": False, "found": False,
+                           "label": "Glucose: not found in snapshot"}
+        # Still populate the rest so a test caller can override GRBS and use real EMR inputs.
+    else:
+        engine_input["GRBS"] = grbs_values
+        sourced["grbs"] = {
+            "values": grbs_values,
+            "readings": grbs_readings,
+            "found": True,
+            "assumed": False,
+            "label": f"Glucose {', '.join(str(int(v)) for v in grbs_values)} mg/dL (newest first)",
+        }
 
     # Prior insulin doses + route detection
     insulin_meds = [
@@ -97,13 +110,15 @@ def gather_inputs(cpmrn: str, encounter: int) -> tuple[dict, dict]:
         if any(p in (m.get("name") or "").lower() for p in _INSULIN_NAME_PATTERNS)
     ]
     prior_doses: list[float] = []
+    prior_orders: list[dict] = []  # [{"dose": float, "route": str, "ts_ist": str}, ...]
     route = "sc"
     route_found = False
     for m in insulin_meds[:4]:
         try:
-            prior_doses.append(float(m.get("quantity", 0) or 0))
+            dose_val = float(m.get("quantity", 0) or 0)
         except (TypeError, ValueError):
-            prior_doses.append(0.0)
+            dose_val = 0.0
+        prior_doses.append(dose_val)
         r = (m.get("route") or "").lower()
         if "iv" in r or "infusion" in r or "drip" in r:
             route = "iv"
@@ -112,16 +127,38 @@ def gather_inputs(cpmrn: str, encounter: int) -> tuple[dict, dict]:
             if not route_found:
                 route = "sc"
                 route_found = True
+        # Format createdAt as IST
+        ts_ist = ""
+        created = m.get("createdAt") or m.get("updatedAt") or ""
+        if created:
+            try:
+                from datetime import datetime, timezone, timedelta
+                _IST = timezone(timedelta(hours=5, minutes=30))
+                dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts_ist = dt.astimezone(_IST).strftime("%-d %b, %-I:%M %p IST")
+            except Exception:
+                ts_ist = str(created)
+        prior_orders.append({
+            "dose": dose_val,
+            "unit": m.get("unit", "IU"),
+            "route": (m.get("route") or "").upper(),
+            "ts_ist": ts_ist,
+            "by": m.get("createdBy", ""),
+        })
 
     if prior_doses:
         engine_input["Insulin"] = prior_doses
         sourced["insulin"] = {
             "found": True, "assumed": False,
+            "orders": prior_orders,
             "label": f"Prior doses: {prior_doses} IU (from active insulin orders)",
         }
     else:
         sourced["insulin"] = {
             "found": False, "assumed": True,
+            "orders": [],
             "label": "Prior insulin doses: not found — engine starts at Level 2",
         }
 
@@ -168,6 +205,11 @@ def gather_inputs(cpmrn: str, encounter: int) -> tuple[dict, dict]:
         ),
     }
 
+    # If no glucose was found, caller must supply GRBS before calling compute().
+    # Return empty engine_input as the signal, but always return full sourced.
+    if not grbs_values:
+        return {}, sourced
+
     return engine_input, sourced
 
 
@@ -186,15 +228,21 @@ def _build_order_payload(reco: dict, current_grbs: float) -> dict:
         "unit": "IU",
         "route": "SC",
         "form": "Injection",
-        "sos": "correction dose for hyperglycemia",
-        "sosReason": f"Blood glucose {int(current_grbs)} mg/dL — CDS insulin protocol",
+        "frequency": {"fType": "once", "days": None, "hours": None, "mins": None, "timeOfDay": None},
         "startNow": True,
+        "skipSchedule": [],
+        "combination": [],
+        "sos": False,
+        "sosReason": None,
         "instructions": (
-            f"Correction dose: {dose} IU SC stat — per CDS insulin protocol "
-            f"(Basal Bolus level {reco.get('level', '?')}). "
+            f"CDS insulin protocol (Basal Bolus level {reco.get('level', '?')}): "
+            f"{dose} IU SC for glucose {int(current_grbs)} mg/dL. "
             f"Next glucose check in {reco.get('next_grbs_after', '?')} hours."
         ),
-        "createdBy": "CDS insulin adviser",
+        "type": "medications",
+        "category": "pending",
+        "state": "red",
+        "createdBy": "Aina bot",
     }
 
 

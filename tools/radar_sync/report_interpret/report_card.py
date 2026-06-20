@@ -21,6 +21,32 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 _RATING_PREFIX = "Rate report:"
 
+_TYPE_DISPLAY = {
+    "xray":       "X-ray",
+    "echo":       "Echo",
+    "ecg":        "ECG",
+    "ekg":        "ECG",
+    "ct":         "CT scan",
+    "mri":        "MRI",
+    "ultrasound": "Ultrasound",
+    "usg":        "Ultrasound",
+    "doppler":    "Doppler",
+    "angiogram":  "Angiogram",
+}
+
+
+def _display_type(report_type: str, report_name: str) -> str:
+    """Return a human-friendly report type label, e.g. 'X-ray', 'Echo', 'CT scan'."""
+    key = (report_type or "").lower().strip()
+    if key in _TYPE_DISPLAY:
+        return _TYPE_DISPLAY[key]
+    # Fallback: derive from the raw report name
+    name_lc = (report_name or "").lower()
+    for k, v in _TYPE_DISPLAY.items():
+        if k in name_lc:
+            return v
+    return "Diagnostic report"
+
 
 def _fmt_ist(dt_iso) -> str:
     """Format an ISO/datetime timestamp as 'Jun 15, 9:07 PM IST'. Returns '' if unparseable."""
@@ -44,18 +70,16 @@ _SEVERITY_EMOJI = {"critical": "🔴", "notable": "🟠", "routine": "🟢"}
 def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
                      cb_token: str, has_divider: bool) -> list[dict]:
     """Build the section group for one report."""
-    report_id   = report["report_id"]
-    rtype       = (report.get("report_type") or "report").upper()
-    name        = report.get("report_name") or rtype
-    ts          = _fmt_ist(report.get("reported_at"))
-    interp      = report.get("interpretation") or "(no interpretation produced)"
-    description = report.get("description") or "(no description produced)"
-    image_urls  = report.get("image_urls") or []
-    findings    = report.get("findings") or []
+    report_id  = report["report_id"]
+    rtype      = (report.get("report_type") or "other").lower()
+    name       = report.get("report_name") or rtype.upper()
+    ts         = _fmt_ist(report.get("reported_at"))
+    image_urls = report.get("image_urls") or []
+    is_xray    = rtype == "xray"
 
     sections: list[dict] = []
 
-    # ── Report header section (acts as title within the batched card) ──
+    # ── Report header ──
     title = f"🩻 {name}"
     if ts:
         title += f"  ·  {ts}"
@@ -64,7 +88,23 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
         header_section["hasDivider"] = True
     sections.append(header_section)
 
-    # ── Interpretation (inline, prominent) ──
+    if is_xray:
+        # X-rays: image only — no LLM interpretation, findings, description, or rating
+        if image_urls:
+            sections.append({
+                "header": "🖼️ X-ray image",
+                "widgets": [
+                    {"image": {"imageUrl": url, "onClick": {"openLink": {"url": url}}}}
+                    for url in image_urls
+                ],
+            })
+        return sections
+
+    # ── Non-X-ray: full interpretation card ──
+    interp      = report.get("interpretation") or "(no interpretation produced)"
+    description = report.get("description") or "(no description produced)"
+    findings    = report.get("findings") or []
+
     sections.append({
         "header": "Interpretation",
         "widgets": [{"decoratedText": {
@@ -74,7 +114,6 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
         }}],
     })
 
-    # ── Key findings chips (inline) — only when present ──
     if findings:
         chips = []
         for f in findings:
@@ -86,7 +125,6 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
             "widgets": [{"chipList": {"chips": chips}}],
         })
 
-    # ── Description / transcription (collapsed accordion) ──
     sections.append({
         "header": "📄 Description / transcription",
         "collapsible": True,
@@ -94,7 +132,6 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
         "widgets": [{"textParagraph": {"text": description}}],
     })
 
-    # ── Report image(s) (collapsed accordion) ──
     if image_urls:
         sections.append({
             "header": "🖼️ Report image",
@@ -106,7 +143,6 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
             ],
         })
 
-    # ── Per-report feedback rating ──
     sections.append({
         "header": f"{_RATING_PREFIX} {name}",
         "widgets": [
@@ -155,6 +191,7 @@ def build_report_interpret_card(
     gchat_webhook_url: str,
     callback_url: str,
     cb_token: str,
+    patient_narrative: str = "",
 ) -> list:
     """
     Build the cardsV2 list for a single report. Google Chat caps sections at 10 per card;
@@ -162,17 +199,28 @@ def build_report_interpret_card(
 
     `report` is a dict: {report_id, report_type, report_name, reported_at, interpretation,
      description, findings, image_urls}.
+    `patient_narrative` is the running clinical summary shown in the Patient section.
     """
+    rtype      = (report.get("report_type") or "").lower()
+    rname      = report.get("report_name") or ""
+    dtype      = _display_type(rtype, rname)
+    is_xray    = rtype == "xray"
+
     sections: list[dict] = []
 
-    # ── Intro + Open patient ──
+    # ── Patient context + Open patient ──
+    blurb = patient_narrative.strip() if patient_narrative else ""
+    if not blurb:
+        blurb = (
+            "New diagnostic report resulted. "
+            "Interpretation in context below; expand for the source image."
+            if not is_xray else
+            "New diagnostic report resulted."
+        )
     sections.append({
         "header": "Patient",
         "widgets": [
-            {"textParagraph": {"text": (
-                "New diagnostic report resulted. "
-                "Interpretation in context below; expand for the source image."
-            )}},
+            {"textParagraph": {"text": blurb}},
             {"buttonList": {"buttons": [{
                 "text": "Open patient",
                 "icon": {"materialIcon": {"name": "open_in_new"}},
@@ -190,7 +238,7 @@ def build_report_interpret_card(
         "cardId": f"cds-report-interpret-{report_id}",
         "card": {
             "header": {
-                "title": "🩻 New report resulted",
+                "title": f"🩻 New {dtype} resulted",
                 "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
                 "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/document_scanner/default/48px.svg",
                 "imageType": "CIRCLE",

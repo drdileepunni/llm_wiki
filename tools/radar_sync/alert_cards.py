@@ -81,24 +81,46 @@ def _build_insulin_sections(
     next_check_h = reco.get("next_grbs_after", "?")
     action_text = reco.get("action", "")
 
-    # Build advisory lines
-    lines = [
-        f"<b>Glucose: {int(current_grbs)} mg/dL</b>",
-        f"Recommendation: <b>{dose} {unit}</b> — {route_str} ({algo}, Level {level})",
-        f"Action: {action_text}",
-        f"Next glucose check in <b>{next_check_h} hours</b>",
-    ]
+    lines: list[str] = []
 
-    # Input provenance — flag assumed values
-    input_lines = []
-    for field in ("grbs", "insulin", "route", "diet", "dual_inotropes"):
-        info = sourced.get(field, {})
-        if info.get("label"):
-            prefix = "⚠ " if info.get("assumed") else "  "
-            input_lines.append(prefix + info["label"])
-    if input_lines:
-        lines.append("\n<i>Inputs used:</i>")
-        lines.extend(input_lines)
+    # ── Recommendation headline ───────────────────────────────────────────────
+    lines.append(
+        f"Recommendation: <b>{dose} {unit} {route_str}</b>"
+        f" ({algo}, Level {level}) · next check in <b>{next_check_h}h</b>"
+    )
+
+    # ── Glucose trend ─────────────────────────────────────────────────────────
+    grbs_info = sourced.get("grbs", {})
+    readings = grbs_info.get("readings", [])
+    if readings:
+        lines.append("\n<b>Glucose trend (newest first):</b>")
+        for r in readings:
+            ts = f" — {r['ts_ist']}" if r.get("ts_ist") else ""
+            lines.append(f"  <b>{int(r['value'])} mg/dL</b>{ts}")
+    elif grbs_info.get("values"):
+        lines.append(f"\n<b>Glucose:</b> {int(grbs_info['values'][0])} mg/dL (no timestamp)")
+
+    # ── Prior insulin doses ───────────────────────────────────────────────────
+    insulin_info = sourced.get("insulin", {})
+    orders = insulin_info.get("orders", [])
+    if orders:
+        lines.append("\n<b>Prior insulin orders (from EMR):</b>")
+        for o in orders:
+            ts = f" — placed {o['ts_ist']}" if o.get("ts_ist") else ""
+            by = f" by {o['by']}" if o.get("by") else ""
+            lines.append(f"  <b>{o['dose']} {o['unit']} {o['route']}</b>{ts}{by}")
+    else:
+        lines.append("\n⚠ <b>Prior insulin:</b> none found — engine starting at Level 2")
+
+    # ── Diet & dual inotropes ─────────────────────────────────────────────────
+    diet_info = sourced.get("diet", {})
+    diet_val = diet_info.get("value", "others")
+    diet_flag = " ⚠ assumed" if diet_info.get("assumed") else ""
+    lines.append(f"\n<b>Diet:</b> {diet_val}{diet_flag}")
+
+    di_info = sourced.get("dual_inotropes", {})
+    di_val = "Yes" if di_info.get("value") else "No"
+    lines.append(f"<b>Dual inotropes:</b> {di_val}")
 
     if advisory_only and reco.get("Suggested_route") == "iv":
         lines.append(
@@ -109,8 +131,7 @@ def _build_insulin_sections(
         lines.append("\n<i>⚠ Order could not be prepared — please dose manually.</i>")
 
     lines.append(
-        "\n<i>This is clinical decision support only. "
-        "Verify glucose value and patient context before administering insulin.</i>"
+        "\n<i>CDS decision support only — verify at bedside before administering.</i>"
     )
 
     sections: list[dict] = [

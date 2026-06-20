@@ -212,6 +212,11 @@ def order_action():
     cpmrn = action_set.get("cpmrn", "")
     encounter = action_set.get("encounter", 1)
 
+    # Stamp approving user's email on any new-order actions whose createdBy is blank.
+    for action in actions:
+        if action.get("kind") == "new" and not action.get("order", {}).get("createdBy"):
+            action.setdefault("order", {})["createdBy"] = user_email if user_email and user_email != "unknown" else "Aina bot"
+
     logging.info(
         "order-action: applying %d action(s) for %s enc=%d by %s",
         len(actions), cpmrn, encounter, user_display,

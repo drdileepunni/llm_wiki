@@ -275,6 +275,8 @@ async function loadRuns() {
       const expensive  = hasTiers && r.expensive_count    != null ? fmt(r.expensive_count)   : '—';
       const avgCheap   = hasTiers && r.avg_cost_cheap_usd    != null ? usd(r.avg_cost_cheap_usd)    : '—';
       const avgExp     = hasTiers && r.avg_cost_expensive_usd != null ? usd(r.avg_cost_expensive_usd) : '—';
+      const repCharts = r.report_charts != null ? fmt(r.report_charts) : '—';
+      const repCost   = r.report_cost_usd != null ? usdShort(r.report_cost_usd) : '—';
       return `<tr>
         <td class="text-muted">${ts}</td>
         <td class="text-end">${scheduled}</td>
@@ -285,6 +287,8 @@ async function loadRuns() {
         <td class="text-end fw-semibold">${usdShort(r.cost_usd)}</td>
         <td class="text-end text-muted">${avgCheap}</td>
         <td class="text-end text-muted">${avgExp}</td>
+        <td class="text-end text-muted">${repCharts}</td>
+        <td class="text-end text-muted">${repCost}</td>
       </tr>`;
     }).join('');
   } catch (e) {

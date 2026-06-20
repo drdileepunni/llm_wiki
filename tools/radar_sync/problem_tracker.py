@@ -172,8 +172,11 @@ STEP 2 — TEAM ACTIVELY RESPONDING RIGHT NOW?  (ACLS/CPR in progress, emergency
 
 STEP 3 — MOST RECENT PLAN NOTE < 24h OLD?  (see "NOTE FRESHNESS") → being_addressed=True,
   should_alert=False; do NOT apply the treatment-inadequate override (Step 5).
-  EXCEPTION: this step does NOT apply to CARE-GAP / plan-discordance problems. A fresh note
-  that CONTRADICTS another fresh note is exactly what to alert on — fresh ≠ coherent.
+  EXCEPTION — VITALS: this step does NOT apply to vital-based problems (hypoxia, hypotension,
+  tachycardia, tachypnoea, bradycardia, fever, etc.). If a vital is currently below its alert
+  floor, a plan note does NOT suppress the alert — evaluate on the response buffer (Step 4).
+  EXCEPTION — CARE-GAP: this step does NOT apply to CARE-GAP / plan-discordance problems. A
+  fresh note that CONTRADICTS another fresh note is exactly what to alert on — fresh ≠ coherent.
 
 STEP 4 — PLAN NOTE WITHIN THE RESPONSE-BUFFER WINDOW for its intervention type?  (see
   "TIMING RULE") → being_addressed=True, should_alert=False; set a next_check to monitor the
@@ -210,6 +213,22 @@ reading) crosses the relevant floor:
   tachypnoea). get_vital_trend('SpO2') returns the SF ratio alongside each SpO2 reading — use
   the most recent SF value. If SF ratio is ≥ 350, do NOT alert even if SpO2 or RR cross their
   individual floors.
+  PERSISTENCE OVERRIDE — the SF ratio gate is bypassed if SpO2 < 92% in 2 or more consecutive
+  readings in get_vital_trend('SpO2'). Persistent desaturation across multiple readings cannot
+  be explained by a transient FiO2 charting artefact; alert regardless of the SF ratio value.
+  Check the last 3–4 readings: if ≥ 2 back-to-back readings all have SpO2 < 92%, treat the SF
+  gate as satisfied and apply the normal alert/trend logic from that point.
+
+MULTI-VITAL CRISIS OVERRIDE — if TWO or more distinct vital parameters are SIMULTANEOUSLY
+below their alert floors at the current snapshot (e.g. SpO2 < 92% AND MAP < 65 mmHg, or
+HR > 120 AND RR > 28), all suppression rules are bypassed: the SF ratio gate, note freshness
+(Step 3), response buffer (Step 4), and improving-trend suppression do NOT apply. Multiple
+simultaneous vital abnormalities signal acute physiological deterioration — alert regardless of
+documented plans or recent notes. Set should_alert=True.
+The permissive context gate (Step 1) and team-actively-responding (Step 2) still apply — a
+permissive context that covers ALL the crossed floors still suppresses the alert, and an
+emergency procedure already underway (CPR, active intubation) still takes precedence.
+
 A drop from the patient's baseline is NOT sufficient on its own — the absolute value must cross
 the floor. If the current value is above the floor (e.g. MAP 67 after a transient dip to 64),
 classify as stable or improving — do NOT alert.
@@ -292,13 +311,19 @@ DETERMINING being_addressed AND CLINICAL STATUS
   should_alert=False. The clinical team has evaluated the situation and the decision has been
   made. Do not repeatedly alert for a problem where the only unaddressed element is an
   intervention the patient/family has explicitly declined.
-- NOTE FRESHNESS — a plan note written within the last 24 hours is ALWAYS a current, active plan.
-  If the most recent plan note for a problem is < 24h old, set being_addressed=True and
-  should_alert=False — regardless of whether the response buffer has expired, whether the problem
-  is still worsening, and regardless of the treatment-inadequate override. Clinicians write notes
-  at most once per day; a note from earlier the same day is still the active plan. Only apply the
+- NOTE FRESHNESS — applies to LAB-BASED problems only. A plan note written within the last
+  24 hours is a current, active plan for lab-driven problems. If the most recent plan note for
+  a lab problem is < 24h old, set being_addressed=True and should_alert=False — regardless of
+  whether the response buffer has expired, whether the problem is still worsening, and regardless
+  of the treatment-inadequate override. Clinicians write notes at most once per day; a note from
+  earlier the same day is still the active plan for a lab-level concern. Only apply the
   treatment-inadequate override when the most recent plan note is > 24h old AND the problem is
-  worsening. (Does NOT apply to CARE-GAP problems — see Step 3 of the ladder.)
+  worsening.
+  NOTE FRESHNESS does NOT apply to vital-based problems (hypoxia, hypotension, tachycardia,
+  tachypnoea, bradycardia, fever, etc.). Vitals are real-time; a plan note written hours ago does
+  not mean the current vital abnormality is being actively managed at this moment. For vital
+  problems, use the response buffer (Step 4) only — not note freshness.
+  (Does NOT apply to CARE-GAP problems — see Step 3 of the ladder.)
 - RESOLVED handling:
   • If get_problem_state shows a prior status of "resolved" but the current summary marks it as
     worsening/critical, treat the stored addressed_evidence as STALE — the old plan was for a

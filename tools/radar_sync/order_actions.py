@@ -201,10 +201,9 @@ def create_order(cpmrn: str, encounter: int, order: dict) -> dict:
         "pta": order.get("pta", False),
         "urgency": order.get("urgency"),
         "type": "medications",
-        "category": "active",
+        "category": order.get("category", "active"),
         "state": order.get("state", "red"),
-        "createdBy": order.get("createdBy", "Aina bot"),
-        "bedsideOrder": True,
+        "createdBy": order.get("createdBy") or "Aina bot",
     }
     # drop keys the caller didn't set and that the EMR treats as optional
     body = {k: v for k, v in body.items() if v is not None or k in ("instructions", "combination", "skipSchedule")}
