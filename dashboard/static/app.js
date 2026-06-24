@@ -291,9 +291,114 @@ async function loadRuns() {
         <td class="text-end text-muted">${repCost}</td>
       </tr>`;
     }).join('');
+
+    // Populate the run audit picker
+    const picker = document.getElementById('audit-run-picker');
+    if (picker) {
+      const current = picker.value;
+      picker.innerHTML = '<option value="">— select a run —</option>' +
+        rows.map(r => {
+          const ts = r.run_started_at.slice(0, 16).replace('T', ' ');
+          const label = `${ts}  (${fmt(r.expensive_count || 0)} exp, ${fmt(r.alerts_sent)} alerts)`;
+          return `<option value="${r.run_started_at}">${escHtml(label)}</option>`;
+        }).join('');
+      if (current) picker.value = current;
+    }
   } catch (e) {
     tbody.innerHTML = '<tr><td colspan="9" class="text-danger text-center py-3">Error loading runs</td></tr>';
     console.error('loadRuns', e);
+  }
+}
+
+// ── suppression rule badge ────────────────────────────────────────────────────
+function suppressionBadge(rule) {
+  if (!rule || rule === 'none') return '<span class="badge bg-secondary bg-opacity-25 text-secondary">—</span>';
+  const r = String(rule);
+  let bg, label;
+  if (r === 'alerted')                  { bg = '#dc3545'; label = 'alerted'; }
+  else if (r.startsWith('permissive'))  { bg = '#fd7e14'; label = r.replace('permissive_window:', 'protocol:'); }
+  else if (r === 'being_addressed')     { bg = '#6c757d'; label = 'being addressed'; }
+  else if (r === 'model_suppressed')    { bg = '#6c757d'; label = 'model suppressed'; }
+  else if (r.startsWith('below_floor')) { bg = '#0d6efd'; label = r.replace('below_floor:', 'below floor: '); }
+  else if (r === 'cooldown')            { bg = '#198754'; label = 'cooldown'; }
+  else if (r.startsWith('stale'))       { bg = '#6610f2'; label = r.replace('_', ' '); }
+  else if (r.startsWith('improving'))   { bg = '#20c997'; label = r.replace('improving_trend:', '↑ '); }
+  else if (r.startsWith('gcs'))         { bg = '#ffc107'; label = r.replace('gcs_stability:', 'GCS '); }
+  else if (r.startsWith('lab_value'))   { bg = '#212529'; label = r.replace('lab_value_mismatch:', 'mismatch: '); }
+  else                                  { bg = '#adb5bd'; label = r; }
+  return `<span class="badge" style="background:${bg};font-size:0.7rem">${escHtml(label)}</span>`;
+}
+
+async function loadRunAudit(runTs) {
+  const tbody = document.querySelector('#tbl-audit tbody');
+  if (!runTs) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center py-3">Select a run above to load audit data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '<tr><td colspan="5" class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></td></tr>';
+  try {
+    const rows = await apiFetch('/api/metrics/run-audit?run=' + encodeURIComponent(runTs));
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center py-3">No audit data for this run — data is written starting from the next run after deploy.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const pass1Label = r.pass1_needs_full
+        ? `<span class="badge bg-danger bg-opacity-75">${escHtml(r.pass1_tag || 'flagged')}</span>`
+        : `<span class="badge bg-secondary bg-opacity-25 text-secondary">cheap</span>`;
+
+      const pass2Label = (() => {
+        const p = r.pass2_outcome || '';
+        if (p === 'skipped_by_pass1')      return '<span class="badge bg-secondary bg-opacity-20 text-muted">skipped</span>';
+        if (p === 'forced_by_overdue_next_check') return '<span class="badge bg-warning text-dark">forced (overdue)</span>';
+        if (p.startsWith('pass2:'))        return `<span class="badge bg-primary bg-opacity-75">${escHtml(p.replace('pass2:',''))}</span>`;
+        if (p)                             return `<span class="badge bg-secondary">${escHtml(p)}</span>`;
+        return '—';
+      })();
+
+      const whyExpensive = r.pass1_needs_full
+        ? `<span class="text-muted small">${escHtml(r.pass1_tag || '')}</span>`
+        : '<span class="text-muted small">—</span>';
+
+      const problems = (r.problems || []);
+      const problemsHtml = problems.length
+        ? `<div class="d-flex flex-column gap-1">` +
+          problems.map(p => {
+            const reasoning = p.tracker_reasoning || p.alert_reason || '';
+            const truncated = reasoning.length > 120 ? reasoning.slice(0, 120) + '…' : reasoning;
+            return `<div style="font-size:0.78rem">
+              <strong>${escHtml(p.problem_name || '')}</strong>
+              <span class="text-muted ms-1">[${escHtml(p.clinical_status || '?')}]</span>
+              ${suppressionBadge(p.suppression_rule)}
+              ${truncated ? `<div class="text-muted mt-1" style="font-size:0.72rem;line-height:1.3">${escHtml(truncated)}</div>` : ''}
+            </div>`;
+          }).join('') +
+          `</div>`
+        : '<span class="text-muted small">—</span>';
+
+      const outcomeBadge = (() => {
+        const o = r.pipeline_outcome || '';
+        if (o === 'alerted')             return '<span class="badge bg-danger">alerted</span>';
+        if (o === 'expensive_no_alert')  return '<span class="badge bg-warning text-dark">expensive, no alert</span>';
+        if (o === 'cheap')               return '<span class="badge bg-secondary bg-opacity-25 text-secondary">cheap</span>';
+        if (o.startsWith('error'))       return `<span class="badge bg-dark">${escHtml(o)}</span>`;
+        return `<span class="badge bg-secondary">${escHtml(o)}</span>`;
+      })();
+
+      return `<tr>
+        <td class="align-top" style="white-space:nowrap">
+          <span class="fw-semibold" style="font-size:0.82rem">${escHtml(r.CPMRN)}</span><br>
+          ${outcomeBadge}
+        </td>
+        <td class="align-top">${pass1Label}</td>
+        <td class="align-top">${whyExpensive}</td>
+        <td class="align-top">${pass2Label}</td>
+        <td class="align-top">${problemsHtml}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
+    console.error('loadRunAudit', e);
   }
 }
 
@@ -325,7 +430,7 @@ async function loadAll() {
   if (el) el.textContent = 'Loading…';
   await Promise.all([
     loadSummary(), loadTimeseries(), loadAlertsPerRun(),
-    loadCost(), loadRaters(), loadAgreement(), loadComments(), loadRuns(),
+    loadCost(), loadRaters(), loadAgreement(), loadComments(),
   ]);
   if (el) el.textContent = 'Updated ' + ts;
 }
@@ -834,4 +939,410 @@ document.addEventListener('DOMContentLoaded', () => {
   if (window.PAGE === 'dashboard') loadAll();
   if (window.PAGE === 'config')    loadConfig();
   if (window.PAGE === 'docs')      loadDocsList();
+  if (window.PAGE === 'audit')     loadAuditPage();
 });
+
+// ── AUDIT PAGE ────────────────────────────────────────────────────────────────
+
+async function loadAuditPage() {
+  await Promise.all([loadAuditNextChecks(), loadAuditRuns()]);
+}
+
+// ── Next-checks banner ────────────────────────────────────────────────────────
+
+async function loadAuditNextChecks() {
+  const body = document.getElementById('nc-body');
+  if (!body) return;
+  try {
+    const items = await apiFetch('/api/audit/next-checks');
+    const now = Date.now();
+
+    if (!items.length) {
+      body.innerHTML = '<p class="text-muted text-center py-2 mb-0 small">No active next-checks.</p>';
+      return;
+    }
+
+    const overdue  = items.filter(i => i.overdue);
+    const pending  = items.filter(i => !i.overdue);
+
+    const countBadge = document.getElementById('nc-badge-count');
+    const overdueBadge = document.getElementById('nc-badge-overdue');
+    if (countBadge) { countBadge.textContent = items.length + ' active'; countBadge.style.display = ''; }
+    if (overdueBadge && overdue.length) { overdueBadge.textContent = overdue.length + ' overdue'; overdueBadge.style.display = ''; }
+
+    const rows = items.map(i => {
+      const due = new Date(i.due_after);
+      const diffMs = due - now;
+      const diffMin = Math.round(diffMs / 60000);
+      const dueLabel = i.overdue
+        ? `<span class="text-danger fw-semibold">${fmtDue(due)} (${Math.abs(diffMin)}m ago)</span>`
+        : `<span class="text-warning">${fmtDue(due)} (in ${diffMin}m)</span>`;
+
+      const statusBadge = i.overdue
+        ? '<span class="badge bg-danger" style="font-size:0.7rem">overdue</span>'
+        : '<span class="badge bg-warning text-dark" style="font-size:0.7rem">pending</span>';
+
+      const watching = escHtml(i.label || i.key || i.type || '—');
+      const problem  = escHtml(i.problem_name || '—');
+
+      return `<tr style="font-size:0.82rem">
+        <td class="ps-3">${escHtml(i.CPMRN)}</td>
+        <td>${problem}</td>
+        <td>${watching}</td>
+        <td>${dueLabel}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <table class="table table-sm mb-0">
+        <thead style="font-size:0.76rem; color:#6c757d">
+          <tr>
+            <th class="ps-3" style="width:20%">Patient</th>
+            <th style="width:25%">Problem</th>
+            <th style="width:25%">Watching</th>
+            <th style="width:20%">Due</th>
+            <th style="width:10%">State</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) {
+    body.innerHTML = `<p class="text-danger text-center py-2 mb-0 small">Error loading next-checks: ${escHtml(String(e))}</p>`;
+    console.error('loadAuditNextChecks', e);
+  }
+}
+
+function fmtDue(date) {
+  return date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+
+// ── Run picker + patient audit table ─────────────────────────────────────────
+
+async function loadAuditRuns() {
+  const picker = document.getElementById('audit-run-picker');
+  const tbody  = document.querySelector('#tbl-audit tbody');
+  if (!picker || !tbody) return;
+
+  try {
+    const rows = await apiFetch('/api/metrics/runs');
+    if (!rows.length) {
+      picker.innerHTML = '<option value="">No runs found</option>';
+      tbody.innerHTML  = '<tr><td colspan="6" class="text-muted text-center py-3">No runs found.</td></tr>';
+      return;
+    }
+
+    picker.innerHTML = rows.map((r, idx) => {
+      const ts    = r.run_started_at.slice(0, 16).replace('T', ' ');
+      const label = idx === 0
+        ? `${ts}  (latest · ${fmt(r.expensive_count || 0)} exp, ${fmt(r.alerts_sent)} alerts)`
+        : `${ts}  (${fmt(r.expensive_count || 0)} exp, ${fmt(r.alerts_sent)} alerts)`;
+      return `<option value="${escHtml(r.run_started_at)}">${escHtml(label)}</option>`;
+    }).join('');
+
+    // Auto-load latest run
+    const latest = rows[0];
+    updateAuditRunSummary(latest);
+    await loadAuditRunPatients(latest.run_started_at);
+
+    picker.addEventListener('change', async e => {
+      const chosen = rows.find(r => r.run_started_at === e.target.value);
+      if (chosen) updateAuditRunSummary(chosen);
+      await loadAuditRunPatients(e.target.value);
+    });
+  } catch (e) {
+    picker.innerHTML = '<option value="">Error loading runs</option>';
+    tbody.innerHTML  = `<tr><td colspan="6" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
+    console.error('loadAuditRuns', e);
+  }
+}
+
+function updateAuditRunSummary(run) {
+  const el = document.getElementById('audit-run-summary');
+  if (!el || !run) return;
+  const parts = [];
+  if (run.total_scheduled != null) parts.push(fmt(run.total_scheduled) + ' scheduled');
+  if (run.expensive_count  != null) parts.push(fmt(run.expensive_count) + ' expensive');
+  if (run.alerts_sent      != null) parts.push(fmt(run.alerts_sent) + ' alerts');
+  if (run.cost_usd         != null) parts.push(usdShort(run.cost_usd));
+  el.textContent = parts.join(' · ');
+}
+
+async function loadAuditRunPatients(runTs) {
+  const tbody = document.querySelector('#tbl-audit tbody');
+  if (!tbody) return;
+  if (!runTs) {
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center py-3">Select a run above.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '<tr><td colspan="6" class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></td></tr>';
+  try {
+    const rows = await apiFetch('/api/metrics/run-audit?run=' + encodeURIComponent(runTs));
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center py-3">No audit data for this run.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => auditPatientRow(r)).join('');
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
+    console.error('loadAuditRunPatients', e);
+  }
+}
+
+function auditPatientRow(r) {
+  const pass1Label = r.pass1_needs_full
+    ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">${escHtml(r.pass1_tag || 'flagged')}</span>`
+    : `<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>`;
+
+  const pass2Label = (() => {
+    const p = r.pass2_outcome || '';
+    if (p === 'skipped_by_pass1')             return '<span class="badge bg-secondary bg-opacity-20 text-muted" style="font-size:0.7rem">skipped</span>';
+    if (p === 'forced_by_overdue_next_check') return '<span class="badge bg-warning text-dark" style="font-size:0.7rem">forced (overdue)</span>';
+    if (p.startsWith('pass2:'))               return `<span class="badge bg-primary bg-opacity-75" style="font-size:0.7rem">${escHtml(p.replace('pass2:',''))}</span>`;
+    if (p)                                    return `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(p)}</span>`;
+    return '—';
+  })();
+
+  const whyExpensive = r.pass1_needs_full
+    ? `<span class="text-muted" style="font-size:0.8rem">${escHtml(r.pass1_tag || '')}</span>`
+    : '<span class="text-muted" style="font-size:0.8rem">—</span>';
+
+  const problems = r.problems || [];
+  const problemsHtml = problems.length
+    ? problems.map(p => {
+        const truncated = (p.tracker_reasoning || p.alert_reason || '').slice(0, 100);
+        return `<div style="font-size:0.78rem; margin-bottom:3px">
+          <strong>${escHtml(p.problem_name || '')}</strong>
+          <span class="text-muted ms-1" style="font-size:0.72rem">[${escHtml(p.clinical_status || '?')}]</span>
+          ${suppressionBadge(p.suppression_rule)}
+          ${truncated ? `<div class="text-muted mt-1" style="font-size:0.72rem;line-height:1.3">${escHtml(truncated)}…</div>` : ''}
+        </div>`;
+      }).join('')
+    : '<span class="text-muted small">—</span>';
+
+  const outcomeBadge = (() => {
+    const o = r.pipeline_outcome || '';
+    if (o === 'alerted')            return '<span class="badge bg-danger" style="font-size:0.7rem">alerted</span>';
+    if (o === 'expensive_no_alert') return '<span class="badge bg-warning text-dark" style="font-size:0.7rem">expensive, no alert</span>';
+    if (o === 'cheap')              return '<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>';
+    if (o.startsWith('error'))      return `<span class="badge bg-dark" style="font-size:0.7rem">${escHtml(o)}</span>`;
+    return `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(o)}</span>`;
+  })();
+
+  const rowId = `audit-row-${escHtml(r.CPMRN)}-${r.encounter}`;
+  return `<tr id="${rowId}" data-cpmrn="${escHtml(r.CPMRN)}" data-enc="${r.encounter || 1}">
+    <td class="align-top" style="white-space:nowrap">
+      <span class="fw-semibold" style="font-size:0.82rem">${escHtml(r.CPMRN)}</span><br>
+      ${outcomeBadge}
+    </td>
+    <td class="align-top">${pass1Label}</td>
+    <td class="align-top">${whyExpensive}</td>
+    <td class="align-top">${pass2Label}</td>
+    <td class="align-top">${problemsHtml}</td>
+    <td class="align-top text-end">
+      <button class="btn btn-sm btn-outline-secondary py-0 px-1 expand-btn" style="font-size:0.72rem"
+              onclick="togglePatientDetail(this)" title="Show model detail">
+        <i class="bi bi-chevron-down"></i>
+      </button>
+    </td>
+  </tr>`;
+}
+
+// ── Per-patient lazy drill-down ───────────────────────────────────────────────
+
+async function togglePatientDetail(btn) {
+  const patientTr = btn.closest('tr');
+  const detailId  = 'detail-' + patientTr.id;
+  const existing  = document.getElementById(detailId);
+
+  if (existing) {
+    existing.remove();
+    btn.innerHTML = '<i class="bi bi-chevron-down"></i>';
+    return;
+  }
+
+  btn.innerHTML = '<div class="spinner-border spinner-border-sm" style="width:12px;height:12px"></div>';
+
+  const cpmrn = patientTr.dataset.cpmrn;
+  const enc   = patientTr.dataset.enc || 1;
+
+  // Placeholder row while loading
+  const placeholderTr = document.createElement('tr');
+  placeholderTr.id = detailId;
+  placeholderTr.innerHTML = `<td colspan="6" class="p-0">
+    <div class="text-center py-3 small text-muted">
+      <div class="spinner-border spinner-border-sm text-primary me-2"></div>Loading model detail…
+    </div>
+  </td>`;
+  patientTr.insertAdjacentElement('afterend', placeholderTr);
+
+  try {
+    const d = await apiFetch(`/api/audit/patient/${encodeURIComponent(cpmrn)}/${enc}`);
+    placeholderTr.innerHTML = `<td colspan="6" class="p-0">${buildDetailPanel(d, detailId)}</td>`;
+    // Activate first tab
+    const firstTab = placeholderTr.querySelector('[data-tab]');
+    if (firstTab) switchAuditTab(firstTab, detailId);
+    btn.innerHTML = '<i class="bi bi-chevron-up"></i>';
+  } catch (e) {
+    placeholderTr.innerHTML = `<td colspan="6" class="text-danger text-center py-2 small">
+      Error loading detail: ${escHtml(String(e))}
+    </td>`;
+    btn.innerHTML = '<i class="bi bi-chevron-down"></i>';
+    console.error('togglePatientDetail', e);
+  }
+}
+
+function buildDetailPanel(d, panelId) {
+  const summaryHtml  = buildSummaryTab(d);
+  const problemsHtml = buildProblemsTab(d);
+  const reasoningHtml = buildReasoningTab(d);
+
+  return `<div style="background:#f8f9fa; border-top:1px solid #dee2e6; padding:10px 14px">
+    <div class="d-flex gap-3 border-bottom mb-2 pb-1" style="font-size:0.82rem">
+      <button class="btn btn-link btn-sm p-0 fw-semibold text-decoration-none"
+              data-tab="summary" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Summary</button>
+      <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+              data-tab="problems" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Problems &amp; next-checks</button>
+      <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+              data-tab="reasoning" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Reasoning history</button>
+      <span class="ms-auto text-muted" style="font-size:0.72rem">lazy · loaded on expand</span>
+    </div>
+    <div data-pane="summary" data-panel="${panelId}">${summaryHtml}</div>
+    <div data-pane="problems" data-panel="${panelId}" style="display:none">${problemsHtml}</div>
+    <div data-pane="reasoning" data-panel="${panelId}" style="display:none">${reasoningHtml}</div>
+  </div>`;
+}
+
+function switchAuditTab(btn, panelId) {
+  const detailTr = document.getElementById(panelId);
+  if (!detailTr) return;
+  // Deactivate all tabs
+  detailTr.querySelectorAll('[data-tab]').forEach(b => {
+    b.classList.remove('fw-semibold');
+    b.classList.add('text-muted');
+  });
+  btn.classList.add('fw-semibold');
+  btn.classList.remove('text-muted');
+  // Show the right pane
+  const tabName = btn.dataset.tab;
+  detailTr.querySelectorAll('[data-pane]').forEach(p => {
+    p.style.display = p.dataset.pane === tabName ? '' : 'none';
+  });
+}
+
+function buildSummaryTab(d) {
+  const lw  = d.lightweight_summary || '';
+  const run = d.running_summary || '';
+  const nar = d.narrative || '';
+  const actions = d.suggested_actions || [];
+
+  const lwHtml  = lw  ? `<div class="mb-2"><span class="text-muted" style="font-size:0.72rem">LIGHTWEIGHT SUMMARY</span><div style="font-size:0.82rem">${escHtml(lw)}</div></div>` : '';
+  const narHtml = nar ? `<div class="mb-2"><span class="text-muted" style="font-size:0.72rem">NARRATIVE</span><div style="font-size:0.82rem">${escHtml(nar)}</div></div>` : '';
+  const runHtml = run ? `<div class="mb-2"><span class="text-muted" style="font-size:0.72rem">RUNNING SUMMARY</span><div style="font-size:0.82rem;white-space:pre-wrap">${escHtml(run.slice(0, 600))}${run.length > 600 ? '…' : ''}</div></div>` : '';
+  const actHtml = actions.length
+    ? `<div class="mb-1"><span class="text-muted" style="font-size:0.72rem">SUGGESTED ACTIONS</span>
+       <ul class="mb-0 ps-3" style="font-size:0.82rem">${actions.map(a => `<li>${escHtml(typeof a === 'string' ? a : (a.action || JSON.stringify(a)))}</li>`).join('')}</ul></div>`
+    : '';
+
+  return lwHtml + narHtml + runHtml + actHtml || '<span class="text-muted small">No summary data for this run (latest run only).</span>';
+}
+
+function buildProblemsTab(d) {
+  const probs   = d.problems || [];
+  const resolved = d.resolved_problems || [];
+  const patProbs = d.patient_problems || [];
+
+  let html = '';
+
+  if (probs.length) {
+    html += `<div class="mb-2"><span class="text-muted" style="font-size:0.72rem">ACTIVE PROBLEMS (${probs.length})</span>`;
+    html += probs.map(p => {
+      const nc = patProbs.find(pp => pp.problem_name === p.name);
+      const ncInfo = nc && nc.next_check
+        ? ` <span class="badge bg-warning text-dark ms-1" style="font-size:0.68rem">next-check: ${escHtml(nc.next_check.label || nc.next_check.key || nc.next_check.type || '')}</span>`
+        : '';
+      return `<div style="font-size:0.82rem; padding:3px 0; border-bottom:1px solid #e9ecef">
+        <strong>${escHtml(p.name || '')}</strong>
+        <span class="badge ${statusBadgeClass(p.status)} ms-1" style="font-size:0.68rem">${escHtml(p.status || '')}</span>
+        ${ncInfo}
+        ${p.current_state ? `<div class="text-muted" style="font-size:0.75rem">${escHtml(p.current_state)}</div>` : ''}
+      </div>`;
+    }).join('');
+    html += '</div>';
+  }
+
+  if (resolved.length) {
+    html += `<div class="mb-2"><span class="text-muted" style="font-size:0.72rem">RESOLVED (${resolved.length})</span>`;
+    html += `<div style="font-size:0.8rem; color:#6c757d">${resolved.map(p => escHtml(p.name || p)).join(', ')}</div></div>`;
+  }
+
+  // Problems with active next_check from patient_problems
+  const withNc = patProbs.filter(p => p.next_check);
+  if (withNc.length) {
+    html += `<div class="mb-1"><span class="text-muted" style="font-size:0.72rem">ACTIVE NEXT-CHECKS (${withNc.length})</span>`;
+    html += withNc.map(p => {
+      const nc  = p.next_check;
+      const due = nc.due_after ? new Date(nc.due_after) : null;
+      const now = new Date();
+      const overdue = due && now > due;
+      return `<div style="font-size:0.8rem; padding:2px 0">
+        <strong>${escHtml(p.problem_name)}</strong> →
+        watching <em>${escHtml(nc.label || nc.key || nc.type || '?')}</em>
+        ${due ? `<span class="${overdue ? 'text-danger' : 'text-warning'}" style="font-size:0.75rem"> · due ${due.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}${overdue ? ' (overdue)' : ''}</span>` : ''}
+      </div>`;
+    }).join('');
+    html += '</div>';
+  }
+
+  return html || '<span class="text-muted small">No problems data (latest run only).</span>';
+}
+
+function buildReasoningTab(d) {
+  const patProbs = d.patient_problems || [];
+  if (!patProbs.length) return '<span class="text-muted small">No reasoning data (latest run only).</span>';
+
+  return patProbs.map(p => {
+    const assessments = (p.assessments || []).slice().reverse(); // newest first
+    if (!assessments.length) return '';
+    const rows = assessments.slice(0, 10).map(a => {
+      const ts = a.assessed_at ? new Date(a.assessed_at).toLocaleString() : '—';
+      const alerted = a.alerted ? '<span class="badge bg-danger ms-1" style="font-size:0.65rem">alerted</span>' : '';
+      const suppressed = (!a.alerted && a.should_alert === false && a.being_addressed)
+        ? '<span class="badge bg-secondary ms-1" style="font-size:0.65rem">suppressed</span>' : '';
+      const reason = a.addressed_evidence || a.alert_reason || '';
+      return `<tr style="font-size:0.76rem">
+        <td class="text-muted" style="white-space:nowrap; padding:3px 6px">${escHtml(ts)}</td>
+        <td style="padding:3px 6px">
+          <span class="badge ${statusBadgeClass(a.clinical_status)}" style="font-size:0.65rem">${escHtml(a.clinical_status || '?')}</span>
+          ${alerted}${suppressed}
+        </td>
+        <td style="padding:3px 6px; max-width:300px; font-size:0.75rem; color:#555">${escHtml(reason.slice(0, 150))}${reason.length > 150 ? '…' : ''}</td>
+      </tr>`;
+    }).join('');
+
+    return `<div class="mb-3">
+      <div class="fw-semibold mb-1" style="font-size:0.82rem">${escHtml(p.problem_name)}</div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" style="border:1px solid #dee2e6">
+          <thead style="font-size:0.72rem; color:#6c757d; background:#f1f3f5">
+            <tr><th style="padding:3px 6px">Assessed at</th><th style="padding:3px 6px">Status</th><th style="padding:3px 6px">Reasoning</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('') || '<span class="text-muted small">No assessment history found.</span>';
+}
+
+function statusBadgeClass(status) {
+  if (!status) return 'bg-secondary';
+  const s = String(status).toLowerCase();
+  if (s === 'critical')  return 'bg-danger';
+  if (s === 'worsening') return 'bg-warning text-dark';
+  if (s === 'stable')    return 'bg-secondary';
+  if (s === 'improving') return 'bg-success';
+  return 'bg-secondary';
+}

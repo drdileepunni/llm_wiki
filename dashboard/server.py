@@ -13,8 +13,9 @@ from .config_writer import save_app_setting, save_monitoring_protocol
 from .metrics import (
     get_summary, get_timeseries, get_by_problem,
     get_by_rater, get_cost, get_comments, get_ratings_per_alert,
-    get_alerts_per_run, get_runs,
+    get_alerts_per_run, get_runs, get_run_patient_audit,
 )
+from .audit import get_active_next_checks, get_patient_detail
 from .agreement import compute_agreement
 from .config_reader import (
     get_monitoring_protocols, get_lab_alert_rules,
@@ -48,6 +49,10 @@ def create_app() -> Flask:
     @app.route("/docs")
     def docs_page():
         return render_template("docs.html")
+
+    @app.route("/audit")
+    def audit_page():
+        return render_template("audit.html")
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -117,6 +122,35 @@ def create_app() -> Flask:
             return _ok(get_runs(*_date_params()))
         except Exception as e:
             log.exception("api_runs failed")
+            return _err(e)
+
+    @app.route("/api/metrics/run-audit")
+    def api_run_audit():
+        run_ts = request.args.get("run")
+        if not run_ts:
+            return _err("Missing 'run' query parameter (ISO timestamp)", 400)
+        try:
+            return _ok(get_run_patient_audit(run_ts))
+        except Exception as e:
+            log.exception("api_run_audit failed")
+            return _err(e)
+
+    # ── audit API ─────────────────────────────────────────────────────────────
+
+    @app.route("/api/audit/next-checks")
+    def api_audit_next_checks():
+        try:
+            return _ok(get_active_next_checks())
+        except Exception as e:
+            log.exception("api_audit_next_checks failed")
+            return _err(e)
+
+    @app.route("/api/audit/patient/<cpmrn>/<int:enc>")
+    def api_audit_patient(cpmrn: str, enc: int):
+        try:
+            return _ok(get_patient_detail(cpmrn, enc))
+        except Exception as e:
+            log.exception("api_audit_patient failed for %s enc=%d", cpmrn, enc)
             return _err(e)
 
     @app.route("/api/metrics/agreement")

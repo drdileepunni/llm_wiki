@@ -352,6 +352,46 @@ def get_runs(from_date: str | None = None, to_date: str | None = None) -> list[d
     return result
 
 
+# ── run patient audit ─────────────────────────────────────────────────────────
+
+def get_run_patient_audit(run_started_at: str) -> list[dict]:
+    """Return per-patient audit rows for a given run (identified by run_started_at ISO string)."""
+    sql = f"""
+    SELECT
+      CPMRN,
+      encounter,
+      pipeline_outcome,
+      pass1_tag,
+      pass1_needs_full,
+      pass2_outcome,
+      problem_details
+    FROM {fqn("pipeline_patient_runs")}
+    WHERE run_started_at = TIMESTAMP('{run_started_at}')
+    ORDER BY CPMRN
+    """
+    rows = query(sql)
+    result = []
+    for r in rows:
+        pd_raw = r.get("problem_details")
+        problems = []
+        if pd_raw:
+            try:
+                import json as _json
+                problems = _json.loads(pd_raw) if isinstance(pd_raw, str) else pd_raw
+            except Exception:
+                problems = []
+        result.append({
+            "CPMRN":            r.get("CPMRN", ""),
+            "encounter":        int(r.get("encounter") or 0),
+            "pipeline_outcome": r.get("pipeline_outcome", ""),
+            "pass1_tag":        r.get("pass1_tag", ""),
+            "pass1_needs_full": bool(r.get("pass1_needs_full", False)),
+            "pass2_outcome":    r.get("pass2_outcome", ""),
+            "problems":         problems,
+        })
+    return result
+
+
 # ── feedback comments ─────────────────────────────────────────────────────────
 
 def get_comments(limit: int = 50, from_date: str | None = None, to_date: str | None = None) -> list[dict]:

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Run Audit{% endblock %}
+
+{% block content %}
+
+<!-- ── Active next-checks banner (eager) ──────────────────────────────────── -->
+<div class="card mb-3" id="nc-card">
+  <div class="card-header card-header-sm d-flex align-items-center gap-2 flex-wrap">
+    <i class="bi bi-clock-history text-warning"></i>
+    <span class="fw-semibold">Active next-checks</span>
+    <span id="nc-badge-count" class="badge bg-warning text-dark" style="display:none"></span>
+    <span id="nc-badge-overdue" class="badge bg-danger" style="display:none"></span>
+    <span class="ms-auto text-muted small">eager · scanned on open</span>
+  </div>
+  <div id="nc-body" class="card-body p-0">
+    <div class="text-muted text-center py-3 small">Loading…</div>
+  </div>
+</div>
+
+<!-- ── Run picker + audit table ───────────────────────────────────────────── -->
+<div class="card">
+  <div class="card-header card-header-sm d-flex align-items-center gap-2 flex-wrap">
+    <span class="fw-semibold">Run Audit</span>
+    <select id="audit-run-picker" class="form-select form-select-sm ms-auto" style="max-width:360px">
+      <option value="">Loading runs…</option>
+    </select>
+    <span id="audit-run-summary" class="text-muted small"></span>
+  </div>
+
+  <!-- legend -->
+  <div class="px-3 pt-2 pb-1 d-flex gap-2 flex-wrap" style="font-size:0.74rem">
+    <span class="badge" style="background:#dc3545">alerted</span>
+    <span class="badge" style="background:#fd7e14">permissive_window</span>
+    <span class="badge" style="background:#6c757d">being_addressed / model_suppressed</span>
+    <span class="badge" style="background:#0d6efd">below_floor</span>
+    <span class="badge" style="background:#198754">cooldown</span>
+    <span class="badge" style="background:#6610f2">stale_*</span>
+    <span class="badge" style="background:#20c997">improving_trend</span>
+    <span class="ms-2 text-muted">· click row for model detail</span>
+  </div>
+
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0" id="tbl-audit">
+        <thead><tr>
+          <th style="width:18%">Patient</th>
+          <th style="width:10%">Pass 1</th>
+          <th style="width:22%">Why expensive triggered</th>
+          <th style="width:10%">Pass 2</th>
+          <th>Problems &amp; decisions</th>
+          <th style="width:32px"></th>
+        </tr></thead>
+        <tbody>
+          <tr><td colspan="6" class="text-muted text-center py-3">Loading runs…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>window.PAGE = 'audit';</script>
+{% endblock %}

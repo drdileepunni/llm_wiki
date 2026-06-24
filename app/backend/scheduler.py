@@ -211,6 +211,26 @@ def _run_live_pipeline(
         )
     status["force_expensive"] = force_expensive
 
+    # ── Gate 0: Empty chart — skip all LLM if chart has no data whatsoever ────
+    # A brand-new patient with no vitals, labs, or notes cannot be assessed.
+    # Sending an empty chart to pass1/pass2 wastes tokens and always returns
+    # "indeterminate" — hardcode skip instead and retry next cycle.
+    _has_any_vitals = bool(chart.get("vitals"))
+    _has_any_labs   = any(d.get("category") == "labs" for d in (chart.get("documents") or []))
+    _has_any_notes  = bool((chart.get("notes") or {}).get("finalNotes"))
+    if not _has_any_vitals and not _has_any_labs and not _has_any_notes and not _has_new_reports:
+        logger.info(
+            "pipeline: empty-chart gate — no vitals, labs, notes or reports for %s enc=%d, skipping LLM",
+            cpmrn, encounter,
+        )
+        status["pass1"] = "skipped_empty_chart"
+        status["pass2"] = "skipped_empty_chart"
+        db.snapshot_schedule.update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
+        )
+        return status
+
     # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
     next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
     if next_run_at is not None and now < next_run_at:
@@ -614,6 +634,117 @@ def _next_run_at(base, hours: int) -> datetime:
     return target.replace(minute=0, second=0, microsecond=0)
 
 
+def _write_patient_run_audit(
+    cpmrn: str,
+    encounter: int,
+    run_started_at: "datetime",
+    pipeline_status: dict,
+) -> None:
+    """Write per-patient-per-run rows to BQ: pipeline_patient_runs + patient_next_checks."""
+    try:
+        from backend.services.bq_store import get_bq_store
+        pass1 = pipeline_status.get("pass1") or {}
+        tracker = pipeline_status.get("problem_tracker") or {}
+        problem_details = tracker.get("problem_details") if isinstance(tracker, dict) else None
+        store = get_bq_store()
+        store.insert_patient_run({
+            "run_started_at":   run_started_at,
+            "CPMRN":            cpmrn,
+            "encounter":        encounter,
+            "pipeline_outcome": _derive_pipeline_outcome(pipeline_status),
+            "pass1_tag":        pass1.get("flag_reason", "") if isinstance(pass1, dict) else "",
+            "pass1_needs_full": bool(pass1.get("needs_full_analysis", False)) if isinstance(pass1, dict) else False,
+            "pass2_outcome":    str(pipeline_status.get("pass2", "")),
+            "problem_details":  problem_details,
+        })
+        # Write next_check state for each assessed problem.
+        if problem_details:
+            nc_rows = []
+            for pd in problem_details:
+                nc = pd.get("next_check") or {}
+                nc_type  = nc.get("type", "") if nc else ""
+                nc_key   = nc.get("vital_key") or nc.get("lab_name") or nc.get("key", "") if nc else ""
+                nc_label = nc.get("label", "") if nc else ""
+                due_raw  = nc.get("due_after") if nc else None
+                nc_rows.append({
+                    "run_started_at":  run_started_at,
+                    "CPMRN":           cpmrn,
+                    "encounter":       encounter,
+                    "problem_name":    pd.get("problem_name", ""),
+                    "nc_type":         nc_type,
+                    "nc_key":          nc_key,
+                    "nc_label":        nc_label,
+                    "due_after":       due_raw,
+                    "clinical_status": pd.get("clinical_status", ""),
+                })
+            store.insert_next_check_events(nc_rows)
+    except Exception:
+        logger.exception("scheduler: patient run audit BQ write failed for %s enc=%d", cpmrn, encounter)
+
+
+def _emit_discharge_next_check_closures(
+    cpmrn: str,
+    encounter: int,
+    run_started_at: "datetime",
+    db: Any,
+) -> None:
+    """
+    On discharge, write NULL due_after rows for all open next_checks so the BQ
+    dashboard query knows they are closed. Reads current patient_problems from GCS.
+    """
+    try:
+        from backend.services.bq_store import get_bq_store
+        problems = list(db["patient_problems"].find({"CPMRN": cpmrn, "encounter": encounter}))
+        if not problems:
+            return
+        nc_rows = []
+        for pd in problems:
+            nc = pd.get("next_check")
+            if not nc:
+                continue  # already cleared — no open window to close
+            nc_rows.append({
+                "run_started_at":  run_started_at,
+                "CPMRN":           cpmrn,
+                "encounter":       encounter,
+                "problem_name":    pd.get("problem_name", ""),
+                "nc_type":         None,
+                "nc_key":          None,
+                "nc_label":        None,
+                "due_after":       None,  # explicit closure
+                "clinical_status": pd.get("clinical_status", ""),
+            })
+        if nc_rows:
+            get_bq_store().insert_next_check_events(nc_rows)
+            logger.info(
+                "scheduler: emitted %d next_check closure row(s) for discharged %s enc=%d",
+                len(nc_rows), cpmrn, encounter,
+            )
+    except Exception:
+        logger.exception(
+            "scheduler: next_check closure BQ write failed for discharged %s enc=%d", cpmrn, encounter,
+        )
+
+
+def _derive_pipeline_outcome(status: dict) -> str:
+    """Summarise pipeline_status into a short outcome string for the audit table."""
+    if not status:
+        return "unknown"
+    if "error" in status:
+        return f"error:{status['error']}"
+    pass2 = status.get("pass2", "")
+    if pass2 == "skipped_by_pass1":
+        return "cheap"
+    pt = status.get("problem_tracker") or {}
+    if isinstance(pt, dict) and pt.get("alerts_sent"):
+        return "alerted"
+    pass1 = status.get("pass1") or {}
+    if isinstance(pass1, dict) and pass1.get("needs_full_analysis"):
+        return "expensive_no_alert"
+    if pass2:
+        return f"pass2:{pass2}"
+    return "ok"
+
+
 def _run_fn_detector_step(
     cpmrn: str,
     encounter: int,
@@ -800,6 +931,8 @@ def _collect_all(max_patients: int | None = None):
                             {"CPMRN": cpmrn, "encounter": encounter},
                             {"$set": {"active": False, "deactivated_reason": "discharged"}},
                         )
+                        # Emit clearing rows to close any open next_checks in BQ.
+                        _emit_discharge_next_check_closures(cpmrn, encounter, _last_run_at, db)
                         _last_run_results.append({"cpmrn": cpmrn, "status": "skipped_discharged"})
                         continue
 
@@ -852,6 +985,7 @@ def _collect_all(max_patients: int | None = None):
                     )
                     if report_result.get("card_sent"):
                         report_cards_sent += 1
+                    _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status)
                     _last_run_results.append({
                         "cpmrn": cpmrn, "status": "pipeline_on_existing_snapshot",
                         "pipeline": pipeline_status,
@@ -898,6 +1032,7 @@ def _collect_all(max_patients: int | None = None):
                 else:
                     pipeline_status = {"error": "snapshot_not_found"}
 
+                _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status)
                 _last_run_results.append({
                     "cpmrn": cpmrn, "status": "ok",
                     **result,

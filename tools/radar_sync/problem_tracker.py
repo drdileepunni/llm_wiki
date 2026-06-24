@@ -2656,6 +2656,9 @@ def track_problems(
     # Alerting is deferred so all problems for this patient go in one batched message.
     to_alert: list[tuple[dict, str]] = []   # (assessment, alert_id)
 
+    # Audit dict — one entry per assessed problem, returned for dashboard run-audit table.
+    _problem_audit: dict[str, dict] = {}
+
     # Pre-compute vital staleness once for the whole batch.
     # Used by the hard suppression gate below — avoids a DB call per problem.
     _vital_is_stale = False
@@ -2681,6 +2684,17 @@ def track_problems(
         will_alert   = False
         alert_id     = ""
 
+        _problem_audit[problem_name] = {
+            "problem_name":    problem_name,
+            "clinical_status": assessment.get("clinical_status", "stable"),
+            "model_should_alert": should_alert,
+            "alert_sent":      False,
+            "suppression_rule": "none",
+            "alert_reason":    assessment.get("alert_reason", ""),
+            "tracker_reasoning": assessment.get("addressed_evidence", "") or assessment.get("alert_reason", ""),
+            "next_check":      assessment.get("next_check"),
+        }
+
         # Hard gate: being_addressed=True must always mean should_alert=False.
         # If the model set both (it sometimes does for "critical" acute events),
         # override here — alerting on something already being actively managed
@@ -2694,6 +2708,7 @@ def track_problems(
                 problem_name, cpmrn, encounter,
             )
             alerts_suppressed.append(problem_name)
+            _problem_audit[problem_name]["suppression_rule"] = "being_addressed"
             _upsert_problem(cpmrn, encounter, assessment, now, False, db)
             continue
 
@@ -2708,6 +2723,7 @@ def track_problems(
             _gate_verdict = _gate.get("verdict", "")
             if _gate_verdict == "permissive_active":
                 alerts_suppressed.append(problem_name)
+                _problem_audit[problem_name]["suppression_rule"] = f"permissive_window:{_gate.get('scenario', '?')}"
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d "
                     "(permissive_active — scenario=%s)",
@@ -2759,6 +2775,7 @@ def track_problems(
                     _gcs_delta = _get_gcs_6h_delta(cpmrn, encounter)
                     if _gcs_delta is not None and _gcs_delta >= 0:
                         alerts_suppressed.append(problem_name)
+                        _problem_audit[problem_name]["suppression_rule"] = f"gcs_stability:delta={_gcs_delta:+d}"
                         logger.info(
                             "problem_tracker: alert suppressed for '%s' %s enc=%d "
                             "(code-side GCS gate — 6h delta=%+d, stable/improving)",
@@ -2779,6 +2796,7 @@ def track_problems(
 
             if clinical_status not in ("worsening", "critical"):
                 alerts_suppressed.append(problem_name)
+                _problem_audit[problem_name]["suppression_rule"] = f"below_floor:{clinical_status}"
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d "
                     "(status=%s — only worsening/critical may alert)",
@@ -2786,12 +2804,14 @@ def track_problems(
                 )
             elif _should_suppress_alert(cpmrn, encounter, problem_name, db):
                 alerts_suppressed.append(problem_name)
+                _problem_audit[problem_name]["suppression_rule"] = "cooldown"
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d (cooldown)",
                     problem_name, cpmrn, encounter,
                 )
             elif _all_cited_notes_stale(assessment, snapshot_at):
                 alerts_suppressed.append(problem_name)
+                _problem_audit[problem_name]["suppression_rule"] = "stale_notes"
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d "
                     "(all cited notes >%dh old — chronic audit issue, not urgent alert)",
@@ -2802,6 +2822,7 @@ def track_problems(
                 # was tracking a vital-sign problem (tachycardia, hypotension, etc.)
                 # whose driving data is too old to represent current haemodynamic state.
                 alerts_suppressed.append(problem_name)
+                _problem_audit[problem_name]["suppression_rule"] = "stale_vitals"
                 logger.info(
                     "problem_tracker: alert suppressed for '%s' %s enc=%d "
                     "(stale vitals — next_check.type=vital, vitals >%dh old)",
@@ -2824,6 +2845,7 @@ def track_problems(
                         logger.exception("problem_tracker: lab staleness check failed for '%s' %s enc=%d", problem_name, cpmrn, encounter)
                 if _lab_is_stale:
                     alerts_suppressed.append(problem_name)
+                    _problem_audit[problem_name]["suppression_rule"] = f"stale_lab:{nc_lab}"
                     logger.info(
                         "problem_tracker: alert suppressed for '%s' %s enc=%d "
                         "(stale lab '%s' — >%dh old, limit %dh)",
@@ -2841,6 +2863,7 @@ def track_problems(
                                 _lv_tol = max(0.25 * _lv_actual, 3.0)
                                 if abs(_lv_claimed - _lv_actual) > _lv_tol:
                                     alerts_suppressed.append(problem_name)
+                                    _problem_audit[problem_name]["suppression_rule"] = f"lab_value_mismatch:{_lv_name}"
                                     logger.warning(
                                         "problem_tracker: alert suppressed for '%s' %s enc=%d — "
                                         "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
@@ -2855,6 +2878,8 @@ def track_problems(
                             )
                     alert_id   = str(_uuid4())
                     will_alert = True
+                    _problem_audit[problem_name]["alert_sent"] = True
+                    _problem_audit[problem_name]["suppression_rule"] = "alerted"
                     assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
                     if _latest_vt is not None and snapshot_at is not None:
                         _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
@@ -2872,6 +2897,7 @@ def track_problems(
                 if _vk and _latest_vt is not None:
                     if _vital_improved_since_snapshot(cpmrn, encounter, _vk, problem_name, _latest_vt):
                         alerts_suppressed.append(problem_name)
+                        _problem_audit[problem_name]["suppression_rule"] = f"improving_trend:{_vk}"
                         logger.info(
                             "problem_tracker: alert suppressed for '%s' %s enc=%d "
                             "(pre-send vital check — %s improved since snapshot)",
@@ -2891,6 +2917,7 @@ def track_problems(
                             _lv_tol = max(0.25 * _lv_actual, 3.0)
                             if abs(_lv_claimed - _lv_actual) > _lv_tol:
                                 alerts_suppressed.append(problem_name)
+                                _problem_audit[problem_name]["suppression_rule"] = f"lab_value_mismatch:{_lv_name}"
                                 logger.warning(
                                     "problem_tracker: alert suppressed for '%s' %s enc=%d — "
                                     "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
@@ -2905,6 +2932,8 @@ def track_problems(
                         )
                 alert_id   = str(_uuid4())
                 will_alert = True
+                _problem_audit[problem_name]["alert_sent"] = True
+                _problem_audit[problem_name]["suppression_rule"] = "alerted"
                 # Inject snapshot_at so the card builder can show timestamps in IST
                 assessment["_snapshot_at"] = snapshot_at.isoformat() if snapshot_at else None
                 if _latest_vt is not None and snapshot_at is not None:
@@ -2914,6 +2943,10 @@ def track_problems(
                 alerts_sent.append(problem_name)
 
         _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db)
+
+        # For problems where the model itself set should_alert=False, record the model reason.
+        if not assessment.get("should_alert", False) and _problem_audit[problem_name]["suppression_rule"] == "none":
+            _problem_audit[problem_name]["suppression_rule"] = "model_suppressed"
 
         # Suppression record — worsening/critical problems where the model
         # found a documented plan and therefore did NOT alert.
@@ -3017,4 +3050,5 @@ def track_problems(
         "problems_assessed": len(final_assessments),
         "alerts_sent":       alerts_sent,
         "alerts_suppressed": alerts_suppressed,
+        "problem_details":   list(_problem_audit.values()),
     }

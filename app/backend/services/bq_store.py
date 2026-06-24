@@ -377,6 +377,21 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.report_interpret_feedback` (
 OPTIONS (description = "Clinician 1-5 usefulness ratings from report-interpret chat cards")
 """
 
+_DDL["pipeline_patient_runs"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.pipeline_patient_runs` (
+  run_started_at   TIMESTAMP,
+  CPMRN            STRING,
+  encounter        INT64,
+  pipeline_outcome STRING,
+  pass1_tag        STRING,
+  pass1_needs_full BOOL,
+  pass2_outcome    STRING,
+  problem_details  STRING,
+  created_at       TIMESTAMP
+)
+OPTIONS (description = "Per-patient-per-run audit trace for the dashboard run-audit table")
+"""
+
 _DDL["fn_adjudications"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.fn_adjudications` (
   record_id        STRING,
@@ -390,6 +405,22 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.fn_adjudications` (
   encounter        INT64
 )
 OPTIONS (description = "FN adjudications from review UI")
+"""
+
+_DDL["patient_next_checks"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.patient_next_checks` (
+  run_started_at  TIMESTAMP,
+  CPMRN           STRING,
+  encounter       INT64,
+  problem_name    STRING,
+  nc_type         STRING,
+  nc_key          STRING,
+  nc_label        STRING,
+  due_after       TIMESTAMP,
+  clinical_status STRING,
+  created_at      TIMESTAMP
+)
+OPTIONS (description = "Per-problem next_check state captured at each pipeline run — NULL due_after means cleared/resolved")
 """
 
 
@@ -1052,6 +1083,71 @@ class BQStudyStore:
         ])
 
     # ── report_interpret ──────────────────────────────────────────────────────
+
+    def insert_patient_run(self, doc: dict):
+        """Insert one per-patient-per-run audit row."""
+        self._ensure_table("pipeline_patient_runs")
+        sql = f"""
+        INSERT INTO {self._fqn("pipeline_patient_runs")}
+          (run_started_at, CPMRN, encounter, pipeline_outcome, pass1_tag,
+           pass1_needs_full, pass2_outcome, problem_details, created_at)
+        VALUES
+          (@run_started_at, @CPMRN, @encounter, @pipeline_outcome, @pass1_tag,
+           @pass1_needs_full, @pass2_outcome, @problem_details, @created_at)
+        """
+        self._execute(sql, [
+            bigquery.ScalarQueryParameter("run_started_at",   "TIMESTAMP", _dt_to_iso(doc.get("run_started_at"))),
+            bigquery.ScalarQueryParameter("CPMRN",            "STRING",    doc.get("CPMRN", "")),
+            bigquery.ScalarQueryParameter("encounter",        "INT64",     doc.get("encounter", 1)),
+            bigquery.ScalarQueryParameter("pipeline_outcome", "STRING",    doc.get("pipeline_outcome", "")),
+            bigquery.ScalarQueryParameter("pass1_tag",        "STRING",    doc.get("pass1_tag", "")),
+            bigquery.ScalarQueryParameter("pass1_needs_full", "BOOL",      bool(doc.get("pass1_needs_full", False))),
+            bigquery.ScalarQueryParameter("pass2_outcome",    "STRING",    doc.get("pass2_outcome", "")),
+            bigquery.ScalarQueryParameter("problem_details",  "STRING",    _to_json_col(doc.get("problem_details"))),
+            bigquery.ScalarQueryParameter("created_at",       "TIMESTAMP", _now_iso()),
+        ])
+
+    def insert_next_check_events(self, rows: list[dict]) -> int:
+        """
+        Write one row per problem per run to patient_next_checks.
+
+        Each row captures the next_check state after this run. Pass due_after=None
+        to emit a clearing row (problem resolved, or patient discharged).
+        Returns count of rows successfully inserted.
+        """
+        if not rows:
+            return 0
+        self._ensure_table("patient_next_checks")
+        sql = f"""
+        INSERT INTO {self._fqn("patient_next_checks")}
+          (run_started_at, CPMRN, encounter, problem_name,
+           nc_type, nc_key, nc_label, due_after, clinical_status, created_at)
+        VALUES
+          (@run_started_at, @CPMRN, @encounter, @problem_name,
+           @nc_type, @nc_key, @nc_label, @due_after, @clinical_status, @created_at)
+        """
+        written = 0
+        for row in rows:
+            try:
+                self._execute(sql, [
+                    bigquery.ScalarQueryParameter("run_started_at",  "TIMESTAMP", _dt_to_iso(row.get("run_started_at"))),
+                    bigquery.ScalarQueryParameter("CPMRN",           "STRING",    row.get("CPMRN", "")),
+                    bigquery.ScalarQueryParameter("encounter",       "INT64",     row.get("encounter", 1)),
+                    bigquery.ScalarQueryParameter("problem_name",    "STRING",    row.get("problem_name", "")),
+                    bigquery.ScalarQueryParameter("nc_type",         "STRING",    row.get("nc_type") or ""),
+                    bigquery.ScalarQueryParameter("nc_key",          "STRING",    row.get("nc_key") or ""),
+                    bigquery.ScalarQueryParameter("nc_label",        "STRING",    row.get("nc_label") or ""),
+                    bigquery.ScalarQueryParameter("due_after",       "TIMESTAMP", _dt_to_iso(row.get("due_after"))),
+                    bigquery.ScalarQueryParameter("clinical_status", "STRING",    row.get("clinical_status") or ""),
+                    bigquery.ScalarQueryParameter("created_at",      "TIMESTAMP", _now_iso()),
+                ])
+                written += 1
+            except Exception:
+                log.exception(
+                    "bq_store: insert_next_check_events row failed for %s enc=%d problem=%s",
+                    row.get("CPMRN"), row.get("encounter"), row.get("problem_name"),
+                )
+        return written
 
     def insert_report_interpret(self, doc: dict) -> str:
         """Insert one report-interpretation audit row. Returns the report_id."""
