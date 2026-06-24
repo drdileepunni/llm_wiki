@@ -194,6 +194,14 @@ window and continues monitoring silently. Never alert on a next_check that is no
 And do NOT alert merely because a problem is worsening/critical and has a plan — trust the plan
 unless Step 5 fires.
 
+HYPERGLYCEMIA EXCEPTION — glucose-driven problems (Hyperglycemia, Uncontrolled glucose, Diabetes
+with poor control, etc.) always require an insulin dose decision at the time the glucose result
+lands. For these problems: skip Steps 3 and 4 entirely (note freshness and response buffer do
+NOT apply). Always set should_alert=True whenever the glucose is above the hyperglycemia
+threshold, regardless of whether a plan note exists or how recently it was written. The insulin
+recommendation tool will populate the dose suggestion — your job is to ensure the alert fires
+so the clinician receives the recommendation card.
+
 ════════════════════════════════════════════════════════════════════════
 STEP 0 — EVIDENCE-TYPE GATES  (criteria for "alert-worthy?")
 ════════════════════════════════════════════════════════════════════════

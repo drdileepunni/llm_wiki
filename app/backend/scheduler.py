@@ -301,6 +301,91 @@ def _run_live_pipeline(
             except Exception:
                 logger.exception("pipeline: vital-normal gate check failed for %s enc=%d — continuing", cpmrn, encounter)
 
+    # ── Gate 2.6: Glucose-only gate — bypass full pipeline for standalone glucose labs ─
+    # Fires when: delta has only new glucose-named lab docs, no vitals/notes/report_findings,
+    # no forced recheck, no new reports. Routes directly to insulin_advice → alert card,
+    # skipping summary update, Pass 1, status_classifier, and problem_tracker entirely.
+    if (
+        not force_expensive
+        and not _has_new_reports
+        and not status.get("delta_gate") == "bypassed_forced"
+    ):
+        _gl_new_vitals = delta.get("new_vitals") or []
+        _gl_new_labs   = delta.get("new_labs") or []
+        _gl_new_notes  = delta.get("new_notes") or []
+        _gl_new_rf     = delta.get("new_report_findings") or []
+        _glucose_only  = (
+            bool(_gl_new_labs)
+            and not _gl_new_vitals
+            and not _gl_new_notes
+            and not _gl_new_rf
+            and all(_is_glucose_lab(d) for d in _gl_new_labs)
+        )
+        if _glucose_only:
+            try:
+                import uuid as _uuid
+                from tools.radar_sync.insulin_advice import gather_inputs as _gi, attach_insulin_order as _aio
+                from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
+
+                engine_input, _ = _gi(cpmrn, encounter)
+                if engine_input.get("GRBS"):
+                    grbs_val = int(engine_input["GRBS"][0])
+                    assessment = {
+                        "problem_name":    "Hyperglycemia",
+                        "clinical_status": "worsening",
+                        "should_alert":    True,
+                        "being_addressed": False,
+                        "alert_title":     f"Hyperglycemia — glucose {grbs_val} mg/dL",
+                        "alert_reason":    (
+                            f"New glucose result: {grbs_val} mg/dL. "
+                            "Insulin recommendation below."
+                        ),
+                        "note_vs_objective": "",
+                    }
+                    _aio(cpmrn, encounter, assessment)
+                    existing_ctx = ctx.get("structured_summary") or {}
+                    recipients = get_alert_recipients(db)
+                    if recipients:
+                        send_batch_alert_cards(
+                            cpmrn, encounter,
+                            [(assessment, _uuid.uuid4().hex)],
+                            existing_ctx,
+                            recipients,
+                        )
+                        logger.info(
+                            "pipeline: glucose-only gate — alert sent for %s enc=%d (glucose %d mg/dL)",
+                            cpmrn, encounter, grbs_val,
+                        )
+                    else:
+                        logger.warning(
+                            "pipeline: glucose-only gate — no recipients configured for %s enc=%d",
+                            cpmrn, encounter,
+                        )
+                    status["glucose_only_gate"] = "routed"
+                    status["pass1"] = "skipped_glucose_only"
+                    status["pass2"] = "skipped_glucose_only"
+                    db.snapshot_schedule.update_one(
+                        {"CPMRN": cpmrn, "encounter": encounter},
+                        {"$set": {
+                            "last_llm_run_at": snapshot_at,
+                            "next_run_at":     _next_run_at(snapshot_at, 1),
+                        }},
+                    )
+                    new_structured = ctx.get("structured_summary") or {}
+                    _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+                    return status
+                else:
+                    logger.warning(
+                        "pipeline: glucose-only gate — no glucose value retrievable for %s enc=%d, falling through",
+                        cpmrn, encounter,
+                    )
+                    status["glucose_only_gate"] = "no_glucose_value"
+            except Exception:
+                logger.exception(
+                    "pipeline: glucose-only gate failed for %s enc=%d — falling through to full pipeline",
+                    cpmrn, encounter,
+                )
+
     # ── Forced-recheck shortcut (no new data) ────────────────────────────────
     # When the delta gate was bypassed by a forced follow-up but there is genuinely
     # no new data, skip summary+pass-1 and run problem_tracker directly using the
@@ -490,6 +575,18 @@ def _run_live_pipeline(
     _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
 
     return status
+
+
+_GLUCOSE_LAB_KEYWORDS = (
+    "glucose", "rbs", "cbg", "grbs", "blood glucose",
+    "blood sugar", "random blood glucose", "random blood sugar",
+)
+
+
+def _is_glucose_lab(lab_doc: dict) -> bool:
+    """True if the lab document represents a standalone glucose test."""
+    name = (lab_doc.get("name") or "").lower()
+    return any(kw in name for kw in _GLUCOSE_LAB_KEYWORDS)
 
 
 def _next_run_at(base, hours: int) -> datetime:
