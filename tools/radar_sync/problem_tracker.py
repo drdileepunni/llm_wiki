@@ -24,6 +24,7 @@ next_check timing (hardcoded):
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from uuid import uuid4 as _uuid4
@@ -2195,10 +2196,17 @@ def track_problems(
     snapshot_at: datetime,
     screener_flag: str = "",
     focus: list[dict] | None = None,
+    delta: dict | None = None,
 ) -> dict:
     """
     Run the problem tracker ReAct loop for one patient.
     Returns a status dict for the scheduler result entry.
+
+    delta: the extract_delta() output for this cycle. When provided:
+      - Phase A: a "DELTA THIS RUN" header is prepended to the user message to steer
+        LLM attention toward what actually changed.
+      - Phase B: only category rule blocks relevant to the delta are injected.
+      - Phase C: (shadow mode or active) problem list is restricted to blast radius.
     """
     import sys
     from pathlib import Path
@@ -2247,6 +2255,39 @@ def track_problems(
         else:
             logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
             return {"problem_tracker": "no_problems"}
+
+    # ── Phase C — blast-radius scoping (shadow-mode by default) ─────────────────
+    # Compute which problems the delta could plausibly move. In shadow mode this
+    # only logs; when DELTA_SCOPE_PRUNE=1 it actively restricts the assessed list.
+    _prune_active = os.environ.get("DELTA_SCOPE_PRUNE", "").strip() == "1"
+    if delta:
+        try:
+            from tools.radar_sync.delta_scope import blast_radius_problems, classify_delta
+            _scope = classify_delta(delta)
+            if not _scope.is_wildcard and problems:
+                _focus_names = {f["problem_name"] for f in (focus or [])}
+                _hot = blast_radius_problems(delta, problems)
+                _hot_names = {p["name"] for p in _hot}
+                _cold = [p for p in problems if p["name"] not in _hot_names and p["name"] not in _focus_names]
+                _assess = _hot + [p for p in problems if p["name"] in _focus_names and p["name"] not in _hot_names]
+                if _cold:
+                    logger.info(
+                        "problem_tracker: delta-scope %s — would_assess=%s would_prune=%s for %s enc=%d",
+                        "ACTIVE" if _prune_active else "shadow",
+                        [p["name"] for p in _assess],
+                        [p["name"] for p in _cold],
+                        cpmrn, encounter,
+                    )
+                    if _prune_active:
+                        if not _assess:
+                            logger.info(
+                                "problem_tracker: delta-scope active — no hot problems for %s enc=%d, skipping",
+                                cpmrn, encounter,
+                            )
+                            return {"problem_tracker": "no_hot_problems"}
+                        problems = _assess
+        except Exception:
+            logger.exception("problem_tracker: delta-scope failed for %s enc=%d — assessing all", cpmrn, encounter)
 
     # Gate: skip entirely if no clinical data has been recorded yet.
     # Newly admitted patients may have no vitals/labs; alerting on data absence is not actionable.
@@ -2426,23 +2467,39 @@ def track_problems(
         logger.exception("problem_tracker: symptom_alert_rules injection failed for %s enc=%d", cpmrn, encounter)
         _symptom_alert_block = ""
 
+    # ── Phase A: delta attention header ──────────────────────────────────────
+    _delta_header = ""
+    _delta_cats: "set[str] | None" = None
+    if delta:
+        try:
+            from tools.radar_sync.delta_scope import delta_summary_line, relevant_categories as _rel_cats
+            _delta_header = delta_summary_line(delta)
+            _delta_cats = _rel_cats(delta)
+            logger.info(
+                "problem_tracker: delta-scope categories=%s for %s enc=%d",
+                sorted(_delta_cats) if _delta_cats != {"*"} else ["*"],
+                cpmrn, encounter,
+            )
+        except Exception:
+            logger.exception("problem_tracker: delta_scope header failed for %s enc=%d", cpmrn, encounter)
+
     # ── Category-specific rule blocks — dynamic system prompt injection ───────
-    # Inject only the domain rule blocks (neuro/respiratory/renal/symptom/causal)
-    # relevant to the problems this patient actually has. Keeps the always-on core
-    # focused and avoids attention dilution from irrelevant domain rules.
+    # Phase B: also filter by delta_categories so only blocks relevant to what
+    # actually arrived this run are injected. Wildcard delta (notes/reports) passes
+    # {"*"} → unchanged behaviour. No delta → None → unchanged behaviour.
     try:
         from tools.radar_sync.clinical_rule_blocks import (
             filter_blocks_for_patient as _filter_rule_blocks,
             format_prompt_block as _format_rule_blocks,
             matched_categories as _matched_categories,
         )
-        _category_blocks = _filter_rule_blocks(problems, prefetch_block)
+        _category_blocks = _filter_rule_blocks(problems, prefetch_block, delta_categories=_delta_cats)
         _category_block = _format_rule_blocks(_category_blocks)
         if _category_blocks:
             logger.info(
                 "problem_tracker: clinical_rule_blocks — %d block(s) for %s enc=%d (%s)",
                 len(_category_blocks), cpmrn, encounter,
-                ", ".join(_matched_categories(problems, prefetch_block)),
+                ", ".join(_matched_categories(problems, prefetch_block, delta_categories=_delta_cats)),
             )
     except Exception:
         logger.exception("problem_tracker: clinical_rule_blocks injection failed for %s enc=%d", cpmrn, encounter)
@@ -2477,6 +2534,7 @@ def track_problems(
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        + (f"{_delta_header}\n\n" if _delta_header else "")
         + (f"{forced_block}\n\n" if forced_block else "")
         + (f"CLINICAL CONTEXT RULES FOR THIS PATIENT:\n{context_overrides}\n\n"
            if context_overrides else "")

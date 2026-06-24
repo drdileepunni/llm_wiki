@@ -403,6 +403,7 @@ def _run_live_pipeline(
                 cpmrn, encounter, new_structured, snapshot_at,
                 screener_flag="",
                 focus=_overdue,
+                delta=delta,
             )
             status["problem_tracker"] = tracker_result
             logger.info(
@@ -530,7 +531,7 @@ def _run_live_pipeline(
     if pass1 is None or pass1.needs_full_analysis:
         try:
             from tools.radar_sync.status_classifier import classify_statuses
-            new_structured = classify_statuses(cpmrn, encounter, new_structured)
+            new_structured = classify_statuses(cpmrn, encounter, new_structured, delta=delta)
             status["classifier"] = "ok"
             logger.info("pipeline: status classification done for %s enc=%d", cpmrn, encounter)
         except Exception:
@@ -564,6 +565,7 @@ def _run_live_pipeline(
             cpmrn, encounter, new_structured, snapshot_at,
             screener_flag=screener_flag,
             focus=_overdue if _overdue else None,
+            delta=delta,
         )
         status["problem_tracker"] = tracker_result
         logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)

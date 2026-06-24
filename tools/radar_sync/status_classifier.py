@@ -871,11 +871,14 @@ def _run_tool(name: str, args: dict, cpmrn: str, encounter: int) -> str:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> dict:
+def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict, delta: dict | None = None) -> dict:
     """
     Run a reasoning model over the draft PatientSummary.
     Only problems currently labelled worsening/critical are reviewed.
     Returns an updated structured_summary with verified statuses.
+
+    delta: when provided, a "DELTA THIS RUN" header is prepended to the user message
+    to steer the model's attention toward what actually changed this cycle.
     """
     import sys
     from pathlib import Path
@@ -975,9 +978,18 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict) -> d
         for i, p in enumerate(candidates)
     )
 
+    _delta_header = ""
+    if delta:
+        try:
+            from tools.radar_sync.delta_scope import delta_summary_line
+            _delta_header = delta_summary_line(delta) + "\n\n"
+        except Exception:
+            pass
+
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n\n"
-        f"The following problems were preliminarily labelled WORSENING or CRITICAL "
+        + _delta_header
+        + f"The following problems were preliminarily labelled WORSENING or CRITICAL "
         f"from a single chart snapshot. Please verify each by checking trend data.\n\n"
         f"{prefetch_block}\n"
         f"Problems to verify:\n{problem_block}\n\n"

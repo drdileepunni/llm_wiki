@@ -139,7 +139,11 @@ def has_secondary_problem(problems: list[dict]) -> bool:
     return any(p.get("cause") for p in problems)
 
 
-def filter_blocks_for_patient(problems: list[dict], prefetch_block: str = "") -> list[str]:
+def filter_blocks_for_patient(
+    problems: list[dict],
+    prefetch_block: str = "",
+    delta_categories: "set[str] | None" = None,
+) -> list[str]:
     """
     Return the category blocks relevant to this patient.
 
@@ -147,14 +151,23 @@ def filter_blocks_for_patient(problems: list[dict], prefetch_block: str = "") ->
     names/causes OR in the pre-fetched vital/lab trends (prefetch_block) — the same
     dual signal lab_alert_rules uses. The causal/secondary block is added whenever
     any problem has a `cause`, independent of keywords.
+
+    delta_categories: when provided and not {"*"}, further restrict to blocks whose
+    category name is in this set (Phase B scoping). {"*"} or None → no restriction
+    (wildcard delta or no delta available).
     """
     haystack = _problem_text(problems)
     if prefetch_block:
         haystack += " " + prefetch_block.lower()
 
+    # None or {"*"} = no delta-axis restriction
+    restrict = delta_categories is not None and delta_categories != {"*"}
+
     blocks: list[str] = []
-    for _category, (keywords, text) in _CATEGORIES.items():
+    for category, (keywords, text) in _CATEGORIES.items():
         if any(kw in haystack for kw in keywords):
+            if restrict and category not in delta_categories:
+                continue  # delta didn't bring data of this type — skip
             blocks.append(text)
 
     if has_secondary_problem(problems):
@@ -163,12 +176,20 @@ def filter_blocks_for_patient(problems: list[dict], prefetch_block: str = "") ->
     return blocks
 
 
-def matched_categories(problems: list[dict], prefetch_block: str = "") -> list[str]:
-    """Names of matched categories — for logging/observability (mirrors lab_alert_rules logs)."""
+def matched_categories(
+    problems: list[dict],
+    prefetch_block: str = "",
+    delta_categories: "set[str] | None" = None,
+) -> list[str]:
+    """Names of matched categories after delta-axis filtering — for logging."""
     haystack = _problem_text(problems)
     if prefetch_block:
         haystack += " " + prefetch_block.lower()
-    cats = [c for c, (kws, _t) in _CATEGORIES.items() if any(kw in haystack for kw in kws)]
+    restrict = delta_categories is not None and delta_categories != {"*"}
+    cats = [
+        c for c, (kws, _t) in _CATEGORIES.items()
+        if any(kw in haystack for kw in kws) and (not restrict or c in delta_categories)
+    ]
     if has_secondary_problem(problems):
         cats.append("causal")
     return cats
