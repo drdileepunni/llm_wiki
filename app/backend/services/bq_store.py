@@ -387,9 +387,21 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.pipeline_patient_runs` (
   pass1_needs_full BOOL,
   pass2_outcome    STRING,
   problem_details  STRING,
+  delta_vitals     INT64,
+  delta_labs       INT64,
+  delta_notes      INT64,
+  delta_reports    INT64,
   created_at       TIMESTAMP
 )
 OPTIONS (description = "Per-patient-per-run audit trace for the dashboard run-audit table")
+"""
+
+_ALTER_DDL["pipeline_patient_runs"] = f"""
+ALTER TABLE `{_PROJECT}.{_DATASET}.pipeline_patient_runs`
+ADD COLUMN IF NOT EXISTS delta_vitals  INT64,
+ADD COLUMN IF NOT EXISTS delta_labs    INT64,
+ADD COLUMN IF NOT EXISTS delta_notes   INT64,
+ADD COLUMN IF NOT EXISTS delta_reports INT64
 """
 
 _DDL["fn_adjudications"] = f"""
@@ -1090,10 +1102,12 @@ class BQStudyStore:
         sql = f"""
         INSERT INTO {self._fqn("pipeline_patient_runs")}
           (run_started_at, CPMRN, encounter, pipeline_outcome, pass1_tag,
-           pass1_needs_full, pass2_outcome, problem_details, created_at)
+           pass1_needs_full, pass2_outcome, problem_details,
+           delta_vitals, delta_labs, delta_notes, delta_reports, created_at)
         VALUES
           (@run_started_at, @CPMRN, @encounter, @pipeline_outcome, @pass1_tag,
-           @pass1_needs_full, @pass2_outcome, @problem_details, @created_at)
+           @pass1_needs_full, @pass2_outcome, @problem_details,
+           @delta_vitals, @delta_labs, @delta_notes, @delta_reports, @created_at)
         """
         self._execute(sql, [
             bigquery.ScalarQueryParameter("run_started_at",   "TIMESTAMP", _dt_to_iso(doc.get("run_started_at"))),
@@ -1104,6 +1118,10 @@ class BQStudyStore:
             bigquery.ScalarQueryParameter("pass1_needs_full", "BOOL",      bool(doc.get("pass1_needs_full", False))),
             bigquery.ScalarQueryParameter("pass2_outcome",    "STRING",    doc.get("pass2_outcome", "")),
             bigquery.ScalarQueryParameter("problem_details",  "STRING",    _to_json_col(doc.get("problem_details"))),
+            bigquery.ScalarQueryParameter("delta_vitals",     "INT64",     int(doc.get("delta_vitals") or 0)),
+            bigquery.ScalarQueryParameter("delta_labs",       "INT64",     int(doc.get("delta_labs") or 0)),
+            bigquery.ScalarQueryParameter("delta_notes",      "INT64",     int(doc.get("delta_notes") or 0)),
+            bigquery.ScalarQueryParameter("delta_reports",    "INT64",     int(doc.get("delta_reports") or 0)),
             bigquery.ScalarQueryParameter("created_at",       "TIMESTAMP", _now_iso()),
         ])
 

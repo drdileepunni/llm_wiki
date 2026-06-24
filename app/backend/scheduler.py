@@ -161,11 +161,13 @@ def _run_live_pipeline(
         # GCS stores datetimes as ISO strings — coerce both with _coerce_dt
         last_ts = _coerce_dt(last_llm_run_at_raw) or _coerce_dt(last_snapshot_ts)
 
-        delta = extract_delta(chart, last_ts)
+        prev_io = sched_doc.get("last_io_aggregate")
+        delta = extract_delta(chart, last_ts, prev_io_aggregate=prev_io)
         status["delta"] = {
             "new_vitals": len(delta.get("new_vitals", [])),
             "new_labs":   len(delta.get("new_labs", [])),
             "new_notes":  len(delta.get("new_notes", [])),
+            "io_changed": delta.get("io_changed", False),
         }
         logger.info("pipeline: delta extracted for %s — %s (cutoff: %s)",
                     cpmrn, status["delta"],
@@ -261,6 +263,7 @@ def _run_live_pipeline(
     if last_llm_run_at is not None:
         has_new_data = any([
             delta.get("new_vitals"), delta.get("new_labs"), delta.get("new_notes"),
+            delta.get("io_changed"),
         ])
         if not has_new_data and not _has_new_reports:
             if force_expensive:
@@ -387,8 +390,9 @@ def _run_live_pipeline(
                     db.snapshot_schedule.update_one(
                         {"CPMRN": cpmrn, "encounter": encounter},
                         {"$set": {
-                            "last_llm_run_at": snapshot_at,
-                            "next_run_at":     _next_run_at(snapshot_at, 1),
+                            "last_llm_run_at":    snapshot_at,
+                            "next_run_at":        _next_run_at(snapshot_at, 1),
+                            "last_io_aggregate":  delta.get("io_last_24h"),
                         }},
                     )
                     new_structured = ctx.get("structured_summary") or {}
@@ -517,8 +521,9 @@ def _run_live_pipeline(
         db.snapshot_schedule.update_one(
             {"CPMRN": cpmrn, "encounter": encounter},
             {"$set": {
-                "last_llm_run_at": snapshot_at,
-                "next_run_at":     _next_run_at(snapshot_at, 1),
+                "last_llm_run_at":   snapshot_at,
+                "next_run_at":       _next_run_at(snapshot_at, 1),
+                "last_io_aggregate": delta.get("io_last_24h"),
             }},
         )
 
@@ -647,6 +652,7 @@ def _write_patient_run_audit(
         tracker = pipeline_status.get("problem_tracker") or {}
         problem_details = tracker.get("problem_details") if isinstance(tracker, dict) else None
         store = get_bq_store()
+        delta = pipeline_status.get("delta") or {}
         store.insert_patient_run({
             "run_started_at":   run_started_at,
             "CPMRN":            cpmrn,
@@ -656,21 +662,31 @@ def _write_patient_run_audit(
             "pass1_needs_full": bool(pass1.get("needs_full_analysis", False)) if isinstance(pass1, dict) else False,
             "pass2_outcome":    str(pipeline_status.get("pass2", "")),
             "problem_details":  problem_details,
+            "delta_vitals":     delta.get("new_vitals", 0),
+            "delta_labs":       delta.get("new_labs", 0),
+            "delta_notes":      delta.get("new_notes", 0),
+            "delta_reports":    (pipeline_status.get("report_select") or {}).get("n", 0),
         })
         # Write next_check state for each assessed problem.
+        # problem_details.next_check is the raw model output — it has type/key/label
+        # but NOT due_after (that is computed inside _upsert_problem and written to GCS).
+        # Read the stored problem docs to get the actual computed due_after.
         if problem_details:
+            stored = list(db["patient_problems"].find({"CPMRN": cpmrn, "encounter": encounter}))
+            stored_nc = {p.get("problem_name", ""): (p.get("next_check") or {}) for p in stored}
             nc_rows = []
             for pd in problem_details:
-                nc = pd.get("next_check") or {}
-                nc_type  = nc.get("type", "") if nc else ""
-                nc_key   = nc.get("vital_key") or nc.get("lab_name") or nc.get("key", "") if nc else ""
-                nc_label = nc.get("label", "") if nc else ""
-                due_raw  = nc.get("due_after") if nc else None
+                pname = pd.get("problem_name", "")
+                nc = stored_nc.get(pname) or {}
+                nc_type  = nc.get("type", "")
+                nc_key   = nc.get("vital_key") or nc.get("lab_name") or nc.get("key", "")
+                nc_label = nc.get("label", "")
+                due_raw  = nc.get("due_after")
                 nc_rows.append({
                     "run_started_at":  run_started_at,
                     "CPMRN":           cpmrn,
                     "encounter":       encounter,
-                    "problem_name":    pd.get("problem_name", ""),
+                    "problem_name":    pname,
                     "nc_type":         nc_type,
                     "nc_key":          nc_key,
                     "nc_label":        nc_label,

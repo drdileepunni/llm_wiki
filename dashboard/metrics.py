@@ -364,7 +364,11 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
       pass1_tag,
       pass1_needs_full,
       pass2_outcome,
-      problem_details
+      problem_details,
+      COALESCE(delta_vitals, 0)  AS delta_vitals,
+      COALESCE(delta_labs, 0)    AS delta_labs,
+      COALESCE(delta_notes, 0)   AS delta_notes,
+      COALESCE(delta_reports, 0) AS delta_reports
     FROM {fqn("pipeline_patient_runs")}
     WHERE run_started_at = TIMESTAMP('{run_started_at}')
     ORDER BY CPMRN
@@ -388,6 +392,10 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
             "pass1_needs_full": bool(r.get("pass1_needs_full", False)),
             "pass2_outcome":    r.get("pass2_outcome", ""),
             "problems":         problems,
+            "delta_vitals":     int(r.get("delta_vitals") or 0),
+            "delta_labs":       int(r.get("delta_labs") or 0),
+            "delta_notes":      int(r.get("delta_notes") or 0),
+            "delta_reports":    int(r.get("delta_reports") or 0),
         })
     return result
 

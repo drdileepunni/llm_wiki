@@ -85,6 +85,33 @@ Growth stops at 4 attempts **or** when the 24h cap is hit, whichever comes first
 
 ---
 
+## Re-alert suppression (cooldown)
+
+The backoff interval doubles as the re-alert cooldown window — there is **no separate 8-hour cooldown**. When an alert fires, `_upsert_problem` stores `current_interval_h` on the problem doc and sets `next_check.due_after = now + interval_h`. `_should_suppress_alert` reads `current_interval_h` from the stored doc to decide whether to suppress the next alert attempt for the same problem.
+
+### Concrete example — SpO2 / hypoxemia
+
+| Alert # | `alert_attempts` before fire | Cooldown stored | Earliest next alert |
+|---|---|---|---|
+| 1st | 0 | 1h | 1h after 1st alert |
+| 2nd | 1 | 2h | 2h after 2nd alert |
+| 3rd | 2 | 4h | 4h after 3rd alert |
+| 4th | 3 | 8h | 8h after 4th alert |
+| 5th+ | 4 | 16h (cap) | 16h after each subsequent alert |
+
+This means a vital problem that keeps alerting without a plan will see its re-alert window grow: 1h → 2h → 4h → 8h → 16h. The old hardcoded 8h value (`_ALERT_COOLDOWN_H = 8`) is retained **only as a legacy fallback** for problem docs written before the backoff system existed (docs that have no `current_interval_h` field). Any problem doc written by the current code will have `current_interval_h` set and will never reach the 8h fallback.
+
+### Suppression check
+`_should_suppress_alert` in `problem_tracker.py`:
+```python
+cooldown_h = doc.get("current_interval_h") or _ALERT_COOLDOWN_H   # 8h fallback for legacy docs only
+return (datetime.now(timezone.utc) - last) < timedelta(hours=cooldown_h)
+```
+
+The suppression fires **before** the model runs — a suppressed problem is never sent to the tracker LLM for that cycle.
+
+---
+
 ## Key files
 
 | File | Role |

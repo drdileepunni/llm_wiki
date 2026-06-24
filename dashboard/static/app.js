@@ -1028,7 +1028,7 @@ async function loadAuditRuns() {
     const rows = await apiFetch('/api/metrics/runs');
     if (!rows.length) {
       picker.innerHTML = '<option value="">No runs found</option>';
-      tbody.innerHTML  = '<tr><td colspan="6" class="text-muted text-center py-3">No runs found.</td></tr>';
+      tbody.innerHTML  = '<tr><td colspan="7" class="text-muted text-center py-3">No runs found.</td></tr>';
       return;
     }
 
@@ -1052,7 +1052,7 @@ async function loadAuditRuns() {
     });
   } catch (e) {
     picker.innerHTML = '<option value="">Error loading runs</option>';
-    tbody.innerHTML  = `<tr><td colspan="6" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
+    tbody.innerHTML  = `<tr><td colspan="7" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
     console.error('loadAuditRuns', e);
   }
 }
@@ -1072,26 +1072,26 @@ async function loadAuditRunPatients(runTs) {
   const tbody = document.querySelector('#tbl-audit tbody');
   if (!tbody) return;
   if (!runTs) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center py-3">Select a run above.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center py-3">Select a run above.</td></tr>';
     return;
   }
-  tbody.innerHTML = '<tr><td colspan="6" class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></td></tr>';
+  tbody.innerHTML = '<tr><td colspan="7" class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div></td></tr>';
   try {
     const rows = await apiFetch('/api/metrics/run-audit?run=' + encodeURIComponent(runTs));
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center py-3">No audit data for this run.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center py-3">No audit data for this run.</td></tr>';
       return;
     }
     tbody.innerHTML = rows.map(r => auditPatientRow(r)).join('');
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="text-danger text-center py-3">Error: ${escHtml(String(e))}</td></tr>`;
     console.error('loadAuditRunPatients', e);
   }
 }
 
 function auditPatientRow(r) {
   const pass1Label = r.pass1_needs_full
-    ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">${escHtml(r.pass1_tag || 'flagged')}</span>`
+    ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">flagged</span>`
     : `<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>`;
 
   const pass2Label = (() => {
@@ -1110,12 +1110,12 @@ function auditPatientRow(r) {
   const problems = r.problems || [];
   const problemsHtml = problems.length
     ? problems.map(p => {
-        const truncated = (p.tracker_reasoning || p.alert_reason || '').slice(0, 100);
+        const reasoning = p.tracker_reasoning || p.alert_reason || '';
         return `<div style="font-size:0.78rem; margin-bottom:3px">
           <strong>${escHtml(p.problem_name || '')}</strong>
           <span class="text-muted ms-1" style="font-size:0.72rem">[${escHtml(p.clinical_status || '?')}]</span>
           ${suppressionBadge(p.suppression_rule)}
-          ${truncated ? `<div class="text-muted mt-1" style="font-size:0.72rem;line-height:1.3">${escHtml(truncated)}…</div>` : ''}
+          ${reasoning ? `<div class="text-muted mt-1" style="font-size:0.72rem;line-height:1.3">${escHtml(reasoning)}</div>` : ''}
         </div>`;
       }).join('')
     : '<span class="text-muted small">—</span>';
@@ -1129,6 +1129,16 @@ function auditPatientRow(r) {
     return `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(o)}</span>`;
   })();
 
+  const dv = r.delta_vitals || 0, dl = r.delta_labs || 0, dn = r.delta_notes || 0, dr = r.delta_reports || 0;
+  const deltaHtml = (dv + dl + dn + dr === 0)
+    ? '<span class="text-muted" style="font-size:0.72rem">—</span>'
+    : `<span style="font-size:0.72rem;line-height:1.6">` +
+      (dv ? `<span class="text-primary">${dv}v</span> ` : '') +
+      (dl ? `<span class="text-success">${dl}l</span> ` : '') +
+      (dn ? `<span class="text-warning">${dn}n</span> ` : '') +
+      (dr ? `<span class="text-info">${dr}r</span>` : '') +
+      `</span>`;
+
   const rowId = `audit-row-${escHtml(r.CPMRN)}-${r.encounter}`;
   return `<tr id="${rowId}" data-cpmrn="${escHtml(r.CPMRN)}" data-enc="${r.encounter || 1}">
     <td class="align-top" style="white-space:nowrap">
@@ -1138,6 +1148,7 @@ function auditPatientRow(r) {
     <td class="align-top">${pass1Label}</td>
     <td class="align-top">${whyExpensive}</td>
     <td class="align-top">${pass2Label}</td>
+    <td class="align-top">${deltaHtml}</td>
     <td class="align-top">${problemsHtml}</td>
     <td class="align-top text-end">
       <button class="btn btn-sm btn-outline-secondary py-0 px-1 expand-btn" style="font-size:0.72rem"
@@ -1169,7 +1180,7 @@ async function togglePatientDetail(btn) {
   // Placeholder row while loading
   const placeholderTr = document.createElement('tr');
   placeholderTr.id = detailId;
-  placeholderTr.innerHTML = `<td colspan="6" class="p-0">
+  placeholderTr.innerHTML = `<td colspan="7" class="p-0">
     <div class="text-center py-3 small text-muted">
       <div class="spinner-border spinner-border-sm text-primary me-2"></div>Loading model detail…
     </div>
@@ -1178,13 +1189,13 @@ async function togglePatientDetail(btn) {
 
   try {
     const d = await apiFetch(`/api/audit/patient/${encodeURIComponent(cpmrn)}/${enc}`);
-    placeholderTr.innerHTML = `<td colspan="6" class="p-0">${buildDetailPanel(d, detailId)}</td>`;
+    placeholderTr.innerHTML = `<td colspan="7" class="p-0">${buildDetailPanel(d, detailId)}</td>`;
     // Activate first tab
     const firstTab = placeholderTr.querySelector('[data-tab]');
     if (firstTab) switchAuditTab(firstTab, detailId);
     btn.innerHTML = '<i class="bi bi-chevron-up"></i>';
   } catch (e) {
-    placeholderTr.innerHTML = `<td colspan="6" class="text-danger text-center py-2 small">
+    placeholderTr.innerHTML = `<td colspan="7" class="text-danger text-center py-2 small">
       Error loading detail: ${escHtml(String(e))}
     </td>`;
     btn.innerHTML = '<i class="bi bi-chevron-down"></i>';

@@ -22,9 +22,18 @@ def _parse_ts(ts_val: Any) -> datetime | None:
         return None
 
 
-def extract_delta(chart: dict, last_snapshot_at: datetime | str | None) -> dict:
+def extract_delta(
+    chart: dict,
+    last_snapshot_at: datetime | str | None,
+    prev_io_aggregate: dict | None = None,
+) -> dict:
     """
     Compare the chart against last_snapshot_at and return only the new events.
+
+    prev_io_aggregate: the io_last_24h dict from the previous run (stored in snapshot_schedule).
+      If the current aggregate differs from this, io_changed=True is set in the delta, which
+      causes Gate 2 to treat it as new data — triggering a pipeline run that passes the full
+      24h IO context to the LLM rather than a single raw IO entry.
 
     Returns:
         {
@@ -33,18 +42,22 @@ def extract_delta(chart: dict, last_snapshot_at: datetime | str | None) -> dict:
             "delta_orders": {...},        # full active/pending orders (no good timestamp diff possible)
             "new_notes": [...],           # notes with timestamp > last_snapshot_at
             "io_last_24h": {...},         # total intake/output ml in last 24h window
+            "io_changed": bool,           # True if io_last_24h differs from prev_io_aggregate
             "new_report_findings": [],    # populated by scheduler after analyze_new_reports (Phase 2)
         }
     """
     # GCS stores timestamps as ISO strings — coerce to datetime before comparing
     cutoff = _parse_ts(last_snapshot_at)
+    io_now = _io_last_24h(chart)
+    io_changed = bool(prev_io_aggregate) and (io_now != prev_io_aggregate)
 
     return {
         "new_vitals":          _new_vitals(chart, cutoff),
         "new_labs":            _new_labs(chart, cutoff),
         "delta_orders":        _current_orders(chart),
         "new_notes":           _new_notes(chart, cutoff),
-        "io_last_24h":         _io_last_24h(chart),
+        "io_last_24h":         io_now,
+        "io_changed":          io_changed,
         "new_report_findings": [],  # injected by scheduler.py after analyze_new_reports
     }
 
