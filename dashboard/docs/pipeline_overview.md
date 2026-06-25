@@ -18,14 +18,18 @@ flowchart TD
     B --> C[Fetch admitted patients from Radar EMR]:::infra
     C --> DELTA[extract_delta · free\ncompare chart vs last_llm_run_at cutoff]:::gate
 
-    DELTA -->|new_vitals=0 new_labs=0\nnew_notes=0| DGATE[Delta gate\nskip — no new data]:::bypass
+    DELTA -->|new_vitals=0 new_labs=0\nnew_notes=0 io_changed=False| DGATE[Delta gate\nskip — no new data]:::bypass
 
     DELTA -->|only new vitals\nall vitals score 0 on NEWS2| VGATE[Gate 2.5 · vital-normal gate\nskip — vitals all normal]:::bypass
 
     DELTA -->|only new labs\nall labs are glucose-named| GGATE[Gate 2.6 · glucose-only gate\nbypass full pipeline]:::gate
     GGATE --> GINSULIN[insulin_advice.py\ngather_inputs + compute]:::infra
-    GINSULIN --> GCHAT2[Alert card sent]:::infra
+    GINSULIN --> GCHAT2[Alert card sent\nnext_check.due_after = now + next_grbs_after]:::infra
 
+    DELTA -->|overdue glucose next_check only\nno generic overdue checks| GOGATE[Glucose-only forced recheck\nno LLM — same cheap path]:::gate
+    GOGATE --> GINSULIN
+
+    DELTA -->|io_changed=True\nno new vitals/labs/notes| SUM
     DELTA -->|anything else| SUM[summary_updater\ngemini-3.1-flash-lite · no thinking]:::llm
 
     SUM --> PASS1[Pass 1 screener\ngemini-3.1-flash-lite · no thinking]:::llm
@@ -55,9 +59,12 @@ new_vitals          — vital readings with timestamp > cutoff
 new_labs            — lab documents with reportedAt > cutoff
 new_notes           — note content entries with timestamp > cutoff
 delta_orders        — always the full current active/pending orders (no diff possible)
-io_last_24h         — always the full 24h I/O window (no diff possible)
+io_last_24h         — full 24h I/O aggregate (intake_ml, output_ml, balance_ml)
+io_changed          — True when io_last_24h differs from the value stored at last run
 new_report_findings — injected later by analyze_new_reports (Phase 2)
 ```
+
+`io_changed` is computed by comparing the current 24h aggregate against `last_io_aggregate` stored in `snapshot_schedule` after the previous run. The raw IO structure (`chart.io.days[].hours[].minutes[]`) has no per-entry timestamps; the aggregate comparison is the only reliable way to detect a new entry. When `io_changed=True`, the **full 24h aggregate** is what the LLM sees — never a single isolated IO reading.
 
 ### First-run seeding behaviour
 
@@ -89,17 +96,21 @@ After extraction, `delta_scope.classify_delta()` analyses the delta to derive a 
 
 **Safety invariant:** any delta containing `new_notes` or `new_report_findings` is a wildcard — unstructured text can introduce new problems, plan changes, or care-gaps that keyword matching cannot anticipate. Wildcard deltas always produce a full pipeline run with no scoping.
 
-**Phase C (problem pruning)** is currently in shadow mode — it logs `would_prune` / `would_assess` without actually restricting the assessed problem list. Enable by setting `DELTA_SCOPE_PRUNE=1`.
+**Phase C (problem pruning)** is **active** (`DELTA_SCOPE_PRUNE=1` set in production). The problem_tracker only receives the blast-radius set; `would_prune` problems are excluded from the LLM call entirely. This reduces token cost for single-vital or single-lab runs where unrelated problems have no new data to re-assess.
 
 ## Bypass Gates (zero LLM cost)
 
 | Gate | Condition | Outcome |
 |---|---|---|
-| **Delta gate** | `new_vitals=0 AND new_labs=0 AND new_notes=0` | Skip entire LLM pipeline; update `next_run_at` |
+| **Delta gate** | `new_vitals=0 AND new_labs=0 AND new_notes=0 AND io_changed=False` (and no overdue checks) | Skip entire LLM pipeline; update `next_run_at` |
 | **Gate 2.5 · vital-normal** | Delta is vitals-only AND all new vitals score 0 on NEWS2 | Skip LLM; schedule next run in 1h |
 | **Gate 2.6 · glucose-only** | Delta is labs-only AND all new lab docs are glucose-named (RBS/CBG/GRBS/Blood Glucose) | Skip Pass 1 + Pass 2; call `insulin_advice` directly; send alert card |
+| **Glucose-only forced recheck** | Overdue `next_check` is glucose only (no other overdue generic labs) | Same cheap path as Gate 2.6 — no LLM; `next_check.due_after` set from `next_grbs_after` |
+| **Generic forced recheck** | Overdue `next_check` is a non-glucose lab (creatinine, Hb, etc.) | Bypass cadence + delta + pass-1; run full `track_problems` with `focus=overdue items` |
 
 Gate 2.6 fires only when the incoming lab document is **named** as a standalone glucose test. A panel document (e.g. "Renal Function Test") that happens to contain a glucose attribute does not trigger it — the full pipeline runs in that case, which is correct.
+
+The glucose-only forced recheck fires when `overdue_next_checks()` finds only glucose-type overdue windows and no other lab types. If both glucose and creatinine (for example) are overdue simultaneously, it falls through to the generic forced recheck (full expensive run), which handles glucose as part of the normal problem tracker + `attach_insulin_order` path.
 
 ## Problem Tracker Prompt Assembly
 

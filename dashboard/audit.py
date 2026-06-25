@@ -152,6 +152,10 @@ def get_patient_detail(cpmrn: str, encounter: int) -> dict:
             {"CPMRN": cpmrn, "encounter": encounter}
         )
 
+        sched: dict = db.snapshot_schedule.find_one(
+            {"CPMRN": cpmrn, "encounter": encounter}
+        ) or {}
+
         structured: dict = ctx.get("structured_summary") or {}
 
         clean_problems = []
@@ -168,6 +172,8 @@ def get_patient_detail(cpmrn: str, encounter: int) -> dict:
             "resolved_problems":   _serialize(structured.get("resolved_problems") or []),
             "suggested_actions":   _serialize(structured.get("suggested_actions") or []),
             "patient_problems":    clean_problems,
+            "last_delta_content":  _serialize(sched.get("last_delta_content") or {}),
+            "last_llm_run_at":     _serialize(sched.get("last_llm_run_at")),
         }
 
     except Exception:

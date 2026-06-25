@@ -205,13 +205,40 @@ def _run_live_pipeline(
     except Exception:
         logger.exception("pipeline: overdue_next_checks failed for %s enc=%d — treating as empty", cpmrn, encounter)
         _overdue = []
-    force_expensive = bool(_overdue)
+    _overdue_glucose = [o for o in _overdue if _is_glucose_next_check(o)]
+    _overdue_generic  = [o for o in _overdue if not _is_glucose_next_check(o)]
+    # Only non-glucose overdue checks force the full expensive run.
+    # Glucose-only overdue checks route to the cheap glucose pathway instead.
+    force_expensive     = bool(_overdue_generic)
+    force_glucose_check = bool(_overdue_glucose) and not force_expensive
     if force_expensive:
         logger.info(
-            "pipeline: %d overdue lab next_check(s) for %s enc=%d — will force expensive run",
-            len(_overdue), cpmrn, encounter,
+            "pipeline: %d overdue generic lab next_check(s) for %s enc=%d — will force expensive run",
+            len(_overdue_generic), cpmrn, encounter,
         )
-    status["force_expensive"] = force_expensive
+    if force_glucose_check:
+        logger.info(
+            "pipeline: overdue glucose next_check for %s enc=%d — will route to cheap glucose pathway",
+            cpmrn, encounter,
+        )
+    status["force_expensive"]     = force_expensive
+    status["force_glucose_check"] = force_glucose_check
+
+    # Build a human-readable scheduling trigger label for the audit table.
+    _trigger_parts = []
+    if force_expensive:
+        _generic_labels = [
+            f"{o.get('label') or o.get('key', '?')} ({o.get('problem_name', '?')})"
+            for o in _overdue_generic
+        ]
+        _trigger_parts.append("overdue: " + ", ".join(_generic_labels))
+    if force_glucose_check:
+        _glucose_labels = [
+            f"{o.get('label') or o.get('key', '?')} ({o.get('problem_name', '?')})"
+            for o in _overdue_glucose
+        ]
+        _trigger_parts.append("overdue glucose: " + ", ".join(_glucose_labels))
+    status["trigger_reason"] = " + ".join(_trigger_parts) if _trigger_parts else ""
 
     # ── Gate 0: Empty chart — skip all LLM if chart has no data whatsoever ────
     # A brand-new patient with no vitals, labs, or notes cannot be assessed.
@@ -236,7 +263,7 @@ def _run_live_pipeline(
     # ── Gate 1: Adaptive cadence — skip LLM pipeline if not yet due ──────────
     next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
     if next_run_at is not None and now < next_run_at:
-        if not _has_new_reports and not force_expensive:
+        if not _has_new_reports and not force_expensive and not force_glucose_check:
             logger.info(
                 "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
                 cpmrn, encounter, next_run_at.strftime("%H:%M UTC"),
@@ -257,6 +284,11 @@ def _run_live_pipeline(
                 "pipeline: cadence gate bypassed for %s enc=%d — forced by overdue next_check",
                 cpmrn, encounter,
             )
+        elif force_glucose_check:
+            logger.info(
+                "pipeline: cadence gate bypassed for %s enc=%d — overdue glucose next_check",
+                cpmrn, encounter,
+            )
 
     # ── Gate 2: Delta gate — skip LLM if nothing new since last analysis ─────
     last_llm_run_at = _coerce_dt(last_llm_run_at_raw)
@@ -266,7 +298,7 @@ def _run_live_pipeline(
             delta.get("io_changed"),
         ])
         if not has_new_data and not _has_new_reports:
-            if force_expensive:
+            if force_expensive or force_glucose_check:
                 logger.info(
                     "pipeline: delta gate bypassed for %s enc=%d — forced by overdue next_check (no new data)",
                     cpmrn, encounter,
@@ -290,26 +322,27 @@ def _run_live_pipeline(
                 _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
                 return status
 
-    # ── Gate 2.5: Vital-normal gate — skip LLM when only routine stable vitals ─
-    # Only fires when: no forced recheck, no new reports, delta is vitals-only,
-    # and every new vital row scores zero on NEWS2 (O2 component stripped).
+    # ── Gate 2.5: Vital-normal gate — skip when vitals-only and all normal;
+    #             force full when vitals-only and any abnormal.
+    # Only fires when: no forced recheck, no new reports, delta is vitals-only.
+    _gate_new_vitals = delta.get("new_vitals") or []
+    _gate_new_labs   = delta.get("new_labs") or []
+    _gate_new_notes  = delta.get("new_notes") or []
+    _gate_new_rf     = delta.get("new_report_findings") or []
+    force_full_vitals = False
     if (
         not force_expensive
         and not _has_new_reports
         and not status.get("delta_gate") == "bypassed_forced"
     ):
-        new_vitals = delta.get("new_vitals") or []
-        new_labs   = delta.get("new_labs") or []
-        new_notes  = delta.get("new_notes") or []
-        new_report_findings = delta.get("new_report_findings") or []
-        vitals_only = bool(new_vitals) and not new_labs and not new_notes and not new_report_findings
+        vitals_only = bool(_gate_new_vitals) and not _gate_new_labs and not _gate_new_notes and not _gate_new_rf
         if vitals_only:
             try:
                 from tools.radar_sync.fn_detector import all_new_vitals_normal
-                if all_new_vitals_normal(new_vitals):
+                if all_new_vitals_normal(_gate_new_vitals):
                     logger.info(
                         "pipeline: vital-normal gate — all %d new vital(s) normal for %s enc=%d, skipping LLM",
-                        len(new_vitals), cpmrn, encounter,
+                        len(_gate_new_vitals), cpmrn, encounter,
                     )
                     status["vital_normal_gate"] = "skipped"
                     status["_report_analysis"] = None
@@ -321,6 +354,13 @@ def _run_live_pipeline(
                     new_structured = ctx.get("structured_summary") or {}
                     _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
                     return status
+                else:
+                    logger.info(
+                        "pipeline: vital-normal gate — abnormal vital(s) for %s enc=%d, forcing full analysis",
+                        cpmrn, encounter,
+                    )
+                    force_full_vitals = True
+                    status["vital_normal_gate"] = "triggered"
             except Exception:
                 logger.exception("pipeline: vital-normal gate check failed for %s enc=%d — continuing", cpmrn, encounter)
 
@@ -345,70 +385,47 @@ def _run_live_pipeline(
             and all(_is_glucose_lab(d) for d in _gl_new_labs)
         )
         if _glucose_only:
-            try:
-                import uuid as _uuid
-                from tools.radar_sync.insulin_advice import gather_inputs as _gi, attach_insulin_order as _aio
-                from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
+            if _run_glucose_alert(cpmrn, encounter, db, snapshot_at, ctx, delta, status):
+                _run_fn_detector_step(cpmrn, encounter, ctx.get("structured_summary") or {}, snapshot_at, db, status)
+                return status
 
-                engine_input, _ = _gi(cpmrn, encounter)
-                if engine_input.get("GRBS"):
-                    grbs_val = int(engine_input["GRBS"][0])
-                    assessment = {
-                        "problem_name":    "Hyperglycemia",
-                        "clinical_status": "worsening",
-                        "should_alert":    True,
-                        "being_addressed": False,
-                        "alert_title":     f"Hyperglycemia — glucose {grbs_val} mg/dL",
-                        "alert_reason":    (
-                            f"New glucose result: {grbs_val} mg/dL. "
-                            "Insulin recommendation below."
-                        ),
-                        "note_vs_objective": "",
-                    }
-                    _aio(cpmrn, encounter, assessment)
-                    existing_ctx = ctx.get("structured_summary") or {}
-                    recipients = get_alert_recipients(db)
-                    if recipients:
-                        send_batch_alert_cards(
-                            cpmrn, encounter,
-                            [(assessment, _uuid.uuid4().hex)],
-                            existing_ctx,
-                            recipients,
-                        )
-                        logger.info(
-                            "pipeline: glucose-only gate — alert sent for %s enc=%d (glucose %d mg/dL)",
-                            cpmrn, encounter, grbs_val,
-                        )
-                    else:
-                        logger.warning(
-                            "pipeline: glucose-only gate — no recipients configured for %s enc=%d",
-                            cpmrn, encounter,
-                        )
-                    status["glucose_only_gate"] = "routed"
-                    status["pass1"] = "skipped_glucose_only"
-                    status["pass2"] = "skipped_glucose_only"
-                    db.snapshot_schedule.update_one(
-                        {"CPMRN": cpmrn, "encounter": encounter},
-                        {"$set": {
-                            "last_llm_run_at":    snapshot_at,
-                            "next_run_at":        _next_run_at(snapshot_at, 1),
-                            "last_io_aggregate":  delta.get("io_last_24h"),
-                        }},
-                    )
-                    new_structured = ctx.get("structured_summary") or {}
-                    _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
-                    return status
-                else:
-                    logger.warning(
-                        "pipeline: glucose-only gate — no glucose value retrievable for %s enc=%d, falling through",
-                        cpmrn, encounter,
-                    )
-                    status["glucose_only_gate"] = "no_glucose_value"
-            except Exception:
-                logger.exception(
-                    "pipeline: glucose-only gate failed for %s enc=%d — falling through to full pipeline",
+    # ── Gate 2.7: ABG gate — deterministic threshold check ───────────────────
+    # Any new ABG with a value crossing a danger threshold → force full analysis.
+    # ABG with no threshold breach → no action (notes screener may still fire).
+    force_full_abg = False
+    if not force_expensive and not status.get("delta_gate") == "bypassed_forced":
+        _abg_labs = [lab for lab in _gate_new_labs if _is_abg_lab(lab)]
+        if _abg_labs:
+            if any(_check_abg_thresholds(lab) for lab in _abg_labs):
+                logger.info(
+                    "pipeline: ABG gate — threshold crossed for %s enc=%d, forcing full analysis",
                     cpmrn, encounter,
                 )
+                force_full_abg = True
+                status["abg_gate"] = "triggered"
+            else:
+                logger.info(
+                    "pipeline: ABG gate — ABG present, no threshold crossed for %s enc=%d",
+                    cpmrn, encounter,
+                )
+                status["abg_gate"] = "no_threshold"
+
+    # ── Gate 2.8: Non-ABG, non-glucose lab gate ───────────────────────────────
+    # Any new lab that is neither an ABG panel nor a glucose test → always full.
+    force_full_other_lab = False
+    if not force_expensive and not status.get("delta_gate") == "bypassed_forced":
+        _other_labs = [
+            lab for lab in _gate_new_labs
+            if not _is_abg_lab(lab) and not _is_glucose_lab(lab)
+        ]
+        if _other_labs:
+            _other_lab_names = [lab.get("name", "?") for lab in _other_labs]
+            logger.info(
+                "pipeline: other-lab gate — new lab(s) %s for %s enc=%d, forcing full analysis",
+                _other_lab_names, cpmrn, encounter,
+            )
+            force_full_other_lab = True
+            status["other_lab_gate"] = "triggered: " + ", ".join(_other_lab_names)
 
     # ── Forced-recheck shortcut (no new data) ────────────────────────────────
     # When the delta gate was bypassed by a forced follow-up but there is genuinely
@@ -416,6 +433,19 @@ def _run_live_pipeline(
     # last stored summary. The forced_block inside track_problems tells the model
     # what to focus on.
     if status.get("delta_gate") == "bypassed_forced":
+        # Glucose-only overdue check with no new data → cheap glucose pathway, no LLM.
+        if force_glucose_check and not force_expensive:
+            status["pass1"] = "skipped_glucose_only"
+            status["pass2"] = "skipped_glucose_only"
+            if _run_glucose_alert(cpmrn, encounter, db, snapshot_at, ctx, delta, status):
+                _run_fn_detector_step(cpmrn, encounter, ctx.get("structured_summary") or {}, snapshot_at, db, status)
+                return status
+            # No glucose value retrievable — fall through to full tracker as fallback.
+            logger.warning(
+                "pipeline: glucose-forced recheck — no glucose value for %s enc=%d, falling back to full tracker",
+                cpmrn, encounter,
+            )
+
         new_structured = ctx.get("structured_summary") or {}
         status["summary"] = "skipped_forced_no_data"
         status["pass1"]   = "skipped_forced_no_data"
@@ -489,54 +519,80 @@ def _run_live_pipeline(
         status["summary"] = "error"
         return status
 
-    # ── Gate 3: Pass 1 screener — decide if full Pass 2 is needed ────────────
+    # ── Gate 3: Pass 1 screener (notes-only) — decide if full Pass 2 is needed ─
+    # Runs ONLY when there are new notes and no upstream lab/vital gate already
+    # forced full analysis. Lab and vital decisions are handled deterministically
+    # by Gates 2.5–2.8; the screener's role is solely to evaluate new note content.
+    _force_full_upstream = force_full_vitals or force_full_abg or force_full_other_lab
+
     last_problems = list(db["patient_problems"].find(
         {"CPMRN": cpmrn, "encounter": encounter},
-        {"problem_name": 1, "clinical_status": 1, "being_addressed": 1,
+        {"problem_name": 1, "clinical_status": 1,
          "last_assessed_at": 1, "reasoning_fingerprint": 1},
     ))
-    try:
-        from tools.radar_sync.pass1_screener import screen_patient
-        pass1 = screen_patient(cpmrn, encounter, new_structured, delta, last_problems, db)
-        status["pass1"] = {
-            "needs_full_analysis": pass1.needs_full_analysis,
-            "next_run_hours":      pass1.next_run_hours,
-            "flag_reason":         pass1.flag_reason,
-        }
-
-        # Always store lightweight summary
-        db["patient_contexts"].update_one(
-            {"CPMRN": cpmrn, "encounter": encounter},
-            {"$set": {"lightweight_summary": pass1.lightweight_summary}},
-        )
-
-        # Update cadence fields — anchor to snapshot_at (cycle start) so
-        # next_run_at lands on a clean scheduler tick even if the pipeline
-        # finishes 10-15 min into the hour.
-        #
-        # Pass 1 always re-runs every hour regardless of outcome.
-        # The delta gate (free) is the real gatekeeper for truly unchanged patients.
-        # pass1.next_run_hours is preserved in status for observability but not
-        # used to delay the next Pass 1 check.
-        db.snapshot_schedule.update_one(
-            {"CPMRN": cpmrn, "encounter": encounter},
-            {"$set": {
-                "last_llm_run_at":   snapshot_at,
-                "next_run_at":       _next_run_at(snapshot_at, 1),
-                "last_io_aggregate": delta.get("io_last_24h"),
-            }},
-        )
-
+    pass1 = None
+    if _force_full_upstream:
+        # Lab/vital gate already decided — skip screener LLM call entirely.
         logger.info(
-            "pipeline: pass1 done for %s enc=%d — needs_full=%s next=%dh",
-            cpmrn, encounter, pass1.needs_full_analysis, pass1.next_run_hours,
+            "pipeline: pass1 skipped for %s enc=%d — upstream gate forced full analysis",
+            cpmrn, encounter,
         )
-    except Exception:
-        logger.exception("pipeline: pass1 screener failed for %s enc=%d — running full Pass 2", cpmrn, encounter)
-        pass1 = None  # type: ignore[assignment]
+        status["pass1"] = "skipped_upstream_gate"
+    elif not _gate_new_notes:
+        # No new notes — nothing for the screener to evaluate.
+        logger.info(
+            "pipeline: pass1 skipped for %s enc=%d — no new notes",
+            cpmrn, encounter,
+        )
+        status["pass1"] = "skipped_no_new_notes"
+        if not force_expensive:
+            status["pass2"] = "skipped_by_pass1"
+            db.snapshot_schedule.update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {
+                    "last_llm_run_at":    snapshot_at,
+                    "next_run_at":        _next_run_at(snapshot_at, 1),
+                    "last_io_aggregate":  delta.get("io_last_24h"),
+                    "last_delta_content": _compact_delta(delta),
+                }},
+            )
+            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+            return status
+    else:
+        # New notes present — run note screener.
+        try:
+            from tools.radar_sync.pass1_screener import screen_patient
+            pass1 = screen_patient(cpmrn, encounter, delta, last_problems, db)
+            status["pass1"] = {
+                "needs_full_analysis": pass1.needs_full_analysis,
+                "flag_reason":         pass1.flag_reason,
+            }
 
-    # If Pass 1 says not needed (and didn't fail), skip Pass 2 — unless a forced
-    # follow-up overrides the screener verdict.
+            db["patient_contexts"].update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {"lightweight_summary": pass1.lightweight_summary}},
+            )
+
+            db.snapshot_schedule.update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {
+                    "last_llm_run_at":    snapshot_at,
+                    "next_run_at":        _next_run_at(snapshot_at, 1),
+                    "last_io_aggregate":  delta.get("io_last_24h"),
+                    "last_delta_content": _compact_delta(delta),
+                }},
+            )
+
+            logger.info(
+                "pipeline: pass1 done for %s enc=%d — needs_full=%s reason=%s",
+                cpmrn, encounter, pass1.needs_full_analysis, pass1.flag_reason or "(none)",
+            )
+        except Exception:
+            logger.exception("pipeline: pass1 screener failed for %s enc=%d — running full Pass 2", cpmrn, encounter)
+            pass1 = None
+
+    # If note screener said not needed (and didn't fail), skip Pass 2 —
+    # unless force_expensive overrides.
     if pass1 is not None and not pass1.needs_full_analysis:
         if force_expensive:
             logger.info(
@@ -553,7 +609,7 @@ def _run_live_pipeline(
     # ── Step 4b: status classifier — only when pass-1 flagged (not forced-only) ─
     # A single-parameter forced recheck is driven by problem_tracker's live tool
     # fetches; re-running the classifier over the whole summary is unnecessary cost.
-    if pass1 is None or pass1.needs_full_analysis:
+    if _force_full_upstream or pass1 is None or (pass1 is not None and pass1.needs_full_analysis):
         try:
             from tools.radar_sync.status_classifier import classify_statuses
             new_structured = classify_statuses(cpmrn, encounter, new_structured, delta=delta)
@@ -616,6 +672,162 @@ def _is_glucose_lab(lab_doc: dict) -> bool:
     return any(kw in name for kw in _GLUCOSE_LAB_KEYWORDS)
 
 
+def _is_glucose_next_check(overdue_item: dict) -> bool:
+    """True if an overdue next_check item is tracking a glucose-related lab."""
+    key = (overdue_item.get("key") or overdue_item.get("label") or "").lower()
+    return any(kw in key for kw in _GLUCOSE_LAB_KEYWORDS)
+
+
+_ABG_LAB_KEYWORDS = (
+    "gas panel", "abg", "vbg", "arterial blood gas",
+    "venous blood gas", "blood gas",
+)
+
+# (attr_key, operator, threshold) — operator is "lt" or "gt"
+_ABG_THRESHOLD_CHECKS: list[tuple[str, str, float]] = [
+    ("ph",      "lt", 7.30), ("ph",      "gt", 7.50),
+    ("pao2",    "lt", 60.0),
+    ("paco2",   "gt", 50.0), ("paco2",   "lt", 30.0),
+    ("lactic",  "gt", 2.0),
+    ("lactate", "gt", 2.0),
+    ("hco3",    "lt", 15.0), ("hco3",    "gt", 35.0),
+    ("bicarb",  "lt", 15.0), ("bicarb",  "gt", 35.0),
+]
+
+
+def _is_abg_lab(lab_doc: dict) -> bool:
+    """True if the lab document represents a blood gas panel."""
+    name = (lab_doc.get("name") or "").lower()
+    return any(kw in name for kw in _ABG_LAB_KEYWORDS)
+
+
+def _check_abg_thresholds(lab_doc: dict) -> bool:
+    """Return True if any ABG value crosses a danger threshold."""
+    attrs = lab_doc.get("attributes") or {}
+
+    def _get(key: str):
+        v = attrs.get(key)
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            v = v.get("value")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    for attr_key, op, threshold in _ABG_THRESHOLD_CHECKS:
+        val = _get(attr_key)
+        if val is None:
+            continue
+        if op == "lt" and val < threshold:
+            return True
+        if op == "gt" and val > threshold:
+            return True
+    return False
+
+
+def _run_glucose_alert(
+    cpmrn: str,
+    encounter: int,
+    db: Any,
+    snapshot_at: Any,
+    ctx: dict,
+    delta: dict,
+    status: dict,
+) -> bool:
+    """
+    Run the cheap glucose-only alert path: fetch latest glucose, compute insulin
+    recommendation, send alert card, and update next_check.due_after using the
+    insulin timing (not the generic 24h lab_default).
+
+    Returns True if handled (glucose value found), False if no glucose data
+    (caller should fall through to the full pipeline).
+    """
+    try:
+        import uuid as _uuid
+        from tools.radar_sync.insulin_advice import gather_inputs as _gi, attach_insulin_order as _aio
+        from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
+        from datetime import timedelta
+
+        engine_input, _ = _gi(cpmrn, encounter)
+        if not engine_input.get("GRBS"):
+            logger.warning(
+                "pipeline: glucose alert — no glucose value retrievable for %s enc=%d",
+                cpmrn, encounter,
+            )
+            status["glucose_only_gate"] = "no_glucose_value"
+            return False
+
+        grbs_val = int(engine_input["GRBS"][0])
+        assessment = {
+            "problem_name":      "Hyperglycemia",
+            "clinical_status":   "worsening",
+            "should_alert":      True,
+            "being_addressed":   False,
+            "alert_title":       f"Hyperglycemia — glucose {grbs_val} mg/dL",
+            "alert_reason":      f"New glucose result: {grbs_val} mg/dL. Insulin recommendation below.",
+            "note_vs_objective": "",
+        }
+        _aio(cpmrn, encounter, assessment)
+
+        # Use insulin-recommended timing for next_check, not the generic 24h lab_default.
+        _insulin_data = assessment.get("_insulin_order") or {}
+        _next_h = (_insulin_data.get("reco") or {}).get("next_grbs_after")
+        if _next_h and isinstance(_next_h, (int, float)):
+            try:
+                db["patient_problems"].update_one(
+                    {"CPMRN": cpmrn, "encounter": encounter, "problem_name": "Hyperglycemia", "next_check": {"$ne": None}},
+                    {"$set": {"next_check.due_after": snapshot_at + timedelta(hours=int(_next_h))}},
+                )
+                logger.info(
+                    "pipeline: glucose alert — next_check.due_after set to +%dh for %s enc=%d",
+                    int(_next_h), cpmrn, encounter,
+                )
+            except Exception:
+                logger.exception("pipeline: glucose alert — failed to update next_check.due_after for %s", cpmrn)
+
+        existing_ctx = ctx.get("structured_summary") or {}
+        recipients = get_alert_recipients(db)
+        if recipients:
+            send_batch_alert_cards(
+                cpmrn, encounter,
+                [(assessment, _uuid.uuid4().hex)],
+                existing_ctx,
+                recipients,
+            )
+            logger.info(
+                "pipeline: glucose alert — card sent for %s enc=%d (glucose %d mg/dL)",
+                cpmrn, encounter, grbs_val,
+            )
+        else:
+            logger.warning(
+                "pipeline: glucose alert — no recipients configured for %s enc=%d",
+                cpmrn, encounter,
+            )
+
+        status["glucose_only_gate"] = "routed"
+        status["pass1"] = status.get("pass1") or "skipped_glucose_only"
+        status["pass2"] = status.get("pass2") or "skipped_glucose_only"
+        db.snapshot_schedule.update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": {
+                "last_llm_run_at":    snapshot_at,
+                "next_run_at":        _next_run_at(snapshot_at, 1),
+                "last_io_aggregate":  delta.get("io_last_24h"),
+                "last_delta_content": _compact_delta(delta),
+            }},
+        )
+        return True
+
+    except Exception:
+        logger.exception(
+            "pipeline: glucose alert failed for %s enc=%d — falling through to full pipeline",
+            cpmrn, encounter,
+        )
+        return False
+
+
 def _next_run_at(base, hours: int) -> datetime:
     """
     Compute next_run_at anchored to the scheduler's hourly tick boundary.
@@ -644,6 +856,7 @@ def _write_patient_run_audit(
     encounter: int,
     run_started_at: "datetime",
     pipeline_status: dict,
+    db: "Any" = None,
 ) -> None:
     """Write per-patient-per-run rows to BQ: pipeline_patient_runs + patient_next_checks."""
     try:
@@ -666,12 +879,16 @@ def _write_patient_run_audit(
             "delta_labs":       delta.get("new_labs", 0),
             "delta_notes":      delta.get("new_notes", 0),
             "delta_reports":    (pipeline_status.get("report_select") or {}).get("n", 0),
+            "trigger_reason":   str(pipeline_status.get("trigger_reason", "")),
         })
         # Write next_check state for each assessed problem.
         # problem_details.next_check is the raw model output — it has type/key/label
         # but NOT due_after (that is computed inside _upsert_problem and written to GCS).
         # Read the stored problem docs to get the actual computed due_after.
         if problem_details:
+            if db is None:
+                from backend.services.gcs_store import get_gcs_db
+                db = get_gcs_db()
             stored = list(db["patient_problems"].find({"CPMRN": cpmrn, "encounter": encounter}))
             stored_nc = {p.get("problem_name", ""): (p.get("next_check") or {}) for p in stored}
             nc_rows = []
@@ -739,6 +956,40 @@ def _emit_discharge_next_check_closures(
         logger.exception(
             "scheduler: next_check closure BQ write failed for discharged %s enc=%d", cpmrn, encounter,
         )
+
+
+def _compact_delta(delta: dict) -> dict:
+    """Extract a compact, display-ready summary of the delta for GCS persistence."""
+    vitals = [
+        {k: v for k, v in vit.items()
+         if k in ("timestamp", "daysHR", "daysBP", "daysMAP", "daysSpO2",
+                  "daysRR", "daysFiO2", "daysTemp", "daysGCS")}
+        for vit in (delta.get("new_vitals") or [])
+    ]
+    labs = [
+        {
+            "name":       lab.get("name", ""),
+            "reportedAt": str(lab.get("reportedAt", "")),
+            "values": {
+                k: (v.get("value") if isinstance(v, dict) else v)
+                for k, v in (lab.get("attributes") or {}).items()
+                if v is not None and (v.get("value") if isinstance(v, dict) else v) is not None
+            },
+        }
+        for lab in (delta.get("new_labs") or [])
+    ]
+    notes = [
+        {"timestamp": n.get("timestamp"), "note_type": n.get("note_type", ""),
+         "author": n.get("author", ""), "text": (n.get("text") or "")[:300]}
+        for n in (delta.get("new_notes") or [])
+    ]
+    return {
+        "vitals":     vitals,
+        "labs":       labs,
+        "notes":      notes,
+        "io_changed": delta.get("io_changed", False),
+        "io_last_24h": delta.get("io_last_24h"),
+    }
 
 
 def _derive_pipeline_outcome(status: dict) -> str:
@@ -1001,7 +1252,7 @@ def _collect_all(max_patients: int | None = None):
                     )
                     if report_result.get("card_sent"):
                         report_cards_sent += 1
-                    _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status)
+                    _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status, db=db)
                     _last_run_results.append({
                         "cpmrn": cpmrn, "status": "pipeline_on_existing_snapshot",
                         "pipeline": pipeline_status,
@@ -1048,7 +1299,7 @@ def _collect_all(max_patients: int | None = None):
                 else:
                     pipeline_status = {"error": "snapshot_not_found"}
 
-                _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status)
+                _write_patient_run_audit(cpmrn, encounter, _last_run_at, pipeline_status, db=db)
                 _last_run_results.append({
                     "cpmrn": cpmrn, "status": "ok",
                     **result,

@@ -2981,6 +2981,28 @@ def track_problems(
         try:
             from tools.radar_sync.insulin_advice import attach_insulin_order
             attach_insulin_order(cpmrn, encounter, assessment)
+            # Use insulin-recommended timing to override the generic lab_default next_check window.
+            _insulin_data = assessment.get("_insulin_order") or {}
+            _next_grbs_h = (_insulin_data.get("reco") or {}).get("next_grbs_after")
+            if _next_grbs_h and isinstance(_next_grbs_h, (int, float)):
+                try:
+                    db["patient_problems"].update_one(
+                        {
+                            "CPMRN": cpmrn, "encounter": encounter,
+                            "problem_name": assessment.get("problem_name"),
+                            "next_check": {"$ne": None},
+                        },
+                        {"$set": {"next_check.due_after": snapshot_at + timedelta(hours=int(_next_grbs_h))}},
+                    )
+                    logger.info(
+                        "problem_tracker: next_check.due_after set to +%dh for '%s' %s enc=%d (insulin timing)",
+                        int(_next_grbs_h), assessment.get("problem_name", ""), cpmrn, encounter,
+                    )
+                except Exception:
+                    logger.exception(
+                        "problem_tracker: failed to patch next_check.due_after for '%s' %s",
+                        assessment.get("problem_name", ""), cpmrn,
+                    )
         except Exception:
             logger.exception(
                 "problem_tracker: insulin_advice enrichment failed for '%s' %s",

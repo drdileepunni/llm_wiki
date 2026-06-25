@@ -356,9 +356,15 @@ async function loadRunAudit(runTs) {
         return '—';
       })();
 
-      const whyExpensive = r.pass1_needs_full
-        ? `<span class="text-muted small">${escHtml(r.pass1_tag || '')}</span>`
-        : '<span class="text-muted small">—</span>';
+      const whyExpensive = (() => {
+        const scheduling = r.trigger_reason || '';
+        const screener   = r.pass1_needs_full ? (r.pass1_tag || '') : '';
+        if (!scheduling && !screener) return '<span class="text-muted small">—</span>';
+        const parts = [];
+        if (scheduling) parts.push(`<div style="font-size:0.75rem;margin-bottom:2px"><span class="text-muted fw-semibold">Scheduling: </span><span class="text-muted">${escHtml(scheduling)}</span></div>`);
+        if (screener)   parts.push(`<div style="font-size:0.75rem"><span class="text-muted fw-semibold">Screener: </span><span class="text-muted">${escHtml(screener)}</span></div>`);
+        return parts.join('');
+      })();
 
       const problems = (r.problems || []);
       const problemsHtml = problems.length
@@ -1103,9 +1109,23 @@ function auditPatientRow(r) {
     return '—';
   })();
 
-  const whyExpensive = r.pass1_needs_full
-    ? `<span class="text-muted" style="font-size:0.8rem">${escHtml(r.pass1_tag || '')}</span>`
-    : '<span class="text-muted" style="font-size:0.8rem">—</span>';
+  const triggerReasonHtml = (() => {
+    const scheduling = r.trigger_reason || '';
+    const screener   = r.pass1_needs_full ? (r.pass1_tag || '') : '';
+    if (!scheduling && !screener) return '<span class="text-muted" style="font-size:0.8rem">—</span>';
+    const parts = [];
+    if (scheduling) parts.push(
+      `<div style="font-size:0.75rem; margin-bottom:2px">` +
+      `<span class="text-muted" style="font-weight:600">Scheduling: </span>` +
+      `<span class="text-muted">${escHtml(scheduling)}</span></div>`
+    );
+    if (screener) parts.push(
+      `<div style="font-size:0.75rem">` +
+      `<span class="text-muted" style="font-weight:600">Screener: </span>` +
+      `<span class="text-muted">${escHtml(screener)}</span></div>`
+    );
+    return parts.join('');
+  })();
 
   const problems = r.problems || [];
   const problemsHtml = problems.length
@@ -1146,7 +1166,7 @@ function auditPatientRow(r) {
       ${outcomeBadge}
     </td>
     <td class="align-top">${pass1Label}</td>
-    <td class="align-top">${whyExpensive}</td>
+    <td class="align-top">${triggerReasonHtml}</td>
     <td class="align-top">${pass2Label}</td>
     <td class="align-top">${deltaHtml}</td>
     <td class="align-top">${problemsHtml}</td>
@@ -1204,9 +1224,10 @@ async function togglePatientDetail(btn) {
 }
 
 function buildDetailPanel(d, panelId) {
-  const summaryHtml  = buildSummaryTab(d);
-  const problemsHtml = buildProblemsTab(d);
+  const summaryHtml   = buildSummaryTab(d);
+  const problemsHtml  = buildProblemsTab(d);
   const reasoningHtml = buildReasoningTab(d);
+  const deltaHtml     = buildDeltaTab(d);
 
   return `<div style="background:#f8f9fa; border-top:1px solid #dee2e6; padding:10px 14px">
     <div class="d-flex gap-3 border-bottom mb-2 pb-1" style="font-size:0.82rem">
@@ -1219,11 +1240,15 @@ function buildDetailPanel(d, panelId) {
       <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
               data-tab="reasoning" data-panel="${panelId}"
               onclick="switchAuditTab(this,'${panelId}')">Reasoning history</button>
+      <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+              data-tab="delta" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Last delta</button>
       <span class="ms-auto text-muted" style="font-size:0.72rem">lazy · loaded on expand</span>
     </div>
     <div data-pane="summary" data-panel="${panelId}">${summaryHtml}</div>
     <div data-pane="problems" data-panel="${panelId}" style="display:none">${problemsHtml}</div>
     <div data-pane="reasoning" data-panel="${panelId}" style="display:none">${reasoningHtml}</div>
+    <div data-pane="delta" data-panel="${panelId}" style="display:none">${deltaHtml}</div>
   </div>`;
 }
 
@@ -1330,7 +1355,7 @@ function buildReasoningTab(d) {
           <span class="badge ${statusBadgeClass(a.clinical_status)}" style="font-size:0.65rem">${escHtml(a.clinical_status || '?')}</span>
           ${alerted}${suppressed}
         </td>
-        <td style="padding:3px 6px; max-width:300px; font-size:0.75rem; color:#555">${escHtml(reason.slice(0, 150))}${reason.length > 150 ? '…' : ''}</td>
+        <td style="padding:3px 6px; font-size:0.75rem; color:#555; white-space:pre-wrap; word-break:break-word">${escHtml(reason)}</td>
       </tr>`;
     }).join('');
 
@@ -1346,6 +1371,82 @@ function buildReasoningTab(d) {
       </div>
     </div>`;
   }).join('') || '<span class="text-muted small">No assessment history found.</span>';
+}
+
+function buildDeltaTab(d) {
+  const dc = d.last_delta_content || {};
+  const runAt = d.last_llm_run_at ? new Date(d.last_llm_run_at).toLocaleString() : null;
+  const vitals = dc.vitals || [];
+  const labs   = dc.labs   || [];
+  const notes  = dc.notes  || [];
+  const io     = dc.io_last_24h;
+  const ioChanged = dc.io_changed;
+
+  if (!vitals.length && !labs.length && !notes.length && !ioChanged) {
+    return '<span class="text-muted small">No delta content stored yet — will appear after the next pipeline run.</span>';
+  }
+
+  const VITAL_LABELS = {
+    daysHR: 'HR', daysBP: 'BP', daysMAP: 'MAP', daysSpO2: 'SpO₂',
+    daysRR: 'RR', daysFiO2: 'FiO₂', daysTemp: 'Temp', daysGCS: 'GCS',
+  };
+
+  let html = '';
+  if (runAt) html += `<div class="text-muted mb-2" style="font-size:0.72rem">Last LLM run: ${escHtml(runAt)}</div>`;
+
+  if (vitals.length) {
+    html += `<div class="mb-3"><span class="text-primary fw-semibold" style="font-size:0.78rem">Vitals (${vitals.length})</span><div class="mt-1">`;
+    vitals.forEach(v => {
+      const ts = v.timestamp ? new Date(v.timestamp).toLocaleString() : '?';
+      const parts = Object.entries(VITAL_LABELS)
+        .filter(([k]) => v[k] != null && v[k] !== '')
+        .map(([k, label]) => `<span class="me-2"><span class="text-muted" style="font-size:0.7rem">${label}</span> <strong style="font-size:0.78rem">${escHtml(String(v[k]))}</strong></span>`)
+        .join('');
+      html += `<div style="font-size:0.78rem; padding:3px 0; border-bottom:1px solid #e9ecef">
+        <span class="text-muted me-2" style="font-size:0.7rem">${escHtml(ts)}</span>${parts || '<span class="text-muted">no values</span>'}
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  if (labs.length) {
+    html += `<div class="mb-3"><span class="text-success fw-semibold" style="font-size:0.78rem">Labs (${labs.length})</span><div class="mt-1">`;
+    labs.forEach(lab => {
+      const ts = lab.reportedAt ? new Date(lab.reportedAt).toLocaleString() : '?';
+      const vals = Object.entries(lab.values || {})
+        .map(([k, v]) => `<span class="me-2"><span class="text-muted" style="font-size:0.7rem">${escHtml(k)}</span> <strong style="font-size:0.78rem">${escHtml(String(v))}</strong></span>`)
+        .join('');
+      html += `<div style="font-size:0.78rem; padding:3px 0; border-bottom:1px solid #e9ecef">
+        <span class="fw-semibold me-1">${escHtml(lab.name || '?')}</span>
+        <span class="text-muted me-2" style="font-size:0.7rem">${escHtml(ts)}</span>${vals}
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  if (notes.length) {
+    html += `<div class="mb-3"><span class="text-warning fw-semibold" style="font-size:0.78rem">Notes (${notes.length})</span><div class="mt-1">`;
+    notes.forEach(n => {
+      const ts = n.timestamp ? new Date(n.timestamp).toLocaleString() : '?';
+      html += `<div style="font-size:0.78rem; padding:4px 0; border-bottom:1px solid #e9ecef">
+        <div class="text-muted mb-1" style="font-size:0.7rem">${escHtml(ts)} · ${escHtml(n.note_type || '')}${n.author ? ' · ' + escHtml(n.author) : ''}</div>
+        <div style="white-space:pre-wrap">${escHtml(n.text || '')}</div>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  if (ioChanged && io) {
+    html += `<div class="mb-2"><span class="text-info fw-semibold" style="font-size:0.78rem">I/O changed</span>
+      <div style="font-size:0.78rem; margin-top:4px">
+        <span class="me-3">Intake <strong>${io.intake_ml} ml</strong></span>
+        <span class="me-3">Output <strong>${io.output_ml} ml</strong></span>
+        <span>Balance <strong>${io.balance_ml} ml</strong></span>
+      </div>
+    </div>`;
+  }
+
+  return html;
 }
 
 function statusBadgeClass(status) {

@@ -368,7 +368,8 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
       COALESCE(delta_vitals, 0)  AS delta_vitals,
       COALESCE(delta_labs, 0)    AS delta_labs,
       COALESCE(delta_notes, 0)   AS delta_notes,
-      COALESCE(delta_reports, 0) AS delta_reports
+      COALESCE(delta_reports, 0) AS delta_reports,
+      COALESCE(trigger_reason, '') AS trigger_reason
     FROM {fqn("pipeline_patient_runs")}
     WHERE run_started_at = TIMESTAMP('{run_started_at}')
     ORDER BY CPMRN
@@ -396,6 +397,7 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
             "delta_labs":       int(r.get("delta_labs") or 0),
             "delta_notes":      int(r.get("delta_notes") or 0),
             "delta_reports":    int(r.get("delta_reports") or 0),
+            "trigger_reason":   r.get("trigger_reason", ""),
         })
     return result
 
