@@ -46,6 +46,11 @@ def is_glucose_problem(assessment: dict) -> bool:
     return any(kw in name for kw in _GLUCOSE_KEYWORDS)
 
 
+def is_hypoglycemia_problem(assessment: dict) -> bool:
+    name = (assessment.get("problem_name") or "").lower()
+    return "hypoglycemia" in name
+
+
 
 def _read_meds(cpmrn: str, encounter: int) -> list[dict]:
     """Return active medication orders; empty list on any error."""
@@ -269,6 +274,11 @@ def attach_insulin_order(cpmrn: str, encounter: int, assessment: dict) -> None:
         if not is_glucose_problem(assessment):
             return
 
+        # Hypoglycemia needs urgent management, not insulin — skip insulin guidance entirely.
+        if is_hypoglycemia_problem(assessment):
+            logger.info("insulin_advice: hypoglycemia problem for %s — skipping insulin guidance", cpmrn)
+            return
+
         engine_input, sourced = gather_inputs(cpmrn, encounter)
         if not engine_input:
             logger.info("insulin_advice: no glucose data for %s — skipping", cpmrn)
@@ -277,6 +287,11 @@ def attach_insulin_order(cpmrn: str, encounter: int, assessment: dict) -> None:
         reco = compute(engine_input)
         if "error" in reco:
             logger.warning("insulin_advice: engine error for %s: %s", cpmrn, reco["error"])
+            return
+
+        # Dose of 0 IU means no insulin needed — don't attach guidance to the alert card.
+        if reco.get("Suggested_insulin_dose") == 0:
+            logger.info("insulin_advice: dose is 0 IU for %s — skipping insulin section", cpmrn)
             return
 
         current_grbs = (engine_input.get("GRBS") or [0])[0]

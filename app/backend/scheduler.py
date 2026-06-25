@@ -783,24 +783,70 @@ def _run_glucose_alert(
             return False
 
         grbs_val = int(engine_input["GRBS"][0])
-        assessment = {
-            "problem_name":      "Hyperglycemia",
-            "clinical_status":   "worsening",
-            "should_alert":      True,
-            "being_addressed":   False,
-            "alert_title":       f"Hyperglycemia — glucose {grbs_val} mg/dL",
-            "alert_reason":      f"New glucose result: {grbs_val} mg/dL. Insulin recommendation below.",
-            "note_vs_objective": "",
-        }
-        _aio(cpmrn, encounter, assessment)
+        is_hypoglycemia = grbs_val < 70
+
+        if is_hypoglycemia:
+            assessment = {
+                "problem_name":      "Hypoglycemia",
+                "clinical_status":   "critical",
+                "should_alert":      True,
+                "being_addressed":   False,
+                "alert_title":       f"Hypoglycemia — glucose {grbs_val} mg/dL",
+                "alert_reason":      f"Glucose dropped to {grbs_val} mg/dL. Hypoglycemia requires urgent assessment.",
+                "note_vs_objective": "",
+            }
+            # No insulin guidance for hypoglycemia — do not call _aio()
+            _next_h = 1  # recheck in 1h
+        else:
+            assessment = {
+                "problem_name":      "Hyperglycemia",
+                "clinical_status":   "worsening",
+                "should_alert":      True,
+                "being_addressed":   False,
+                "alert_title":       f"Hyperglycemia — glucose {grbs_val} mg/dL",
+                "alert_reason":      f"New glucose result: {grbs_val} mg/dL. Insulin recommendation below.",
+                "note_vs_objective": "",
+            }
+            _aio(cpmrn, encounter, assessment)
+            _insulin_data = assessment.get("_insulin_order") or {}
+            _reco = _insulin_data.get("reco") or {}
+            _next_h = _reco.get("next_grbs_after") or None
+            _dose = _reco.get("Suggested_insulin_dose", -1)
+
+            # Suppress alert when recommended dose is 0 IU — no clinical action needed.
+            if _dose == 0:
+                logger.info(
+                    "pipeline: glucose alert — dose is 0 IU, suppressing alert for %s enc=%d",
+                    cpmrn, encounter,
+                )
+                if _next_h and isinstance(_next_h, (int, float)):
+                    try:
+                        db["patient_problems"].update_one(
+                            {"CPMRN": cpmrn, "encounter": encounter, "problem_name": "Hyperglycemia", "next_check": {"$ne": None}},
+                            {"$set": {"next_check.due_after": snapshot_at + timedelta(hours=int(_next_h))}},
+                        )
+                    except Exception:
+                        logger.exception("pipeline: glucose alert — failed to update next_check.due_after for %s", cpmrn)
+                status["glucose_only_gate"] = "suppressed_zero_dose"
+                status["pass1"] = status.get("pass1") or "skipped_glucose_only"
+                status["pass2"] = status.get("pass2") or "skipped_glucose_only"
+                db.snapshot_schedule.update_one(
+                    {"CPMRN": cpmrn, "encounter": encounter},
+                    {"$set": {
+                        "last_llm_run_at":    snapshot_at,
+                        "next_run_at":        _next_run_at(snapshot_at, int(_next_h) if _next_h else 6),
+                        "last_io_aggregate":  delta.get("io_last_24h"),
+                        "last_delta_content": _compact_delta(delta),
+                    }},
+                )
+                return True
 
         # Use insulin-recommended timing for next_check, not the generic 24h lab_default.
-        _insulin_data = assessment.get("_insulin_order") or {}
-        _next_h = (_insulin_data.get("reco") or {}).get("next_grbs_after")
         if _next_h and isinstance(_next_h, (int, float)):
             try:
+                problem_name_for_nc = "Hypoglycemia" if is_hypoglycemia else "Hyperglycemia"
                 db["patient_problems"].update_one(
-                    {"CPMRN": cpmrn, "encounter": encounter, "problem_name": "Hyperglycemia", "next_check": {"$ne": None}},
+                    {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name_for_nc, "next_check": {"$ne": None}},
                     {"$set": {"next_check.due_after": snapshot_at + timedelta(hours=int(_next_h))}},
                 )
                 logger.info(
