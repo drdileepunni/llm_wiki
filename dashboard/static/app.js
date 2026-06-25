@@ -343,9 +343,11 @@ async function loadRunAudit(runTs) {
       return;
     }
     tbody.innerHTML = rows.map(r => {
-      const pass1Label = r.pass1_needs_full
-        ? `<span class="badge bg-danger bg-opacity-75">${escHtml(r.pass1_tag || 'flagged')}</span>`
-        : `<span class="badge bg-secondary bg-opacity-25 text-secondary">cheap</span>`;
+      const pass1Label = r.pass1_tag === 'upstream_gate'
+        ? '<span class="badge bg-info bg-opacity-75 text-dark">lab/vital gate</span>'
+        : r.pass1_needs_full
+          ? `<span class="badge bg-danger bg-opacity-75">${escHtml(r.pass1_tag || 'flagged')}</span>`
+          : `<span class="badge bg-secondary bg-opacity-25 text-secondary">cheap</span>`;
 
       const pass2Label = (() => {
         const p = r.pass2_outcome || '';
@@ -1023,6 +1025,23 @@ function fmtDue(date) {
   return date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
 }
 
+function fmtRunTs(isoStr) {
+  // Format run timestamp in IST (Asia/Kolkata) — UTC is hard to parse at a glance
+  try {
+    return new Date(isoStr).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year:     'numeric',
+      month:    '2-digit',
+      day:      '2-digit',
+      hour:     '2-digit',
+      minute:   '2-digit',
+      hour12:   false,
+    }).replace(',', '');   // "25/06/2026 06:04" — drop the comma locale inserts
+  } catch {
+    return isoStr.slice(0, 16).replace('T', ' ');
+  }
+}
+
 // ── Run picker + patient audit table ─────────────────────────────────────────
 
 async function loadAuditRuns() {
@@ -1039,7 +1058,7 @@ async function loadAuditRuns() {
     }
 
     picker.innerHTML = rows.map((r, idx) => {
-      const ts    = r.run_started_at.slice(0, 16).replace('T', ' ');
+      const ts    = fmtRunTs(r.run_started_at) + ' IST';
       const label = idx === 0
         ? `${ts}  (latest · ${fmt(r.expensive_count || 0)} exp, ${fmt(r.alerts_sent)} alerts)`
         : `${ts}  (${fmt(r.expensive_count || 0)} exp, ${fmt(r.alerts_sent)} alerts)`;
@@ -1096,9 +1115,11 @@ async function loadAuditRunPatients(runTs) {
 }
 
 function auditPatientRow(r) {
-  const pass1Label = r.pass1_needs_full
-    ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">flagged</span>`
-    : `<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>`;
+  const pass1Label = r.pass1_tag === 'upstream_gate'
+    ? '<span class="badge bg-info bg-opacity-75 text-dark" style="font-size:0.7rem">lab/vital gate</span>'
+    : r.pass1_needs_full
+      ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">flagged</span>`
+      : `<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>`;
 
   const pass2Label = (() => {
     const p = r.pass2_outcome || '';

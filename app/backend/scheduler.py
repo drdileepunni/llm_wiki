@@ -538,6 +538,17 @@ def _run_live_pipeline(
             cpmrn, encounter,
         )
         status["pass1"] = "skipped_upstream_gate"
+        # Advance the snapshot schedule so the same labs/vitals aren't re-flagged
+        # next run. This mirrors what the screener path writes.
+        db.snapshot_schedule.update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": {
+                "last_llm_run_at":    snapshot_at,
+                "next_run_at":        _next_run_at(snapshot_at, 1),
+                "last_io_aggregate":  delta.get("io_last_24h"),
+                "last_delta_content": _compact_delta(delta),
+            }},
+        )
     elif not _gate_new_notes:
         # No new notes — nothing for the screener to evaluate.
         logger.info(
@@ -866,13 +877,23 @@ def _write_patient_run_audit(
         problem_details = tracker.get("problem_details") if isinstance(tracker, dict) else None
         store = get_bq_store()
         delta = pipeline_status.get("delta") or {}
+        # pass1 may be a dict (screener ran) or a string ("skipped_upstream_gate", etc.)
+        if isinstance(pass1, dict):
+            _pass1_tag       = pass1.get("flag_reason", "")
+            _pass1_needs_full = bool(pass1.get("needs_full_analysis", False))
+        elif pass1 == "skipped_upstream_gate":
+            _pass1_tag       = "upstream_gate"
+            _pass1_needs_full = False
+        else:
+            _pass1_tag       = ""
+            _pass1_needs_full = False
         store.insert_patient_run({
             "run_started_at":   run_started_at,
             "CPMRN":            cpmrn,
             "encounter":        encounter,
             "pipeline_outcome": _derive_pipeline_outcome(pipeline_status),
-            "pass1_tag":        pass1.get("flag_reason", "") if isinstance(pass1, dict) else "",
-            "pass1_needs_full": bool(pass1.get("needs_full_analysis", False)) if isinstance(pass1, dict) else False,
+            "pass1_tag":        _pass1_tag,
+            "pass1_needs_full": _pass1_needs_full,
             "pass2_outcome":    str(pipeline_status.get("pass2", "")),
             "problem_details":  problem_details,
             "delta_vitals":     delta.get("new_vitals", 0),

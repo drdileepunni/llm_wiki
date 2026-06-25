@@ -18,13 +18,26 @@ flowchart TD
     F -- NO\nno force --> G[fn_detector only\nzero LLM]
     F -- NO\nforce_glucose_check only --> GF[Glucose forced recheck\ncheap path — no LLM\nnext_check.due_after = next_grbs_after]
     F -- NO\nforce_expensive --> H[Forced shortcut\nskip summary & pass-1]
-    F -- YES --> I{GATE 2.5 NEW\nvitals-only delta?\nall NEWS2=0 O2 stripped?}
+    F -- YES --> I{GATE 2.5\nvitals-only delta?}
     H --> R
-    I -- YES --> J[Zero LLM cost\nfn_detector only]
-    I -- NO --> K[CHEAP RUN\nSummary update flash-lite\nPass-1 screener]
-    K --> L{GATE 3\npass-1 needs_full\nOR force_expensive?}
+    I -- all vitals normal --> J[Zero LLM cost\nfn_detector only]
+    I -- any vital abnormal --> VFORCE[force_full_vitals\nskip screener → full run]
+    I -- not vitals-only → labs/notes present --> K2{GATE 2.6\nglucose-only labs?}
+    K2 -- YES --> GONLY[Glucose-only gate\ninsulin_advice · no LLM]
+    K2 -- NO --> K7{GATE 2.7\nnew ABG?}
+    K7 -- threshold crossed --> ABGF[force_full_abg\nskip screener → full run]
+    K7 -- no threshold / no ABG --> K8{GATE 2.8\nnon-ABG non-glucose lab?}
+    K8 -- YES --> LABF[force_full_other_lab\nskip screener → full run]
+    K8 -- NO\nnotes only --> NOTES{new notes\nin delta?}
+    NOTES -- NO --> NOSKIP[Pass-2 skipped\nfn_detector only]
+    NOTES -- YES --> K[CHEAP RUN\nPass-1 screener · notes only\nflash-lite · no thinking]
+    K --> L{pass-1\nneeds_full?}
     L -- NO --> M[Pass-2 skipped\nfn_detector only]
-    L -- YES\npass-1 flagged --> N[EXPENSIVE RUN\nstatus_classifier\nproblem_tracker]
+    L -- YES --> SUM[Summary update\nflash-lite]
+    VFORCE --> SUM
+    ABGF --> SUM
+    LABF --> SUM
+    SUM --> N[EXPENSIVE RUN\nstatus_classifier\nproblem_tracker]
     L -- YES\nforced only --> R[problem_tracker\nfocus=overdue items]
     N --> O{Assessment result\nstill abnormal & unaddressed?}
     R --> O
@@ -37,7 +50,6 @@ flowchart TD
 
     style H fill:#fef9e7,stroke:#e67e22
     style R fill:#fef9e7,stroke:#e67e22
-    style K fill:#eafaf1,stroke:#27ae60
     style N fill:#fdecea,stroke:#c0392b
     style Q fill:#f0f0ff,stroke:#6c5ce7
     style S fill:#f0f0ff,stroke:#6c5ce7
@@ -45,19 +57,67 @@ flowchart TD
 
 ---
 
-## The three new gates
+## Gate descriptions
 
-### GATE 2.5 — Vital-within-normal gate
+### GATE 2.5 — Vital-within-normal gate (bidirectional)
 
 Added in `fn_detector.py` (`is_vital_row_normal`, `all_new_vitals_normal`).
 
-Fires when:
-- The delta is **vitals-only** (no new labs, notes, or report findings)
-- Every new vital row scores **0 on NEWS2** — with the FiO2/supplemental-O2 component stripped so stable ventilated patients can also be skipped
-- No Netra camera `abnormal_list` flags
-- GCS ≥ 15
+Fires when the delta is **vitals-only** (no new labs, notes, or report findings):
 
-Result: zero LLM spend for that cycle. The fn_detector safety net still runs.
+| Condition | Outcome |
+|---|---|
+| All vitals score 0 on NEWS2 (O2 component stripped) | `vital_normal_gate=skipped` — zero LLM cost for that cycle |
+| Any vital is abnormal | `force_full_vitals=True` → skips Pass-1 screener, runs full Pass 2 |
+
+The gate is two-sided: it can skip a run entirely when everything is normal, or force a full run when something is abnormal. When the delta is not vitals-only (labs or notes also present), Gate 2.5 does not fire — the other gates handle the mixed case.
+
+### GATE 2.6 — Glucose-only gate
+
+Fires when: no forced recheck, no new reports, delta is labs-only, and **every** new lab doc is glucose-named (RBS/CBG/GRBS/Blood Glucose/Random Blood Glucose).
+
+Routes directly to `insulin_advice.gather_inputs + compute → alert card`, skipping summary update, Pass 1, status_classifier, and problem_tracker entirely. `next_check.due_after` is set from `next_grbs_after` returned by the insulin engine.
+
+A panel document (e.g. "Renal Function Test") that happens to contain a glucose attribute does **not** trigger Gate 2.6 — it falls through to Gate 2.8 (full run). This is correct: panel results may contain other values that need assessment.
+
+### GATE 2.7 — ABG gate (deterministic threshold check)
+
+Fires when the delta contains any new blood gas panel (ABG/VBG/Gas Panel). Checks five parameters:
+
+| Parameter | Flag threshold |
+|---|---|
+| pH | < 7.30 or > 7.50 |
+| pO2 | < 60 mmHg |
+| paCO2 | > 50 mmHg or < 30 mmHg |
+| Lactate | > 2 mmol/L |
+| Bicarb (HCO3) | < 15 or > 35 mmol/L |
+
+Thresholds are intentionally lax — this is a screening gate. Missing a borderline ABG is more dangerous than running an unnecessary Pass 2.
+
+| Condition | Outcome |
+|---|---|
+| Any value crosses threshold | `force_full_abg=True` → full analysis |
+| ABG present, no threshold crossed | No action; Pass-1 note screener may still fire |
+
+### GATE 2.8 — Non-ABG, non-glucose lab gate
+
+Fires when the delta contains **any** new lab that is neither an ABG panel nor a glucose test (e.g. creatinine, Hb, troponin, electrolytes, WBC). Always triggers a full run — any new lab result is information the problem tracker should assess.
+
+`force_full_other_lab=True` → skips Pass-1 screener, runs full Pass 2.
+
+### GATE 3 / Pass-1 screener — Notes only
+
+The Pass-1 screener (`pass1_screener.py`) runs **only when**:
+1. No upstream gate fired a force flag (`force_full_vitals`, `force_full_abg`, `force_full_other_lab`, `force_expensive`)
+2. At least one new note is present in the delta
+
+Its sole responsibility is reading free-text clinical note content and deciding if it contains anything significant — a new problem, treatment failure, plan change, or worrying finding. It does **not** re-evaluate vitals or labs; those are handled deterministically by Gates 2.5–2.8.
+
+The note text is passed in full (up to 1000 chars per note, up to 5 notes). The screener returns `needs_full_analysis` + `flag_reason`.
+
+If no new notes are present, the screener is skipped entirely (no LLM call) and Pass 2 is also skipped.
+
+**Design principle:** each gate owns one data type. Vitals → Gate 2.5. Glucose → Gate 2.6. ABG → Gate 2.7. Other labs → Gate 2.8. Free text → Pass-1 screener. No overlap.
 
 ### Overdue next_check routing
 
@@ -80,7 +140,9 @@ If both buckets are non-empty simultaneously (e.g. glucose + creatinine both ove
 `force_expensive` is set — the full expensive run handles glucose via the normal
 `attach_insulin_order` enrichment path.
 
-### Exponential backoff
+---
+
+## Exponential backoff
 
 When a follow-up finds the value **still abnormal and unaddressed** (proxy for caregiver ignoring the alert), `alert_attempts` increments and the next interval grows:
 
@@ -166,8 +228,8 @@ The suppression fires **before** the model runs — a suppressed problem is neve
 
 | File | Role |
 |---|---|
-| `app/backend/scheduler.py` | Gate sequence, `_run_live_pipeline()` |
+| `app/backend/scheduler.py` | Gate sequence, `_run_live_pipeline()`, `_is_abg_lab()`, `_check_abg_thresholds()` |
 | `tools/radar_sync/fn_detector.py` | `is_vital_row_normal`, `all_new_vitals_normal`, NEWS2 scoring |
 | `tools/radar_sync/problem_tracker.py` | `overdue_next_checks`, `track_problems(focus=...)`, backoff in `_upsert_problem` |
-| `tools/radar_sync/pass1_screener.py` | Cheap triage; `needs_full_analysis`, `next_run_hours` |
+| `tools/radar_sync/pass1_screener.py` | Note-only screener; `needs_full_analysis`, `flag_reason` |
 | `tools/radar_sync/status_classifier.py` | Reasoning-model status labels (skipped on forced-only path) |
