@@ -1124,12 +1124,22 @@ function auditPatientRow(r) {
 
   const pass2Label = (() => {
     const p = r.pass2_outcome || '';
-    if (p === 'skipped_by_pass1')             return '<span class="badge bg-secondary bg-opacity-20 text-muted" style="font-size:0.7rem">skipped</span>';
-    if (p === 'forced_by_overdue_next_check') return '<span class="badge bg-warning text-dark" style="font-size:0.7rem">forced (overdue)</span>';
-    if (p === 'upstream_forced')              return '<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">expensive (gate forced)</span>';
-    if (p.startsWith('pass2:'))               return `<span class="badge bg-primary bg-opacity-75" style="font-size:0.7rem">${escHtml(p.replace('pass2:',''))}</span>`;
-    if (p)                                    return `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(p)}</span>`;
-    return '—';
+    let badge = '';
+    if (p === 'skipped_by_pass1')             badge = '<span class="badge bg-secondary bg-opacity-20 text-muted" style="font-size:0.7rem">skipped</span>';
+    else if (p === 'forced_by_overdue_next_check') badge = '<span class="badge bg-warning text-dark" style="font-size:0.7rem">forced (overdue)</span>';
+    else if (p === 'upstream_forced')         badge = '<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">expensive (gate forced)</span>';
+    else if (p.startsWith('pass2:'))          badge = `<span class="badge bg-primary bg-opacity-75" style="font-size:0.7rem">${escHtml(p.replace('pass2:',''))}</span>`;
+    else if (p)                               badge = `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(p)}</span>`;
+    else                                      badge = '—';
+
+    const scoped = r.problems_scoped;
+    if (scoped && scoped.length) {
+      const pills = scoped.map(n =>
+        `<span class="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25" style="font-size:0.62rem;font-weight:500">${escHtml(n)}</span>`
+      ).join(' ');
+      badge += `<div class="mt-1" style="font-size:0.65rem;color:#6c757d;line-height:1.4">scope<br>${pills}</div>`;
+    }
+    return badge;
   })();
 
   const triggerReasonHtml = (() => {

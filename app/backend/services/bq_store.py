@@ -391,6 +391,8 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.pipeline_patient_runs` (
   delta_labs       INT64,
   delta_notes      INT64,
   delta_reports    INT64,
+  trigger_reason   STRING,
+  problems_scoped  STRING,
   created_at       TIMESTAMP
 )
 OPTIONS (description = "Per-patient-per-run audit trace for the dashboard run-audit table")
@@ -402,7 +404,8 @@ ADD COLUMN IF NOT EXISTS delta_vitals    INT64,
 ADD COLUMN IF NOT EXISTS delta_labs      INT64,
 ADD COLUMN IF NOT EXISTS delta_notes     INT64,
 ADD COLUMN IF NOT EXISTS delta_reports   INT64,
-ADD COLUMN IF NOT EXISTS trigger_reason  STRING
+ADD COLUMN IF NOT EXISTS trigger_reason  STRING,
+ADD COLUMN IF NOT EXISTS problems_scoped STRING
 """
 
 _DDL["fn_adjudications"] = f"""
@@ -1105,12 +1108,12 @@ class BQStudyStore:
           (run_started_at, CPMRN, encounter, pipeline_outcome, pass1_tag,
            pass1_needs_full, pass2_outcome, problem_details,
            delta_vitals, delta_labs, delta_notes, delta_reports,
-           trigger_reason, created_at)
+           trigger_reason, problems_scoped, created_at)
         VALUES
           (@run_started_at, @CPMRN, @encounter, @pipeline_outcome, @pass1_tag,
            @pass1_needs_full, @pass2_outcome, @problem_details,
            @delta_vitals, @delta_labs, @delta_notes, @delta_reports,
-           @trigger_reason, @created_at)
+           @trigger_reason, @problems_scoped, @created_at)
         """
         self._execute(sql, [
             bigquery.ScalarQueryParameter("run_started_at",   "TIMESTAMP", _dt_to_iso(doc.get("run_started_at"))),
@@ -1126,6 +1129,7 @@ class BQStudyStore:
             bigquery.ScalarQueryParameter("delta_notes",      "INT64",     int(doc.get("delta_notes") or 0)),
             bigquery.ScalarQueryParameter("delta_reports",    "INT64",     int(doc.get("delta_reports") or 0)),
             bigquery.ScalarQueryParameter("trigger_reason",   "STRING",    doc.get("trigger_reason", "")),
+            bigquery.ScalarQueryParameter("problems_scoped",  "STRING",    _to_json_col(doc.get("problems_scoped"))),
             bigquery.ScalarQueryParameter("created_at",       "TIMESTAMP", _now_iso()),
         ])
 

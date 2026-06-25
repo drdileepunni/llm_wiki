@@ -2258,6 +2258,7 @@ def track_problems(
     focus: list[dict] | None = None,
     delta: dict | None = None,
     clinical_timeline: dict | None = None,
+    problems_filter: list[str] | None = None,
 ) -> dict:
     """
     Run the problem tracker ReAct loop for one patient.
@@ -2320,11 +2321,29 @@ def track_problems(
             logger.info("problem_tracker: no problems in summary for %s enc=%d", cpmrn, encounter)
             return {"problem_tracker": "no_problems"}
 
-    # ── Phase C — blast-radius scoping (shadow-mode by default) ─────────────────
-    # Compute which problems the delta could plausibly move. In shadow mode this
-    # only logs; when DELTA_SCOPE_PRUNE=1 it actively restricts the assessed list.
-    _prune_active = os.environ.get("DELTA_SCOPE_PRUNE", "").strip() == "1"
-    if delta:
+    # ── Phase C — blast-radius scoping ────────────────────────────────────────────
+    # When problems_filter is passed by the scheduler (pre-computed from trigger evidence),
+    # use it directly and activate pruning. Otherwise fall back to the old shadow-mode
+    # behaviour (DELTA_SCOPE_PRUNE=1 env var required for active pruning).
+    _prune_active = problems_filter is not None or os.environ.get("DELTA_SCOPE_PRUNE", "").strip() == "1"
+    if problems_filter is not None and problems:
+        _focus_names = {f["problem_name"] for f in (focus or [])}
+        _filter_set  = set(problems_filter) | _focus_names
+        _assess = [p for p in problems if p["name"] in _filter_set]
+        _cold   = [p for p in problems if p["name"] not in _filter_set]
+        if _cold:
+            logger.info(
+                "problem_tracker: problems_filter active — assess=%s prune=%s for %s enc=%d",
+                [p["name"] for p in _assess], [p["name"] for p in _cold], cpmrn, encounter,
+            )
+            if not _assess:
+                logger.info(
+                    "problem_tracker: problems_filter — no matching problems for %s enc=%d, skipping",
+                    cpmrn, encounter,
+                )
+                return {"problem_tracker": "no_hot_problems"}
+            problems = _assess
+    elif delta:
         try:
             from tools.radar_sync.delta_scope import blast_radius_problems, classify_delta
             _scope = classify_delta(delta)

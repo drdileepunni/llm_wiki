@@ -44,6 +44,21 @@ _LAB_CROSSLINKS: dict[str, set[str]] = {
     "glucose":     set(),            # handled by Gate 2.6; no additional category
 }
 
+# Vital parameter names → direct problem-name keyword matching.
+# Used by blast_radius_problems to match problems like "Tachycardia" when HR is
+# abnormal, independent of category-based rule injection.
+# Biased toward inclusion — short, unambiguous root words only.
+_VITAL_PROBLEM_KEYWORDS: dict[str, list[str]] = {
+    "hr":   ["tachycardia", "bradycardia", "arrhythmia", "cardiac", "heart rate"],
+    "spo2": ["desaturation", "hypoxia", "respiratory", "oxygen"],
+    "rr":   ["respiratory", "tachypnea", "breathe", "ventilat"],
+    "bp":   ["hypertension", "hypotension", "pressure"],
+    "map":  ["hypotension", "pressure", "perfusion"],
+    "temp": ["fever", "pyrexia", "hypothermia", "sepsis", "febrile"],
+    "gcs":  ["gcs", "consciousness", "encephalopathy"],
+    "fio2": ["respiratory", "oxygen", "ventilat"],
+}
+
 # Vital parameter names (from chart vital dicts) → category mappings
 _VITAL_CROSSLINKS: dict[str, set[str]] = {
     "spo2":   {"respiratory"},
@@ -218,20 +233,43 @@ def blast_radius_problems(delta: dict, problems: list[dict]) -> list[dict]:
     hot: list[dict] = []
     for p in problems:
         ptext = _problem_text([p])
+        pname_lc = (p.get("name") or "").lower()
         # Category keyword match
         if any(kw in ptext for kw in hot_keywords):
             hot.append(p)
             continue
-        # Direct analyte → problem match (e.g. "glucose" in labs → "hyperglycemia" problem)
-        if present_analytes:
-            pname_lc = (p.get("name") or "").lower()
-            for analyte in present_analytes:
-                problem_kws = lab_problem_map.get(analyte) or set()
-                if any(kw in pname_lc for kw in problem_kws):
-                    hot.append(p)
-                    break
+        # Direct vital → problem name match (e.g. HR abnormal → "Tachycardia")
+        for vp in scope.vital_params:
+            vital_kws = _VITAL_PROBLEM_KEYWORDS.get(vp) or []
+            if any(kw in pname_lc for kw in vital_kws):
+                hot.append(p)
+                break
+        else:
+            # Direct analyte → problem match (e.g. "glucose" in labs → "hyperglycemia" problem)
+            if present_analytes:
+                for analyte in present_analytes:
+                    problem_kws = lab_problem_map.get(analyte) or set()
+                    if any(kw in pname_lc for kw in problem_kws):
+                        hot.append(p)
+                        break
 
     return hot
+
+
+def get_scoped_problem_names(delta: dict, problems: list[dict]) -> list[str] | None:
+    """
+    Return problem names to assess for this delta trigger, or None for a full run.
+
+    Returns None when: delta is wildcard (has notes/reports), no problems exist,
+    or blast_radius covers the full list (no meaningful pruning).
+    """
+    scope = classify_delta(delta)
+    if scope.is_wildcard or not problems:
+        return None
+    hot = blast_radius_problems(delta, problems)
+    if not hot or len(hot) >= len(problems):
+        return None
+    return [p["name"] for p in hot]
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────

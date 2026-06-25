@@ -651,6 +651,24 @@ def _run_live_pipeline(
     except Exception:
         logger.exception("pipeline: context save failed for %s enc=%d", cpmrn, encounter)
 
+    # ── Trigger-scope: for upstream-gate runs, narrow which problems are assessed ─
+    # Notes/report paths are wildcard (screener already scopes them); only gates
+    # 2.5/2.7/2.8 need deterministic scoping here.
+    _problems_filter: list[str] | None = None
+    if _force_full_upstream:
+        try:
+            from tools.radar_sync.delta_scope import get_scoped_problem_names
+            _summary_problems = new_structured.get("problems") or [] if isinstance(new_structured, dict) else []
+            _problems_filter = get_scoped_problem_names(delta, _summary_problems)
+            status["problems_scoped"] = _problems_filter  # None = full run; list = scoped names
+            if _problems_filter:
+                logger.info(
+                    "pipeline: trigger-scope — assessing %d/%d problem(s) for %s enc=%d: %s",
+                    len(_problems_filter), len(_summary_problems), cpmrn, encounter, _problems_filter,
+                )
+        except Exception:
+            logger.exception("pipeline: trigger-scope failed for %s enc=%d — assessing all", cpmrn, encounter)
+
     # Step 5: problem tracker — manages persistent problem list + targeted alerts
     try:
         from tools.radar_sync.problem_tracker import track_problems
@@ -661,6 +679,7 @@ def _run_live_pipeline(
             focus=_overdue if _overdue else None,
             delta=delta,
             clinical_timeline=clinical_timeline,
+            problems_filter=_problems_filter,
         )
         status["problem_tracker"] = tracker_result
         if _force_full_upstream and not status.get("pass2"):
@@ -959,6 +978,7 @@ def _write_patient_run_audit(
             "delta_notes":      delta.get("new_notes", 0),
             "delta_reports":    (pipeline_status.get("report_select") or {}).get("n", 0),
             "trigger_reason":   str(pipeline_status.get("trigger_reason", "")),
+            "problems_scoped":  pipeline_status.get("problems_scoped"),  # None = full run
         })
         # Write next_check state for each assessed problem.
         # problem_details.next_check is the raw model output — it has type/key/label

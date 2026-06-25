@@ -369,7 +369,8 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
       COALESCE(delta_labs, 0)    AS delta_labs,
       COALESCE(delta_notes, 0)   AS delta_notes,
       COALESCE(delta_reports, 0) AS delta_reports,
-      COALESCE(trigger_reason, '') AS trigger_reason
+      COALESCE(trigger_reason, '') AS trigger_reason,
+      problems_scoped
     FROM {fqn("pipeline_patient_runs")}
     WHERE run_started_at = TIMESTAMP('{run_started_at}')
     ORDER BY CPMRN
@@ -385,6 +386,13 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
                 problems = _json.loads(pd_raw) if isinstance(pd_raw, str) else pd_raw
             except Exception:
                 problems = []
+        ps_raw = r.get("problems_scoped")
+        problems_scoped = None
+        if ps_raw:
+            try:
+                problems_scoped = _json.loads(ps_raw) if isinstance(ps_raw, str) else ps_raw
+            except Exception:
+                problems_scoped = None
         result.append({
             "CPMRN":            r.get("CPMRN", ""),
             "encounter":        int(r.get("encounter") or 0),
@@ -398,6 +406,7 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
             "delta_notes":      int(r.get("delta_notes") or 0),
             "delta_reports":    int(r.get("delta_reports") or 0),
             "trigger_reason":   r.get("trigger_reason", ""),
+            "problems_scoped":  problems_scoped,  # null = full run; array = scoped names
         })
     return result
 
