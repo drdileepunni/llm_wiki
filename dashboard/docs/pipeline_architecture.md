@@ -119,6 +119,61 @@ If no new notes are present, the screener is skipped entirely (no LLM call) and 
 
 **Design principle:** each gate owns one data type. Vitals → Gate 2.5. Glucose → Gate 2.6. ABG → Gate 2.7. Other labs → Gate 2.8. Free text → Pass-1 screener. No overlap.
 
+### Clinical Timeline
+
+The problem tracker and status classifier now share a **per-patient clinical event timeline** stored at `patient_contexts.clinical_timeline`. This is an incrementally-maintained ordered history of clinical events — the structural fix for temporal reasoning errors (e.g. flagging NPO → oral diet progression as a "contradiction").
+
+#### Storage model
+
+```json
+{
+  "prior_course": "<compressed prose — settled history, ≤1500 chars>",
+  "recent_events": [
+    { "t": "2026-06-23T14:00:00Z", "event": "NPO ordered for suspected SBO",
+      "problem": "Subacute Intestinal Obstruction", "kind": "order",
+      "source": "note@2026-06-23T14:00" },
+    { "t": "2026-06-25T09:20:00Z", "event": "Oral nutrition resumed, tolerating liquids",
+      "problem": "Subacute Intestinal Obstruction", "kind": "status_change",
+      "source": "note@2026-06-25T09:20" }
+  ]
+}
+```
+
+`source` on every event is the anti-hallucination guard — every event must cite a note timestamp, lab name/value, or vital name/value from real data.
+
+#### Windowing and fold-on-eviction
+
+| Parameter | Value |
+|---|---|
+| `RECENT_DAYS` | 7 days |
+| `RECENT_MAX_EVENTS` | 30 events |
+| `PRIOR_COURSE_MAX_CHARS` | 1500 chars |
+
+An event stays in `recent_events` while within **both** windows. Evicted events are folded into `prior_course` via an append-only operation. The fold fires at most once per eviction cycle, preserves existing `prior_course` verbatim, and only condenses the oldest prose if the char cap is exceeded.
+
+**No-data-loss:** `recent_events` drops evicted events only when the model returned a non-None `prior_course` for that fold. If the fold didn't happen, events stay and retry next run.
+
+#### Data flow per expensive run
+
+| Step | Action |
+|---|---|
+| `scheduler.py` | Loads `clinical_timeline` from `ctx` at run start |
+| `status_classifier` | Receives timeline (read-only); renders it into the prefetch block for temporal context |
+| `problem_tracker` | Receives timeline; renders it + optional fold instruction into user message; emits `timeline_updates` (new events) and conditional `prior_course` via `set_all_assessments` |
+| `scheduler.py` | Persists `tracker_result["clinical_timeline"]` back to `patient_contexts` |
+
+**Cost:** zero extra LLM calls. The timeline is emitted as part of the tracker's existing `set_all_assessments` tool call.
+
+#### Implementation files
+
+| File | Role |
+|---|---|
+| `tools/radar_sync/clinical_timeline.py` | Pure functions: `partition`, `render`, `render_for_tracker`, `apply_updates`, constants |
+| `tools/radar_sync/problem_tracker.py` | Consumes + maintains timeline; `set_all_assessments` schema adds `timeline_updates` + `prior_course` |
+| `tools/radar_sync/status_classifier.py` | Reads timeline into prefetch block (read-only) |
+| `app/backend/scheduler.py` | Loads + persists `clinical_timeline` on `patient_contexts` |
+| `dashboard/audit.py` | Exposes `clinical_timeline` in patient detail payload |
+
 ### Overdue next_check routing
 
 When `overdue_next_checks()` finds any lab-type `next_check` whose `due_after < now`, the overdue
@@ -232,4 +287,5 @@ The suppression fires **before** the model runs — a suppressed problem is neve
 | `tools/radar_sync/fn_detector.py` | `is_vital_row_normal`, `all_new_vitals_normal`, NEWS2 scoring |
 | `tools/radar_sync/problem_tracker.py` | `overdue_next_checks`, `track_problems(focus=...)`, backoff in `_upsert_problem` |
 | `tools/radar_sync/pass1_screener.py` | Note-only screener; `needs_full_analysis`, `flag_reason` |
-| `tools/radar_sync/status_classifier.py` | Reasoning-model status labels (skipped on forced-only path) |
+| `tools/radar_sync/status_classifier.py` | Reasoning-model status labels (skipped on forced-only path); reads clinical_timeline |
+| `tools/radar_sync/clinical_timeline.py` | Two-zone timeline: `partition`, `render`, `render_for_tracker`, `apply_updates` |

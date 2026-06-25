@@ -871,7 +871,7 @@ def _run_tool(name: str, args: dict, cpmrn: str, encounter: int) -> str:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict, delta: dict | None = None) -> dict:
+def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict, delta: dict | None = None, clinical_timeline: dict | None = None) -> dict:
     """
     Run a reasoning model over the draft PatientSummary.
     Only problems currently labelled worsening/critical are reviewed.
@@ -967,6 +967,18 @@ def classify_statuses(cpmrn: str, encounter: int, structured_summary: dict, delt
             except Exception:
                 pass
         prefetch_lines.append("")
+
+    # Inject the clinical timeline so the classifier has temporal context.
+    # Read-only here — the tracker owns timeline maintenance.
+    if clinical_timeline:
+        try:
+            from tools.radar_sync.clinical_timeline import render as _render_timeline
+            _timeline_str = _render_timeline(clinical_timeline)
+            if _timeline_str:
+                prefetch_lines.append(_timeline_str)
+                prefetch_lines.append("")
+        except Exception:
+            pass
 
     prefetch_block = "\n".join(prefetch_lines)
 

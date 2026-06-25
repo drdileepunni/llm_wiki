@@ -156,6 +156,56 @@ Its sole job is to read the note text and decide if there is anything clinically
 
 Each gate has a distinct responsibility — vitals to Gate 2.5, ABG to Gate 2.7, other labs to Gate 2.8, free text to the screener. No overlap.
 
+## Clinical Timeline
+
+The problem tracker maintains a **per-patient clinical event timeline** stored in `patient_contexts.clinical_timeline`. It is an ordered record of what happened and when — complementary to `structured_summary` ("what is true now") and designed to prevent temporal-reasoning errors like flagging clinical progression as a contradiction.
+
+### Two-zone model
+
+| Zone | Field | Description |
+|---|---|---|
+| **Recent events** | `recent_events[]` | Full-fidelity structured list, never compressed. The model reads this directly to establish temporal order. |
+| **Prior course** | `prior_course` | Short prose (≤1500 chars) holding everything that has aged out of the recent window. Appended incrementally — oldest portions condensed only if the cap is exceeded. |
+
+Each event carries:
+```json
+{ "t": "2026-06-25T09:20:00Z", "event": "Oral nutrition resumed, tolerating liquids",
+  "problem": "Subacute Intestinal Obstruction", "kind": "status_change",
+  "source": "note@2026-06-25T09:20" }
+```
+`source` is mandatory — it anchors every event to real data and prevents hallucination.
+
+### Windowing (fold-on-eviction)
+
+An event stays in `recent_events` while **both** hold: within the last **7 days** AND within the last **30 events**. Failing either evicts it into `prior_course`. The fold is **append-only and rare** — it only fires when something actually ages out, and it preserves the existing `prior_course` text verbatim before appending new clauses.
+
+**No-data-loss guarantee:** events are dropped from `recent_events` only when the model successfully emitted an updated `prior_course`. If the fold failed, the events remain and retry next run.
+
+### How it flows
+
+```mermaid
+flowchart LR
+    classDef llm fill:#6d28d9,color:#fff,stroke:#4c1d95,stroke-width:2px
+    classDef store fill:#1e3a5f,color:#fff,stroke:#1e40af
+
+    GCS[("patient_contexts\nclinical_timeline")]:::store
+    SC["status_classifier\nreads timeline (read-only)\nfor temporal context"]:::llm
+    PT["problem_tracker\nreads + updates timeline\nemits timeline_updates\n+ conditional prior_course"]:::llm
+    GCS2[("patient_contexts\nclinical_timeline updated")]:::store
+
+    GCS -->|render — read-only| SC
+    GCS -->|render_for_tracker| PT
+    PT -->|apply_updates → persist| GCS2
+```
+
+The timeline is **read by both** `status_classifier` and `problem_tracker`, but **only maintained by** the tracker. It is emitted as part of the existing `set_all_assessments` tool call — no extra LLM call, no added cost.
+
+### Why this fixes temporal reasoning errors
+
+Previously the tracker reasoned over a flat, unordered bag of notes. Seeing an old NPO note and a new "tolerating oral" note together triggered a "contradiction" alert. With the timeline, the temporal ordering is explicit: the model sees the progression and treats it as clinical advancement, not a care-gap.
+
+The CARE-GAP criterion now applies **only** when two notes from the same care period describe incompatible active orders, or the most recent note itself documents an unresolved conflict.
+
 ## Problem Tracker Prompt Assembly
 
 Before each LLM call, the pipeline assembles the system prompt in layers. Each layer is a potential failure point — a missing block means the model reasons without that rule; a conflicting block causes double-alerting or missed suppression.

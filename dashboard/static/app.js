@@ -351,10 +351,11 @@ async function loadRunAudit(runTs) {
 
       const pass2Label = (() => {
         const p = r.pass2_outcome || '';
-        if (p === 'skipped_by_pass1')      return '<span class="badge bg-secondary bg-opacity-20 text-muted">skipped</span>';
+        if (p === 'skipped_by_pass1')            return '<span class="badge bg-secondary bg-opacity-20 text-muted">skipped</span>';
         if (p === 'forced_by_overdue_next_check') return '<span class="badge bg-warning text-dark">forced (overdue)</span>';
-        if (p.startsWith('pass2:'))        return `<span class="badge bg-primary bg-opacity-75">${escHtml(p.replace('pass2:',''))}</span>`;
-        if (p)                             return `<span class="badge bg-secondary">${escHtml(p)}</span>`;
+        if (p === 'upstream_forced')             return '<span class="badge bg-danger bg-opacity-75">expensive (gate forced)</span>';
+        if (p.startsWith('pass2:'))              return `<span class="badge bg-primary bg-opacity-75">${escHtml(p.replace('pass2:',''))}</span>`;
+        if (p)                                   return `<span class="badge bg-secondary">${escHtml(p)}</span>`;
         return '—';
       })();
 
@@ -1125,6 +1126,7 @@ function auditPatientRow(r) {
     const p = r.pass2_outcome || '';
     if (p === 'skipped_by_pass1')             return '<span class="badge bg-secondary bg-opacity-20 text-muted" style="font-size:0.7rem">skipped</span>';
     if (p === 'forced_by_overdue_next_check') return '<span class="badge bg-warning text-dark" style="font-size:0.7rem">forced (overdue)</span>';
+    if (p === 'upstream_forced')              return '<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">expensive (gate forced)</span>';
     if (p.startsWith('pass2:'))               return `<span class="badge bg-primary bg-opacity-75" style="font-size:0.7rem">${escHtml(p.replace('pass2:',''))}</span>`;
     if (p)                                    return `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(p)}</span>`;
     return '—';
@@ -1249,6 +1251,7 @@ function buildDetailPanel(d, panelId) {
   const problemsHtml  = buildProblemsTab(d);
   const reasoningHtml = buildReasoningTab(d);
   const deltaHtml     = buildDeltaTab(d);
+  const timelineHtml  = buildTimelineTab(d);
 
   return `<div style="background:#f8f9fa; border-top:1px solid #dee2e6; padding:10px 14px">
     <div class="d-flex gap-3 border-bottom mb-2 pb-1" style="font-size:0.82rem">
@@ -1264,12 +1267,16 @@ function buildDetailPanel(d, panelId) {
       <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
               data-tab="delta" data-panel="${panelId}"
               onclick="switchAuditTab(this,'${panelId}')">Last delta</button>
+      <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+              data-tab="timeline" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Timeline</button>
       <span class="ms-auto text-muted" style="font-size:0.72rem">lazy · loaded on expand</span>
     </div>
     <div data-pane="summary" data-panel="${panelId}">${summaryHtml}</div>
     <div data-pane="problems" data-panel="${panelId}" style="display:none">${problemsHtml}</div>
     <div data-pane="reasoning" data-panel="${panelId}" style="display:none">${reasoningHtml}</div>
     <div data-pane="delta" data-panel="${panelId}" style="display:none">${deltaHtml}</div>
+    <div data-pane="timeline" data-panel="${panelId}" style="display:none">${timelineHtml}</div>
   </div>`;
 }
 
@@ -1465,6 +1472,55 @@ function buildDeltaTab(d) {
         <span>Balance <strong>${io.balance_ml} ml</strong></span>
       </div>
     </div>`;
+  }
+
+  return html;
+}
+
+function buildTimelineTab(d) {
+  const tl = d.clinical_timeline || {};
+  const prior  = tl.prior_course || '';
+  const events = tl.recent_events || [];
+
+  if (!prior && !events.length) {
+    return '<span class="text-muted small">No timeline yet — will appear after the next expensive pipeline run.</span>';
+  }
+
+  const KIND_BADGE = {
+    order:          'bg-primary bg-opacity-75',
+    finding:        'bg-info text-dark',
+    intervention:   'bg-success bg-opacity-75',
+    status_change:  'bg-warning text-dark',
+  };
+
+  let html = '';
+
+  if (prior) {
+    html += `<div class="mb-3 p-2" style="background:#fff3cd; border-radius:6px; border:1px solid #ffc107">
+      <div class="text-muted mb-1" style="font-size:0.7rem">PRIOR COURSE (compressed history)</div>
+      <div style="font-size:0.82rem; white-space:pre-wrap">${escHtml(prior)}</div>
+    </div>`;
+  }
+
+  if (events.length) {
+    html += `<div class="mb-1"><span class="text-muted" style="font-size:0.7rem">RECENT EVENTS (${events.length})</span></div>`;
+    // Sort oldest → newest for display
+    const sorted = events.slice().sort((a, b) => (a.t || '').localeCompare(b.t || ''));
+    html += sorted.map(ev => {
+      const t = ev.t ? new Date(ev.t).toLocaleString('en-IN', {timeZone:'Asia/Kolkata',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).replace(',','') + ' IST' : '?';
+      const kindBadge = KIND_BADGE[ev.kind] || 'bg-secondary';
+      return `<div style="display:flex; gap:8px; align-items:flex-start; padding:4px 0; border-bottom:1px solid #e9ecef; font-size:0.8rem">
+        <div class="text-muted" style="min-width:110px; font-size:0.72rem; padding-top:2px">${escHtml(t)}</div>
+        <div style="flex:1">
+          <div>
+            <span class="badge ${kindBadge}" style="font-size:0.62rem">${escHtml(ev.kind || '')}</span>
+            <span class="ms-1 fw-semibold" style="font-size:0.75rem">${escHtml(ev.problem || '')}</span>
+          </div>
+          <div style="margin-top:2px">${escHtml(ev.event || '')}</div>
+          <div class="text-muted" style="font-size:0.68rem">${escHtml(ev.source || '')}</div>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   return html;

@@ -154,6 +154,8 @@ def _run_live_pipeline(
         from tools.radar_sync.patient_context import get_context
         from tools.radar_sync.delta_extractor import extract_delta
         ctx = get_context(cpmrn, encounter)
+        from tools.radar_sync.clinical_timeline import empty_timeline as _empty_timeline
+        clinical_timeline = ctx.get("clinical_timeline") or _empty_timeline()
 
         # Prefer last_llm_run_at over last_snapshot_at for delta cutoff
         last_llm_run_at_raw = sched_doc.get("last_llm_run_at")
@@ -623,7 +625,7 @@ def _run_live_pipeline(
     if _force_full_upstream or pass1 is None or (pass1 is not None and pass1.needs_full_analysis):
         try:
             from tools.radar_sync.status_classifier import classify_statuses
-            new_structured = classify_statuses(cpmrn, encounter, new_structured, delta=delta)
+            new_structured = classify_statuses(cpmrn, encounter, new_structured, delta=delta, clinical_timeline=clinical_timeline)
             status["classifier"] = "ok"
             logger.info("pipeline: status classification done for %s enc=%d", cpmrn, encounter)
         except Exception:
@@ -658,8 +660,18 @@ def _run_live_pipeline(
             screener_flag=screener_flag,
             focus=_overdue if _overdue else None,
             delta=delta,
+            clinical_timeline=clinical_timeline,
         )
         status["problem_tracker"] = tracker_result
+        if _force_full_upstream and not status.get("pass2"):
+            status["pass2"] = "upstream_forced"
+        # Persist updated timeline returned by the tracker
+        updated_timeline = tracker_result.get("clinical_timeline")
+        if updated_timeline is not None:
+            db["patient_contexts"].update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {"clinical_timeline": updated_timeline}},
+            )
         logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)
     except Exception:
         logger.exception("pipeline: problem tracker failed for %s enc=%d", cpmrn, encounter)
@@ -1027,6 +1039,9 @@ def _derive_pipeline_outcome(status: dict) -> str:
         return "alerted"
     pass1 = status.get("pass1") or {}
     if isinstance(pass1, dict) and pass1.get("needs_full_analysis"):
+        return "expensive_no_alert"
+    # Upstream gate (lab/vital) forced a full expensive run but no alert was sent
+    if pass1 == "skipped_upstream_gate":
         return "expensive_no_alert"
     if pass2:
         return f"pass2:{pass2}"

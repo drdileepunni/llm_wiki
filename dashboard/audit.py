@@ -174,6 +174,7 @@ def get_patient_detail(cpmrn: str, encounter: int) -> dict:
             "patient_problems":    clean_problems,
             "last_delta_content":  _serialize(sched.get("last_delta_content") or {}),
             "last_llm_run_at":     _serialize(sched.get("last_llm_run_at")),
+            "clinical_timeline":   _serialize(ctx.get("clinical_timeline") or {}),
         }
 
     except Exception:

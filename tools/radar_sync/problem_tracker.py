@@ -491,6 +491,19 @@ OUTPUT CONTRACT  (how to write each assessment)
     • Copy-pasted summaries (same text under multiple authors or timestamps) count as ONE piece of
       evidence, not independent corroboration. Do not amplify confidence because the same event is
       described in several notes.
+- CLINICAL TIMELINE — when a == CLINICAL TIMELINE == block appears in the user message, it
+  represents the ordered history of this patient as previously recorded. Use it to establish
+  temporal context before assessing any problem.
+    • The most recent event in the timeline is the current clinical reality for that problem.
+      A newer event that describes a different state than an older event (diet advanced from NPO to
+      oral, ventilator weaned, vasopressors stopped) is CLINICAL PROGRESSION — not a contradiction.
+      Do NOT flag progression as a care-gap.
+    • Only flag a contradiction when two events from the same care period describe incompatible
+      active orders, OR when the most recent note itself explicitly describes an unresolved conflict.
+    • In set_all_assessments, always emit timeline_updates with new events from this run. Each
+      event MUST include a `source` citing the note/lab/vital it came from. If the timeline is
+      empty or absent, seed it by recording the key events implied by the current summary.
+    • Emit `prior_course` ONLY when the user message contains a "TIMELINE FOLD REQUIRED" block.
 - Call set_all_assessments ONCE after reviewing all problems."""
 
 
@@ -744,6 +757,53 @@ _SET_ALL_TOOL = {
                         "addressed_evidence", "should_alert", "reasoning_fingerprint",
                     ],
                 },
+            },
+            "timeline_updates": {
+                "type": "array",
+                "description": (
+                    "New clinical events from this run to append to the patient timeline. "
+                    "Include any clinically meaningful changes: new orders, findings, "
+                    "interventions, status changes. Each event MUST have a `source` "
+                    "citing the note/lab/vital. Omit events already in the == CLINICAL "
+                    "TIMELINE == block."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "t": {
+                            "type": "string",
+                            "description": "ISO 8601 UTC timestamp (e.g. '2026-06-25T09:20:00Z').",
+                        },
+                        "event": {
+                            "type": "string",
+                            "description": "One concise sentence describing what happened.",
+                        },
+                        "problem": {
+                            "type": "string",
+                            "description": "Problem name or 'general' for cross-cutting events.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["order", "finding", "intervention", "status_change"],
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": (
+                                "Format: 'note@<ISO-timestamp>', 'lab@<name>:<value>', "
+                                "or 'vital@<name>:<value>'. Required."
+                            ),
+                        },
+                    },
+                    "required": ["t", "event", "problem", "kind", "source"],
+                },
+            },
+            "prior_course": {
+                "type": "string",
+                "description": (
+                    "ONLY emit when the user message contains a 'TIMELINE FOLD REQUIRED' block. "
+                    "Preserve existing prior_course text verbatim, then append the aged-out "
+                    f"events as brief clauses. Keep under 1500 chars."
+                ),
             },
         },
         "required": ["assessments"],
@@ -2197,6 +2257,7 @@ def track_problems(
     screener_flag: str = "",
     focus: list[dict] | None = None,
     delta: dict | None = None,
+    clinical_timeline: dict | None = None,
 ) -> dict:
     """
     Run the problem tracker ReAct loop for one patient.
@@ -2222,6 +2283,9 @@ def track_problems(
     from backend.services.llm_client import GeminiLLMClient
     from backend.services.emr.db import get_db
     from tools.radar_sync.react_tracer import ReActTracer
+    from tools.radar_sync.clinical_timeline import (
+        empty_timeline, render_for_tracker, apply_updates,
+    )
 
     # Coerce snapshot_at to datetime (GCS returns ISO strings from JSON)
     if isinstance(snapshot_at, str):
@@ -2531,6 +2595,12 @@ def track_problems(
             cpmrn, encounter, len(focus),
         )
 
+    # ── Clinical timeline ──────────────────────────────────────────────────────
+    _timeline = clinical_timeline if clinical_timeline else empty_timeline()
+    _timeline_rendered, _timeline_to_evict, _fold_instruction = render_for_tracker(
+        _timeline, snapshot_at,
+    )
+
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n"
         f"Snapshot time: {snapshot_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
@@ -2542,6 +2612,8 @@ def track_problems(
         + (f"{prefetch_block}\n\n" if prefetch_block else "")
         + (f"{fingerprint_block}\n\n" if fingerprint_block else "")
         + (f"{gate_block}\n\n" if gate_block else "")
+        + f"{_timeline_rendered}\n\n"
+        + (f"{_fold_instruction}\n\n" if _fold_instruction else "")
         + f"Current problems from summary:\n{problem_block}\n{new_block}\n\n"
         + "Review each problem. The pre-fetched context above is your primary source — "
         + "only call tools for data not listed there. Call set_all_assessments when done."
@@ -2549,6 +2621,8 @@ def track_problems(
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
     final_assessments: list[dict] = []
+    _raw_timeline_updates: list[dict] = []
+    _raw_prior_course: str | None = None
 
     for round_num in range(_MAX_TOOL_ROUNDS):
         tracer.start_round(round_num)
@@ -2599,9 +2673,15 @@ def track_problems(
             break
 
         tool_results: list[dict] = []
+        _raw_timeline_updates: list[dict] = []
+        _raw_prior_course: str | None = None
         for tc in tool_calls:
             if tc.name == "set_all_assessments":
                 raw_assessments = tc.input.get("assessments", [])
+                # Collect timeline fields from the tool input
+                _raw_timeline_updates = tc.input.get("timeline_updates") or []
+                _emitted_prior = tc.input.get("prior_course")
+                _raw_prior_course = _emitted_prior if isinstance(_emitted_prior, str) else None
                 # Resolve cited_note_indices → structured citation objects
                 for a in raw_assessments:
                     indices = a.pop("cited_note_indices", None) or []
@@ -2650,7 +2730,7 @@ def track_problems(
     if not final_assessments:
         logger.warning("problem_tracker: no assessments returned for %s — skipping upsert", cpmrn)
         tracer.save(final_output={"error": "no_assessments"})
-        return {"problem_tracker": "no_assessments"}
+        return {"problem_tracker": "no_assessments", "clinical_timeline": _timeline}
 
     # Phase 1 — evaluate eligibility, upsert all problems, collect what needs alerting.
     # Alerting is deferred so all problems for this patient go in one batched message.
@@ -3067,10 +3147,19 @@ def track_problems(
         "alerts_suppressed": alerts_suppressed,
     })
 
+    # Assemble updated clinical timeline from model-emitted events
+    updated_timeline = apply_updates(
+        timeline=_timeline,
+        new_events=_raw_timeline_updates,
+        emitted_prior=_raw_prior_course,
+        to_evict=_timeline_to_evict,
+    )
+
     return {
-        "problem_tracker": "ok",
+        "problem_tracker":  "ok",
         "problems_assessed": len(final_assessments),
         "alerts_sent":       alerts_sent,
         "alerts_suppressed": alerts_suppressed,
         "problem_details":   list(_problem_audit.values()),
+        "clinical_timeline": updated_timeline,
     }
