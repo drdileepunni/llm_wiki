@@ -14,13 +14,21 @@ Dry-run (prints JSON without writing):
 Adding a new dynamic monitoring protocol = adding a new document to PROTOCOLS below
 and re-running with the production GCS_BUCKET. No code changes required.
 
-Protocol schema:
-  protocol_id     — unique key (used for matching in patient_problems.context_gate)
-  applies_when    — list of lowercase substrings matched against problem_name.lower()
-  gate_question   — plain-language question the model is asked to answer
-  scenarios       — list of permissive scenarios to rule in/out (each with band_description,
-                    window description, and invalidate_if triggers)
+Protocol schema — a document may carry any combination of:
+  protocol_id       — unique key
+  applies_when      — list of lowercase substrings matched against problem_name.lower()
+  applies_when_secondary — bool: if true, fires when any problem carries a `cause`
+
+  [permissive gate — suppress alerts during expected clinical states]
+  gate_question     — plain-language question for the model
+  scenarios         — list of {name, description, band_description, window, invalidate_if}
   escalation_target_after_window — what to taper toward once the window closes
+
+  [guidance — inject domain reasoning into the system prompt]
+  guidance          — verbatim decision-tree / reasoning text (replaces clinical_rule_blocks.py)
+
+  [audit — documentation audit triggered 12h after first detection]
+  audit             — {required_documentation: [...], window_hours: int, record_when_none: str}
 """
 from __future__ import annotations
 
@@ -505,6 +513,167 @@ PROTOCOLS = [
             "If troponin is rising, note the trend explicitly. "
             "Once the 24-hour window has passed without an acknowledging note, alert regardless of absolute value."
         ),
+    },
+
+    # ── Guidance-only protocols (absorbed from clinical_rule_blocks.py) ────────
+    # These carry only `guidance` — no permissive gate, no audit.
+    # They replace the five category blocks that were previously hardcoded in
+    # clinical_rule_blocks.py and injected conditionally per patient.
+    {
+        "protocol_id": "guidance-neuro",
+        "applies_when": [
+            "gcs", "consciousness", "conscious", "encephalopath", "coma", "comatose",
+            "seizure", "sensorium", "neuro", "altered mental", "obtunded", "drowsy",
+        ],
+        "guidance": (
+            "GCS DELTA — for any problem related to GCS, consciousness, or neurological status: do NOT "
+            "alert unless GCS has dropped ≥ 2 points within the last 6 hours. Call "
+            "get_vital_trend('GCS', n=6) and compare the most recent reading against the reading from 6 "
+            "hours ago. If the delta is < 2 (stable or improving), should_alert=False regardless of the "
+            "absolute GCS value, of whether a plan note exists, and of the treatment-inadequate override. "
+            "A chronically low GCS is NOT a reason to alert. Only a negative delta ≥ 2 within the 6-hour "
+            "window justifies an alert."
+        ),
+    },
+    {
+        "protocol_id": "guidance-respiratory",
+        "applies_when": [
+            "hypox", "spo2", "sp02", "desaturat", "tachypn", "respiratory", "ards",
+            "oxygen", "ventilat", "fio2", "hypercapn", "pneumon", "weaning",
+        ],
+        "guidance": (
+            "- For respiratory problems: NEVER judge SpO2 in isolation. get_vital_trend('SpO2') "
+            "returns the SF ratio (SpO2 / FiO2%) alongside each reading. Use the SF ratio trend, "
+            "not raw SpO2, to assess oxygenation. If FiO2 was reduced and the SF ratio is stable or "
+            "improved, the SpO2 drop is planned weaning — treat as stable or improving, NOT worsening.\n"
+            "- FiO2 RULE — FiO2 is a clinician-controlled ventilator setting, not a patient parameter. Do "
+            "NOT set clinical_status=\"worsening\"/\"critical\" and do NOT alert based on FiO2 changes "
+            "alone. FiO2 increases are intentional clinical interventions — alerting on them is circular. "
+            "To assess oxygenation use SpO2 or SF ratio (both via get_vital_trend('SpO2')). If SpO2 is "
+            "maintained ≥92% despite high FiO2, oxygenation is being managed — do not alert."
+        ),
+    },
+    {
+        "protocol_id": "guidance-renal",
+        "applies_when": [
+            "aki", "kidney", "oliguri", "anuri", "creatinine", "renal",
+            "fluid overload", "fluid balance", "rrt", "dialysis",
+        ],
+        "guidance": (
+            "- For AKI, oliguria, anuria, or fluid-balance problems: ALWAYS call get_io before concluding "
+            "output is absent — the structured summary may not reflect the latest I/O data. get_io shows "
+            "DAILY TOTALS first, then hourly detail. If the hourly window shows 0 ml but the daily total "
+            "is non-zero, I/O is charted as a daily batch entry — do NOT interpret as anuria; use the "
+            "daily total to assess fluid balance.\n"
+            "- I/O charting in ICUs is frequently incomplete or entered retrospectively. Zero urine "
+            "output in the chart — even across several consecutive hours — does NOT reliably indicate "
+            "true anuria or oliguria. Always treat recorded 0 ml output as 'possible missed charting' "
+            "unless ALL three of the following are true: (1) the daily total is also 0 ml, "
+            "(2) clinical notes explicitly document anuria or oliguria, AND (3) creatinine is rising. "
+            "Do NOT escalate AKI, alert for anuria, or conclude oliguria on "
+            "the basis of 0 ml charting alone."
+        ),
+    },
+    {
+        "protocol_id": "guidance-symptom",
+        "applies_when": [
+            "pain", "nausea", "dizzin", "breathless", "fatigue",
+            "chest tightness", "discomfort", "vomit",
+        ],
+        "guidance": (
+            "SUBJECTIVE SYMPTOM RULE — do NOT set clinical_status=\"worsening\"/\"critical\" and do NOT "
+            "alert for problems whose primary evidence is a patient-reported symptom (pain, nausea, "
+            "dizziness, fatigue, reported breathlessness, reported chest tightness) without corroborating "
+            "objective evidence. \"Patient reports severe pain\", \"patient complains of nausea\", or "
+            "\"patient feels breathless\" alone is NOT sufficient to alert. Objective evidence means at "
+            "least ONE of:\n"
+            "  • A validated numeric score meeting a documented threshold (e.g. NRS/VAS pain score ≥ 7/10 "
+            "explicitly recorded)\n"
+            "  • A physiological correlate that itself breaches the VITAL SIGN ALERT FLOORS (new "
+            "tachycardia, hypotension, hypoxia, etc.) AND is plausibly caused by the symptom\n"
+            "  • An imaging or lab finding showing objective worsening of the underlying cause\n"
+            "If none are present, classify the symptom-based problem as stable and should_alert=False. The "
+            "adequacy of the current treatment plan is the clinician's call — do NOT alert purely because "
+            "you judge the prescribed analgesic or antiemetic insufficient."
+        ),
+    },
+    {
+        "protocol_id": "guidance-causal-secondary",
+        "applies_when": [],
+        "applies_when_secondary": True,
+        "guidance": (
+            "CAUSAL / SECONDARY PROBLEMS\n"
+            "When a problem is marked secondary (has a cause), apply this reasoning:\n"
+            "- If the primary driver (the cause) is being_addressed=True and its clinical_status is NOT "
+            "\"critical\" or \"worsening\", the secondary problem should NOT generate an independent alert "
+            "solely because its own parameters remain abnormal. Rationale: secondary organ dysfunction "
+            "(AKI, coagulopathy, thrombocytopaenia) lags behind the primary problem by 24–72h. Treating "
+            "the cause IS the treatment.\n"
+            "- Exception — DO alert for the secondary problem if ANY of the following are present "
+            "regardless of the primary driver's status:\n"
+            "    • A rapid step-change worsening (e.g. creatinine rises >50% from last snapshot)\n"
+            "    • A value in a life-threatening range (K+ ≥ 6.0, pH < 7.20, bicarb < 12)\n"
+            "    • A clinical sign requiring independent intervention (RRT indication, dialysis)\n"
+            "- If the primary driver is NOT being_addressed, assess the secondary problem normally."
+        ),
+    },
+
+    # ── Tachycardia — first unified consumer (guidance + audit) ──────────────
+    {
+        "protocol_id": "tachycardia",
+        "applies_when": [
+            "tachycard", "tachyarrhythmia", "arrhythmia", "atrial fibrillation",
+            "svt", "palpitation", "rate control", "sinus tach",
+        ],
+        "guidance": (
+            "TACHYCARDIA ASSESSMENT PROTOCOL (entry: HR > 100 bpm)\n"
+            "\n"
+            "STEP 1 — IS THIS UNSTABLE TACHYCARDIA? (alert immediately if yes)\n"
+            "Unstable = ANY of the following:\n"
+            "  • HR > 150 bpm (alone, regardless of coexisting factors)\n"
+            "  • HR > 100 bpm AND any coexisting haemodynamic / respiratory derangement:\n"
+            "      - MAP < 65 mmHg OR SBP < 90 mmHg (or a downward trend toward these)\n"
+            "      - RR > 28 breaths/min OR rising respiratory effort\n"
+            "      - SpO₂ < 92% (with SF ratio < 350)\n"
+            "      - GCS drop ≥ 1 point in the last 6 hours\n"
+            "If unstable: set clinical_status=critical, should_alert=True. Override note-freshness and "
+            "response-buffer suppression rules. Message: 'HR [X] bpm — unstable tachycardia. "
+            "Assess for peri-arrest. Consider ACLS.' Do not suppress for any existing plan note.\n"
+            "\n"
+            "STEP 2 — IS THIS ISOLATED STABLE TACHYCARDIA? (HR 100–150, no coexisting derangement)\n"
+            "Check get_patient_notes() for a documented reversible cause within the last 24 hours:\n"
+            "  Acceptable documented causes: pain, fever (Temp > 38.5°C with documented management plan), "
+            "delirium / ICU psychosis (documented and being managed), sedation inadequacy "
+            "(documented RASS target mismatch being addressed), hypovolaemia / fluid deficit "
+            "(documented and being corrected).\n"
+            "\n"
+            "  IF a reversible cause IS documented AND a management plan is present:\n"
+            "    set being_addressed=True, should_alert=False, next_check in 1 hour.\n"
+            "    Note: 'HR [X] bpm — tachycardia attributed to [cause], management documented.'\n"
+            "\n"
+            "  IF no reversible cause is documented (or no plan for a documented cause):\n"
+            "    set clinical_status=worsening, should_alert=True (care-gap alert).\n"
+            "    Message: 'HR [X] bpm — no documented reversible cause. Workup recommended: "
+            "12-lead ECG, cardiac enzymes, serum electrolytes and ABG. Document the aetiology.'\n"
+            "    Additionally: call get_io() — if 24-hour urine output < 0.5 ml/kg/h AND no fluid "
+            "resuscitation plan is documented, add: 'Low urine output noted. Consider fluid bolus "
+            "10–30 mL/kg if haemodynamically appropriate and no contraindication.'\n"
+            "\n"
+            "STEP 3 — HR AT THRESHOLD (HR exactly 100–105 bpm)\n"
+            "Treat as isolated stable tachycardia (Step 2). A single borderline reading with a "
+            "plausible documented cause may be classified stable with 1–2h recheck."
+        ),
+        "audit": {
+            "required_documentation": [
+                "fever / infection aetiology documented",
+                "pain assessment and management documented",
+                "delirium / ICU psychosis documented",
+                "sedation adequacy documented",
+                "urine output and fluid status documented",
+            ],
+            "window_hours": 12,
+            "record_when_none": "inadequate_documentation",
+        },
     },
 ]
 

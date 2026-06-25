@@ -513,6 +513,21 @@ async function loadProtocols() {
             <strong>After window:</strong> ${escHtml(p.escalation_target_after_window)}
           </div>` : ''}
 
+          ${p.guidance ? `
+          <div class="mb-2">
+            <strong class="small text-success"><i class="bi bi-lightbulb me-1"></i>Guidance (injected into system prompt)</strong>
+            <pre class="guidance-block mt-1 mb-0">${escHtml(p.guidance)}</pre>
+          </div>` : ''}
+
+          ${p.audit ? `
+          <div class="alert alert-warning py-2 px-3 small mb-2">
+            <strong><i class="bi bi-clipboard-check me-1"></i>Documentation Audit</strong> —
+            triggered <strong>${escHtml(String(p.audit.window_hours || 12))}h</strong> after first detection
+            <ul class="mb-0 mt-1">
+              ${(p.audit.required_documentation || []).map(item => `<li>${escHtml(item)}</li>`).join('')}
+            </ul>
+          </div>` : ''}
+
           <span class="raw-json-toggle" onclick="toggleRaw(this)">
             <i class="bi bi-code me-1"></i>Show raw JSON
           </span>
@@ -954,7 +969,52 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── AUDIT PAGE ────────────────────────────────────────────────────────────────
 
 async function loadAuditPage() {
-  await Promise.all([loadAuditNextChecks(), loadAuditRuns()]);
+  await Promise.all([loadAuditNextChecks(), loadAuditRuns(), loadDocAudits()]);
+}
+
+async function loadDocAudits() {
+  const el = document.getElementById('doc-audits-body');
+  if (!el) return;
+  try {
+    const rows = await apiFetch('/api/audit/documentation?hours_back=72');
+    if (!rows.length) {
+      el.innerHTML = '<p class="text-muted text-center py-2 mb-0 small">No documentation audits in the last 72 hours.</p>';
+      return;
+    }
+    const verdictBadge = v => {
+      if (v === 'adequate_documentation') return `<span class="badge bg-success bg-opacity-75">${escHtml(v)}</span>`;
+      return `<span class="badge bg-warning text-dark">${escHtml(v || '—')}</span>`;
+    };
+    el.innerHTML = `
+      <div class="table-responsive">
+        <table class="table table-sm table-hover small">
+          <thead><tr>
+            <th>Patient</th><th>Problem</th><th>Protocol</th>
+            <th>Detected</th><th>Audited</th><th>Verdict</th>
+            <th>Documented</th><th>Missing</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map(r => {
+              let documented = [], missing = [];
+              try { documented = JSON.parse(r.documented_items || '[]'); } catch(e) {}
+              try { missing = JSON.parse(r.missing_items || '[]'); } catch(e) {}
+              return `<tr>
+                <td>${escHtml(r.CPMRN)} <span class="text-muted">#${r.encounter}</span></td>
+                <td>${escHtml(r.problem_name)}</td>
+                <td><code>${escHtml(r.protocol_id)}</code></td>
+                <td class="text-muted">${escHtml(r.detected_at ? r.detected_at.replace('T',' ').slice(0,16) : '—')}</td>
+                <td class="text-muted">${escHtml(r.audited_at ? r.audited_at.replace('T',' ').slice(0,16) : '—')}</td>
+                <td>${verdictBadge(r.verdict)}</td>
+                <td>${documented.length ? `<ul class="mb-0 ps-3">${documented.map(i=>`<li>${escHtml(i)}</li>`).join('')}</ul>` : '<span class="text-muted">—</span>'}</td>
+                <td>${missing.length ? `<ul class="mb-0 ps-3 text-danger">${missing.map(i=>`<li>${escHtml(i)}</li>`).join('')}</ul>` : '<span class="text-success">none</span>'}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(e))}</div>`;
+  }
 }
 
 // ── Next-checks banner ────────────────────────────────────────────────────────

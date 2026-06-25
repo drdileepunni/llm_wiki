@@ -199,35 +199,52 @@ The repo uses two GCS buckets. Getting them confused causes silent failures.
 ### Model
 Production model (set via `cloudbuild.yaml` `--set-env-vars` and defaulted in `app/backend/config.py`): **`gemini-3.1-flash-lite`** for both `MODEL` and `REASONING_MODEL`. The problem tracker uses `gemini-3.1-flash-lite` (hardcoded as `_TRACKER_MODEL` in `problem_tracker.py`) — intentional and separate from these env vars.
 
-### Monitoring protocols
-Protocols live in `tools/radar_sync/seed_monitoring_protocols.py` and are seeded to MongoDB `monitoring_protocols`. Matched against patient problem names via `applies_when` substring list. Gate verdicts: `permissive_active` (suppress), `permissive_breached` (alert), `permissive_ended` (permanent close), `no_permissive_context` (normal rules).
+### Monitoring protocols (unified engine)
+Protocols live in `tools/radar_sync/seed_monitoring_protocols.py` and are seeded to MongoDB `monitoring_protocols`. Matched and injected by `tools/radar_sync/protocol_engine.py` — the single entry point called from `problem_tracker.track_problems`.
 
-**Current protocols (5):**
+A protocol document can carry any combination of three optional sections:
 
-| Protocol slug | Scenarios | Purpose |
+| Section | Field | Purpose |
 |---|---|---|
-| `permissive-hypertension` | 7 | Suppress BP alerts in expected/managed hypertension contexts |
-| `established-low-gcs` | 4 | Suppress GCS alerts for chronically low GCS |
-| `permissive-respiratory` | 2 (`post_operative`, `known_baseline_hypoxia`) | Suppress hypoxia/tachypnea alerts in expected post-op or chronic baseline contexts |
-| `haemoglobin-alert-criteria` | 2 (`stable_hb_general`, `stable_hb_cardiac_ischaemia`) | Suppress Hb alerts unless ≥1 g/dL drop in 24h or below floor (7.0 general / 8.0 active cardiac ischaemia) |
-| `lactate-alert-criteria` | 2 (`elevated_lactate_with_hypoperfusion`, `persistent_hypotension_without_lactate_workup`) | Alert lactate >4 always; lactate 2–4 needs MAP <65; ≥2 consecutive MAP <65 with no lactate in 6h |
+| **Permissive gate** | `gate_question`, `scenarios`, `escalation_target_after_window` | Suppress alerts during expected clinical states. Gate verdicts: `permissive_active` (suppress), `permissive_breached` (alert), `permissive_ended` (permanent close), `no_permissive_context` (normal rules). |
+| **Guidance** | `guidance` | Verbatim reasoning text injected into the system prompt when the patient has a matching problem. Replaces `clinical_rule_blocks.py` (retired). |
+| **Audit** | `audit.required_documentation`, `audit.window_hours`, `audit.record_when_none` | Documentation audit spec — hourly sweep checks 12h after first detection. |
 
-**Adding a monitoring protocol:**
-1. Add the new protocol document to `PROTOCOLS` in `tools/radar_sync/seed_monitoring_protocols.py`.
+**Current protocols (12):**
+
+| Protocol slug | Type | Purpose |
+|---|---|---|
+| `permissive-hypertension` | gate (7 scenarios) | Suppress BP alerts in expected/managed hypertension contexts |
+| `established-low-gcs` | gate (4 scenarios) | Suppress GCS alerts for chronically low GCS |
+| `permissive-respiratory` | gate (2 scenarios) | Suppress hypoxia/tachypnea alerts post-op or at chronic baseline |
+| `haemoglobin-alert-criteria` | gate (2 scenarios) | Suppress Hb alerts unless ≥1 g/dL drop in 24h or below floor |
+| `lactate-alert-criteria` | gate (2 scenarios) | Alert lactate >4 always; lactate 2–4 needs MAP <65 |
+| `acknowledged-myocardial-injury` | gate (1 scenario) | Suppress troponin alerts when care team acknowledged within 24h |
+| `guidance-neuro` | guidance | GCS delta rule — only alert on ≥2-point drop in 6h |
+| `guidance-respiratory` | guidance | SF-ratio rule, FiO2-change rule |
+| `guidance-renal` | guidance | get_io instruction, oliguria charting caveat |
+| `guidance-symptom` | guidance | Objective evidence required for symptom-based alerts |
+| `guidance-causal-secondary` | guidance | Secondary organ dysfunction reasoning |
+| `tachycardia` | guidance + audit | HR>100 entry; unstable (HR>150 or + coexisting derangement) → immediate alert; stable isolated → care-gap if no documented cause; 12h documentation audit |
+
+**Adding a protocol:**
+1. Add the new document to `PROTOCOLS` in `tools/radar_sync/seed_monitoring_protocols.py`.
 2. Run: `source .venv/bin/activate && GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols`
 3. Verify: `GCS_BUCKET=patientview-cds-pipeline-ops python -m tools.radar_sync.seed_monitoring_protocols --dry-run`
 
 Omitting `GCS_BUCKET` writes to the wrong bucket — pipeline keeps running with old protocols, no error logged. Omitting `source .venv/bin/activate` causes `ModuleNotFoundError: No module named 'google'`.
 
-**Protocol / hardcoded rule conflicts:** When adding a protocol for a vital or lab parameter, audit `pass1_screener.py` (danger threshold list) and `problem_tracker.py` (VITAL SIGN ALERT FLOORS section) for hardcoded references to the same parameter and remove them. The protocol is authoritative; hardcoded thresholds alongside it cause double-alerting or missed suppression.
+**Protocol / hardcoded rule conflicts:** When adding a guidance or gate protocol for a vital or lab parameter, audit `pass1_screener.py` and `problem_tracker.py` (VITAL SIGN ALERT FLOORS section) for hardcoded references to the same parameter and remove them. The protocol is authoritative.
 
-### Dynamic domain rule injection (`clinical_rule_blocks.py`)
-`tools/radar_sync/clinical_rule_blocks.py` holds domain-specific reasoning rules (GCS delta, SF-ratio/FiO2, renal I/O, subjective symptom, causal/secondary) injected into the problem tracker system prompt **only when the patient has a problem of that category**. Prevents attention dilution from sending irrelevant rules on every run.
+**`clinical_rule_blocks.py` is retired** — its five category blocks have been moved verbatim into `guidance-neuro`, `guidance-respiratory`, `guidance-renal`, `guidance-symptom`, and `guidance-causal-secondary` seed protocols. Do not add new domain reasoning to `clinical_rule_blocks.py`; add a guidance protocol instead.
 
-- Category detection: keyword substring match against problem names + prefetch_block text.
-- Keyword lists bias toward **inclusion** — over-inject costs minor attention; under-inject risks a missed safety rule.
-- Core `problem_tracker._SYSTEM` keeps all universal rules. Blocks here are domain refinements only.
-- Adding a new domain block: add to `_CATEGORIES` in `clinical_rule_blocks.py`, and remove the corresponding text from `_SYSTEM`.
+### Documentation audit sweep
+`app/backend/scheduler.py` runs `_run_documentation_audits()` at `CronTrigger(minute=20)` every hour. For each `patient_problems` doc matched by a protocol with an `audit` section, if `now >= first_detected_at + window_hours` and `documentation_audit_done` is not set:
+- Fetches notes since detection, runs a focused LLM call via `tools/radar_sync/documentation_audit.py`
+- Writes one row to `documentation_audit` BigQuery table
+- Sets `documentation_audit_done=True` on the problem doc (idempotent)
+
+Results visible on the dashboard Audit page → Documentation Audits panel.
 
 ### Screener flag evaluation
 `evaluate_screener_flag()` in `problem_tracker.py` runs a focused LLM call **before** the main tracker loop to decide whether the Pass-1 screener flag is a new problem not already tracked. Confirmed new problems are injected into the list before the main loop, guaranteeing they are assessed on the alert decision ladder. Logs as `screener_flag_eval` trace step.

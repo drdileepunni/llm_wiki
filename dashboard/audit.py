@@ -129,6 +129,36 @@ def get_active_next_checks() -> list[dict]:
         return []
 
 
+def get_documentation_audits(hours_back: int = 72) -> list[dict]:
+    """Return recent documentation audit rows from BQ."""
+    try:
+        store = _get_bq_store()
+        rows = store.find_documentation_audits(hours_back=hours_back)
+        result = []
+        for r in rows:
+            detected = r.get("detected_at")
+            audited = r.get("audited_at")
+            result.append({
+                "audit_id":         r.get("audit_id", ""),
+                "CPMRN":            r.get("CPMRN", ""),
+                "encounter":        int(r.get("encounter") or 0),
+                "problem_name":     r.get("problem_name", ""),
+                "protocol_id":      r.get("protocol_id", ""),
+                "detected_at":      detected.isoformat() if isinstance(detected, datetime) else str(detected or ""),
+                "audited_at":       audited.isoformat() if isinstance(audited, datetime) else str(audited or ""),
+                "window_hours":     int(r.get("window_hours") or 0),
+                "verdict":          r.get("verdict", ""),
+                "note_count":       int(r.get("note_count") or 0),
+                "required_items":   r.get("required_items") or "[]",
+                "documented_items": r.get("documented_items") or "[]",
+                "missing_items":    r.get("missing_items") or "[]",
+            })
+        return result
+    except Exception:
+        log.exception("audit: get_documentation_audits failed")
+        return []
+
+
 def get_patient_detail(cpmrn: str, encounter: int) -> dict:
     """
     Return the latest patient context + full problem docs for the lazy drill-down.

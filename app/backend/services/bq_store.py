@@ -439,6 +439,26 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.patient_next_checks` (
 OPTIONS (description = "Per-problem next_check state captured at each pipeline run — NULL due_after means cleared/resolved")
 """
 
+_DDL["documentation_audit"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.documentation_audit` (
+  audit_id           STRING    NOT NULL,
+  CPMRN              STRING,
+  encounter          INT64,
+  problem_name       STRING,
+  protocol_id        STRING,
+  detected_at        TIMESTAMP,
+  audited_at         TIMESTAMP,
+  window_hours       INT64,
+  verdict            STRING,
+  note_count         INT64,
+  required_items     STRING,
+  documented_items   STRING,
+  missing_items      STRING,
+  created_at         TIMESTAMP
+)
+OPTIONS (description = "Documentation audit results — fired 12h after first problem detection per protocol audit spec")
+"""
+
 
 # ── BQStudyStore ──────────────────────────────────────────────────────────────
 
@@ -1299,6 +1319,45 @@ class BQStudyStore:
         where = " AND ".join(clauses) if clauses else "TRUE"
         sql = f"SELECT * FROM {self._fqn('report_interpret_runs')} WHERE {where}"
         return self._query(sql, params)
+
+    def insert_documentation_audit(self, doc: dict) -> str:
+        """Insert one documentation audit row. Returns the audit_id."""
+        self._ensure_table("documentation_audit")
+        audit_id = doc.get("audit_id") or _new_id()
+        row = {
+            "audit_id":         audit_id,
+            "CPMRN":            doc.get("CPMRN"),
+            "encounter":        int(doc.get("encounter") or 0),
+            "problem_name":     doc.get("problem_name"),
+            "protocol_id":      doc.get("protocol_id"),
+            "detected_at":      _dt_to_iso(doc.get("detected_at")),
+            "audited_at":       _dt_to_iso(doc.get("audited_at")),
+            "window_hours":     int(doc.get("window_hours") or 0),
+            "verdict":          doc.get("verdict"),
+            "note_count":       int(doc.get("note_count") or 0),
+            "required_items":   _to_json_col(doc.get("required_items")),
+            "documented_items": _to_json_col(doc.get("documented_items")),
+            "missing_items":    _to_json_col(doc.get("missing_items")),
+            "created_at":       _now_iso(),
+        }
+        errors = self._client.insert_rows_json(
+            f"{self._project}.{self._dataset}.documentation_audit", [row]
+        )
+        if errors:
+            log.error("bq_store: insert_documentation_audit errors: %s", errors)
+        return audit_id
+
+    def find_documentation_audits(self, hours_back: int = 72) -> list[dict]:
+        """Return recent documentation audit rows ordered by audited_at desc."""
+        self._ensure_table("documentation_audit")
+        sql = f"""
+        SELECT *
+        FROM {self._fqn('documentation_audit')}
+        WHERE audited_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(hours_back)} HOUR)
+        ORDER BY audited_at DESC
+        LIMIT 500
+        """
+        return self._query(sql)
 
 
 # ── where-clause builder ──────────────────────────────────────────────────────

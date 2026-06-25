@@ -211,7 +211,7 @@ VITAL SIGN ALERT FLOORS — for hemodynamic and respiratory problems, do NOT set
 clinical_status="worsening"/"critical" and do NOT alert unless the CURRENT value (most recent
 reading) crosses the relevant floor:
   • Hypotension / low MAP:  MAP < 65 mmHg  OR  systolic BP < 90 mmHg
-  • Tachycardia:            HR > 120 bpm
+  • Tachycardia:            HR > 100 bpm
   • Bradycardia:            HR < 40 bpm
   • Hypertension:           systolic BP > 180 mmHg
   • Hypoxia / low SpO2:     SpO2 < 92% AND SF ratio < 350  (BOTH required — SpO2 alone is not
@@ -230,7 +230,7 @@ reading) crosses the relevant floor:
 
 MULTI-VITAL CRISIS OVERRIDE — if TWO or more distinct vital parameters are SIMULTANEOUSLY
 below their alert floors at the current snapshot (e.g. SpO2 < 92% AND MAP < 65 mmHg, or
-HR > 120 AND RR > 28), all suppression rules are bypassed: the SF ratio gate, note freshness
+HR > 100 AND RR > 28), all suppression rules are bypassed: the SF ratio gate, note freshness
 (Step 3), response buffer (Step 4), and improving-trend suppression do NOT apply. Multiple
 simultaneous vital abnormalities signal acute physiological deterioration — alert regardless of
 documented plans or recent notes. Set should_alert=True.
@@ -2442,31 +2442,43 @@ def track_problems(
         logger.exception("problem_tracker: fingerprint load failed for %s enc=%d", cpmrn, encounter)
         fingerprint_block = ""
 
-    # ── Context gate — load protocols + build gate prompt block ───────────────
-    # Code-side: check valid_until before model runs; flip ended gates immediately.
-    _monitoring_protocols = _load_monitoring_protocols(db)
-    _matched_protocols = _match_protocols(problems, _monitoring_protocols)
-    _stored_gates: dict[str, dict] = {}
-    if _matched_protocols:
-        _stored_gates = _load_stored_gates(cpmrn, encounter, list(_matched_protocols.keys()), db)
-        # Hard code-side check: if valid_until has passed, mark eligibility ended now
-        # so the model sees the gate as already closed and doesn't carry it forward.
-        _now_utc = datetime.now(timezone.utc)
-        for pname, gate in _stored_gates.items():
-            vu = gate.get("valid_until")
-            if isinstance(vu, datetime):
-                if vu.tzinfo is None:
-                    vu = vu.replace(tzinfo=timezone.utc)
-                if _now_utc > vu and gate.get("eligibility") == "active":
-                    gate["eligibility"] = "ended"
-                    logger.info(
-                        "problem_tracker: gate valid_until expired for '%s' %s enc=%d — eligibility ended",
-                        pname, cpmrn, encounter,
-                    )
+    # ── Phase A: delta attention header ──────────────────────────────────────
+    # Runs first so _delta_cats is available for the protocol engine below.
+    _delta_header = ""
+    _delta_cats: "set[str] | None" = None
+    if delta:
+        try:
+            from tools.radar_sync.delta_scope import delta_summary_line, relevant_categories as _rel_cats
+            _delta_header = delta_summary_line(delta)
+            _delta_cats = _rel_cats(delta)
+            logger.info(
+                "problem_tracker: delta-scope categories=%s for %s enc=%d",
+                sorted(_delta_cats) if _delta_cats != {"*"} else ["*"],
+                cpmrn, encounter,
+            )
+        except Exception:
+            logger.exception("problem_tracker: delta_scope header failed for %s enc=%d", cpmrn, encounter)
+
+    # ── Unified protocol engine — guidance + context gate ─────────────────────
+    # Loads all protocols once, then derives:
+    #   _category_block  — guidance text injected into system prompt
+    #   gate_block       — permissive context gate injected into user message
+    # Replaces the separate _load_monitoring_protocols / _match_protocols /
+    # _build_gate_block inline code AND the clinical_rule_blocks import.
     try:
-        gate_block = _build_gate_block(_matched_protocols, _stored_gates, snapshot_at)
+        from tools.radar_sync.protocol_engine import (
+            load_protocols as _load_protocols,
+            build_injection as _build_injection,
+        )
+        _all_protocols = _load_protocols(db)
+        _category_block, gate_block = _build_injection(
+            _all_protocols, problems, prefetch_block, _delta_cats,
+            cpmrn, encounter, db, snapshot_at,
+        )
     except Exception:
-        logger.exception("problem_tracker: gate block build failed for %s enc=%d", cpmrn, encounter)
+        logger.exception("problem_tracker: protocol_engine failed for %s enc=%d — continuing without guidance/gate", cpmrn, encounter)
+        _all_protocols = []
+        _category_block = ""
         gate_block = ""
 
     # Build the stored state summary for the model
@@ -2549,44 +2561,6 @@ def track_problems(
     except Exception:
         logger.exception("problem_tracker: symptom_alert_rules injection failed for %s enc=%d", cpmrn, encounter)
         _symptom_alert_block = ""
-
-    # ── Phase A: delta attention header ──────────────────────────────────────
-    _delta_header = ""
-    _delta_cats: "set[str] | None" = None
-    if delta:
-        try:
-            from tools.radar_sync.delta_scope import delta_summary_line, relevant_categories as _rel_cats
-            _delta_header = delta_summary_line(delta)
-            _delta_cats = _rel_cats(delta)
-            logger.info(
-                "problem_tracker: delta-scope categories=%s for %s enc=%d",
-                sorted(_delta_cats) if _delta_cats != {"*"} else ["*"],
-                cpmrn, encounter,
-            )
-        except Exception:
-            logger.exception("problem_tracker: delta_scope header failed for %s enc=%d", cpmrn, encounter)
-
-    # ── Category-specific rule blocks — dynamic system prompt injection ───────
-    # Phase B: also filter by delta_categories so only blocks relevant to what
-    # actually arrived this run are injected. Wildcard delta (notes/reports) passes
-    # {"*"} → unchanged behaviour. No delta → None → unchanged behaviour.
-    try:
-        from tools.radar_sync.clinical_rule_blocks import (
-            filter_blocks_for_patient as _filter_rule_blocks,
-            format_prompt_block as _format_rule_blocks,
-            matched_categories as _matched_categories,
-        )
-        _category_blocks = _filter_rule_blocks(problems, prefetch_block, delta_categories=_delta_cats)
-        _category_block = _format_rule_blocks(_category_blocks)
-        if _category_blocks:
-            logger.info(
-                "problem_tracker: clinical_rule_blocks — %d block(s) for %s enc=%d (%s)",
-                len(_category_blocks), cpmrn, encounter,
-                ", ".join(_matched_categories(problems, prefetch_block, delta_categories=_delta_cats)),
-            )
-    except Exception:
-        logger.exception("problem_tracker: clinical_rule_blocks injection failed for %s enc=%d", cpmrn, encounter)
-        _category_block = ""
 
     system_prompt = (
         _SYSTEM

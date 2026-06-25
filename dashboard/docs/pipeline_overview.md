@@ -222,9 +222,9 @@ flowchart TB
 
     DELTA_HDR["② Delta header · Phase A\n─────────────────────────────\n'DELTA THIS RUN: 1 new lab (K 5.8)…'\nPrepended to user message\nDirects attention to what changed"]:::conditional
 
-    DOMAIN["③ Domain rule blocks · Phase B conditional\n─────────────────────────────\nNeuro → GCS delta reasoning (~138 tok)\nRespiratory → SF ratio, FiO2 rule (~196 tok)\nRenal → get_io, oliguria charting rule (~232 tok)\nSymptom → objective evidence required (~266 tok)\nCausal → secondary problem reasoning (~237 tok)\n\nInjected only when: patient has matching problem\nAND delta brought data of that type\n(wildcard delta → all matched blocks injected)"]:::conditional
+    DOMAIN["③ Protocol guidance blocks · Phase B conditional\n─────────────────────────────\nNeuro (guidance-neuro) → GCS delta reasoning\nRespiratory (guidance-respiratory) → SF ratio, FiO2 rule\nRenal (guidance-renal) → get_io, oliguria charting rule\nSymptom (guidance-symptom) → objective evidence required\nCausal (guidance-causal-secondary) → secondary problems\nTachycardia → HR>100 entry, unstable/stable branches\n\nAll in monitoring_protocols (GCS/Mongo-editable).\nInjected by protocol_engine.build_injection() when\napplies_when keywords match problem names/prefetch."]:::conditional
 
-    PROTO["④ Monitoring protocols · from GCS\n─────────────────────────────\npermissive-hypertension · established-low-gcs\npermissive-respiratory · haemoglobin-alert-criteria\nlactate-alert-criteria\n\nContext gate: if scenario applies → suppress alert"]:::gcs
+    PROTO["④ Monitoring protocols · permissive gates · from GCS\n─────────────────────────────\npermissive-hypertension · established-low-gcs\npermissive-respiratory · haemoglobin-alert-criteria\nlactate-alert-criteria · acknowledged-myocardial-injury\n\nContext gate: if scenario applies → suppress alert\nSame protocol doc can carry guidance + gate + audit."]:::gcs
 
     LAB["⑤ Lab alert rules · from GCS\n─────────────────────────────\nPer-lab floor / ceiling / delta thresholds\nFiltered to labs present in this patient's data"]:::gcs
 

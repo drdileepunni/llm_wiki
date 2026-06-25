@@ -15,7 +15,7 @@ from .metrics import (
     get_by_rater, get_cost, get_comments, get_ratings_per_alert,
     get_alerts_per_run, get_runs, get_run_patient_audit,
 )
-from .audit import get_active_next_checks, get_patient_detail
+from .audit import get_active_next_checks, get_documentation_audits, get_patient_detail
 from .agreement import compute_agreement
 from .config_reader import (
     get_monitoring_protocols, get_lab_alert_rules,
@@ -143,6 +143,15 @@ def create_app() -> Flask:
             return _ok(get_active_next_checks())
         except Exception as e:
             log.exception("api_audit_next_checks failed")
+            return _err(e)
+
+    @app.route("/api/audit/documentation")
+    def api_audit_documentation():
+        try:
+            hours_back = int(request.args.get("hours_back", 72))
+            return _ok(get_documentation_audits(hours_back=hours_back))
+        except Exception as e:
+            log.exception("api_audit_documentation failed")
             return _err(e)
 
     @app.route("/api/audit/patient/<cpmrn>/<int:enc>")
