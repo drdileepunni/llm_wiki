@@ -95,6 +95,24 @@
     </button>
   </div>
   <div id="lab-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
+
+  <hr class="my-4">
+
+  <div class="d-flex align-items-center mb-2">
+    <div>
+      <h6 class="mb-0 fw-semibold">Normal Ranges — deterministic skip gate</h6>
+      <p class="text-muted small mb-0 mt-1">
+        Rule-based ranges used to skip the LLM call when all new lab values are within normal limits.
+        Operates independently of the alert rules above. Unknown panels are treated as significant
+        (conservative fallback — full LLM run proceeds).
+      </p>
+    </div>
+    <button class="btn btn-sm btn-outline-primary ms-3 flex-shrink-0"
+      onclick="openEditLabNormalRanges()">
+      <i class="bi bi-pencil me-1"></i>Edit Ranges
+    </button>
+  </div>
+  <div id="lab-normal-content"><div class="spinner-wrap"><div class="spinner-border text-primary"></div></div></div>
 </div>
 
 <!-- Symptom Alert Rules -->

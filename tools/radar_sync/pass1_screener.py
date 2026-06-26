@@ -42,7 +42,12 @@ Flag needs_full_analysis=true if the note documents ANY of:
 Do NOT flag:
 - Routine nursing handover or observation notes with no new clinical content
 - Notes that only confirm stable, ongoing management is continuing as planned
-- Administrative, discharge planning, or documentation-only entries\
+- Administrative, discharge planning, or documentation-only entries
+- A note that describes the patient as currently stable or improved, even if the stored
+  problem status is "worsening" or "critical" — the stored status reflects a historical
+  trend established over prior assessments; a single note capturing the last hour does
+  not contradict it. Flag only if the note itself contains NEW deterioration, NEW
+  abnormal findings, or a NEW clinical problem.\
 """
 
 
@@ -140,7 +145,8 @@ def screen_patient(
 
     user_msg = (
         f"Patient: {cpmrn} (encounter {encounter})\n\n"
-        f"Known problems:\n"
+        f"Known problems (for summary context only — do NOT flag based on whether the note "
+        f"matches these statuses; statuses reflect historical trend, not the current hour):\n"
         f"{json.dumps(known_problems, indent=2, default=str)}\n\n"
         f"New note(s) to evaluate:\n"
         f"{json.dumps(new_notes, indent=2, default=str)}\n\n"

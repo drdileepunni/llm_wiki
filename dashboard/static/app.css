@@ -85,3 +85,19 @@ body { background: #f8f9fa; font-size: 14px; }
 .agreement-metric:last-child { border-bottom: none; }
 .agreement-label { font-size: 0.8rem; color: #495057; }
 .agreement-value { font-weight: 600; font-size: 0.95rem; }
+
+/* gate trace — row strip + drawer tab */
+.gate-trace-strip { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.gt-phase-label { font-size: 0.62rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; color: #6c757d; margin-right: 2px; }
+.gt-sep { font-size: 0.65rem; color: #adb5bd; margin: 0 4px; }
+
+/* verdict badge colours */
+.badge.gt-skip        { background: #6c757d; font-size: 0.62rem; }
+.badge.gt-normal      { background: #198754; font-size: 0.62rem; }
+.badge.gt-significant { background: #dc3545; font-size: 0.62rem; }
+.badge.gt-limited     { background: #fd7e14; font-size: 0.62rem; }
+.badge.gt-forced      { background: #ffc107; color: #212529; font-size: 0.62rem; }
+.badge.gt-bypassed    { background: #6610f2; font-size: 0.62rem; }
+.badge.gt-ran         { background: #0d6efd; font-size: 0.62rem; }
+.badge.gt-error       { background: #212529; font-size: 0.62rem; }

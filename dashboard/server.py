@@ -20,7 +20,7 @@ from .agreement import compute_agreement
 from .config_reader import (
     get_monitoring_protocols, get_lab_alert_rules,
     get_symptom_alert_rules, get_operational_settings,
-    get_lab_staleness_overrides,
+    get_lab_staleness_overrides, get_lab_normal_ranges,
 )
 
 log = logging.getLogger(__name__)
@@ -207,6 +207,14 @@ def create_app() -> Flask:
             log.exception("api_symptom_rules failed")
             return _err(e)
 
+    @app.route("/api/config/lab-normal-ranges")
+    def api_lab_normal_ranges():
+        try:
+            return _ok(get_lab_normal_ranges())
+        except Exception as e:
+            log.exception("api_lab_normal_ranges failed")
+            return _err(e)
+
     @app.route("/api/config/lab-staleness-overrides")
     def api_lab_staleness_overrides():
         try:
@@ -259,6 +267,20 @@ def create_app() -> Flask:
             return _err(str(e), 400)
         except Exception as e:
             log.exception("api_save_symptom_rules failed")
+            return _err(e)
+
+    @app.route("/api/config/lab-normal-ranges", methods=["PUT"])
+    def api_save_lab_normal_ranges():
+        try:
+            doc = _parse_body()
+            if "panels" not in doc:
+                return _err("Missing 'panels' key", 400)
+            save_app_setting("lab_normal_ranges", doc)
+            return _ok({"saved": "lab_normal_ranges"})
+        except ValueError as e:
+            return _err(str(e), 400)
+        except Exception as e:
+            log.exception("api_save_lab_normal_ranges failed")
             return _err(e)
 
     @app.route("/api/config/lab-staleness-overrides", methods=["PUT"])

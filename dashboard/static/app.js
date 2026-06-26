@@ -456,7 +456,7 @@ function showTab(name, linkEl) {
 async function loadConfig() {
   if (window.PAGE !== 'config') return;
   await Promise.all([
-    loadProtocols(), loadLabRules(), loadSymptomRules(), loadLabStaleness(), loadOpsSettings()
+    loadProtocols(), loadLabRules(), loadLabNormalRanges(), loadSymptomRules(), loadLabStaleness(), loadOpsSettings()
   ]);
 }
 
@@ -840,6 +840,77 @@ async function openEditLabRules() {
       'Saves to gs://patientview-cds-pipeline-ops/app_settings/lab_alert_rules.json',
       loadLabRules);
   } catch (e) { alert('Could not load current rules: ' + e.message); }
+}
+
+async function loadLabNormalRanges() {
+  const el = document.getElementById('lab-normal-content');
+  if (!el) return;
+  try {
+    const d = await apiFetch('/api/config/lab-normal-ranges');
+    const panels = d.panels || {};
+    const enabled = d.enabled !== false;
+    const fromDefault = d._source === 'module_default';
+    const panelKeys = Object.keys(panels);
+
+    let rows = '';
+    for (const key of panelKeys) {
+      const panel = panels[key];
+      const ranges = panel.ranges || [];
+      if (panel.always_normal) {
+        rows += `<tr>
+          <td><strong>${escHtml(key)}</strong></td>
+          <td colspan="3" class="text-muted fst-italic">always normal (qualitative panel)</td>
+        </tr>`;
+      } else {
+        ranges.forEach((r, i) => {
+          rows += `<tr>
+            <td>${i === 0 ? `<strong>${escHtml(key)}</strong>` : ''}</td>
+            <td><code>${escHtml(r.attr||'')}</code></td>
+            <td>${r.low != null ? r.low : '<span class="text-muted">—</span>'}</td>
+            <td>${r.high != null ? r.high : '<span class="text-muted">—</span>'}</td>
+          </tr>`;
+        });
+        if (!ranges.length) {
+          rows += `<tr>
+            <td><strong>${escHtml(key)}</strong></td>
+            <td colspan="3" class="text-muted">no ranges defined</td>
+          </tr>`;
+        }
+      }
+    }
+
+    el.innerHTML = `
+      <div class="mb-2 small">
+        <span class="enabled-dot enabled-dot--${enabled?'on':'off'}"></span>
+        <strong>${enabled ? 'Enabled' : 'Disabled'}</strong> — ${panelKeys.length} panel(s)
+        ${fromDefault ? '<span class="badge bg-warning text-dark source-badge ms-2">module defaults (not yet seeded to GCS)</span>' : ''}
+      </div>
+      ${panelKeys.length ? `
+      <div class="table-responsive">
+        <table class="table table-sm table-hover">
+          <thead><tr>
+            <th>Panel</th><th>Analyte (attr substring)</th>
+            <th>Normal low</th><th>Normal high</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="text-muted small">No panels defined.</div>'}
+      <span class="raw-json-toggle" onclick="toggleRaw(this)">
+        <i class="bi bi-code me-1"></i>Show raw JSON
+      </span>
+      <div class="raw-json-block d-none mt-1">${escHtml(JSON.stringify(d, null, 2))}</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="text-danger small">Error: ${escHtml(String(e))}</div>`;
+  }
+}
+
+async function openEditLabNormalRanges() {
+  try {
+    const d = await apiFetch('/api/config/lab-normal-ranges');
+    _openEditModal('Edit Lab Normal Ranges', d, '/api/config/lab-normal-ranges',
+      'Saves to gs://patientview-cds-pipeline-ops/app_settings/lab_normal_ranges.json',
+      loadLabNormalRanges);
+  } catch (e) { alert('Could not load current ranges: ' + e.message); }
 }
 
 async function openEditSymptomRules() {
@@ -1253,6 +1324,10 @@ function auditPatientRow(r) {
       `</span>`;
 
   const rowId = `audit-row-${escHtml(r.CPMRN)}-${r.encounter}`;
+  // Store gate_trace in a global map so togglePatientDetail can read it
+  (window._auditGateTraces = window._auditGateTraces || new Map())
+    .set(`${r.CPMRN}:${r.encounter}`, r.gate_trace || []);
+  const gateTraceStrip = buildGateTraceStrip(r.gate_trace);
   return `<tr id="${rowId}" data-cpmrn="${escHtml(r.CPMRN)}" data-enc="${r.encounter || 1}">
     <td class="align-top" style="white-space:nowrap">
       <span class="fw-semibold" style="font-size:0.82rem">${escHtml(r.CPMRN)}</span><br>
@@ -1262,7 +1337,7 @@ function auditPatientRow(r) {
     <td class="align-top">${triggerReasonHtml}</td>
     <td class="align-top">${pass2Label}</td>
     <td class="align-top">${deltaHtml}</td>
-    <td class="align-top">${problemsHtml}</td>
+    <td class="align-top">${problemsHtml}${gateTraceStrip}</td>
     <td class="align-top text-end">
       <button class="btn btn-sm btn-outline-secondary py-0 px-1 expand-btn" style="font-size:0.72rem"
               onclick="togglePatientDetail(this)" title="Show model detail">
@@ -1270,6 +1345,27 @@ function auditPatientRow(r) {
       </button>
     </td>
   </tr>`;
+}
+
+function buildGateTraceStrip(trace) {
+  if (!trace || !trace.length) return '';
+  const phaseLabels = {entry: 'Entry', skip_gate: 'Skip gate', triage: 'Triage', analysis: 'Analysis'};
+  const phaseOrder  = ['entry', 'skip_gate', 'triage', 'analysis'];
+  const byPhase = {};
+  for (const step of trace) {
+    if (!byPhase[step.phase]) byPhase[step.phase] = [];
+    byPhase[step.phase].push(step);
+  }
+  const parts = phaseOrder
+    .filter(p => byPhase[p])
+    .map(p => {
+      const badges = byPhase[p].map(s =>
+        `<span class="badge gt-${escHtml(s.verdict)}" title="${escHtml(s.gate + (s.detail ? ': ' + s.detail : ''))}">${escHtml(s.gate)}</span>`
+      ).join(' ');
+      return `<span class="gt-phase-label">${escHtml(phaseLabels[p] || p)}</span>${badges}`;
+    })
+    .join('<span class="gt-sep">·</span>');
+  return `<div class="gate-trace-strip mt-2">${parts}</div>`;
 }
 
 // ── Per-patient lazy drill-down ───────────────────────────────────────────────
@@ -1302,7 +1398,8 @@ async function togglePatientDetail(btn) {
 
   try {
     const d = await apiFetch(`/api/audit/patient/${encodeURIComponent(cpmrn)}/${enc}`);
-    placeholderTr.innerHTML = `<td colspan="7" class="p-0">${buildDetailPanel(d, detailId)}</td>`;
+    const gateTrace = (window._auditGateTraces || new Map()).get(`${cpmrn}:${enc}`) || [];
+    placeholderTr.innerHTML = `<td colspan="7" class="p-0">${buildDetailPanel(d, detailId, gateTrace)}</td>`;
     // Activate first tab
     const firstTab = placeholderTr.querySelector('[data-tab]');
     if (firstTab) switchAuditTab(firstTab, detailId);
@@ -1316,12 +1413,13 @@ async function togglePatientDetail(btn) {
   }
 }
 
-function buildDetailPanel(d, panelId) {
-  const summaryHtml   = buildSummaryTab(d);
-  const problemsHtml  = buildProblemsTab(d);
-  const reasoningHtml = buildReasoningTab(d);
-  const deltaHtml     = buildDeltaTab(d);
-  const timelineHtml  = buildTimelineTab(d);
+function buildDetailPanel(d, panelId, gateTrace) {
+  const summaryHtml       = buildSummaryTab(d);
+  const problemsHtml      = buildProblemsTab(d);
+  const reasoningHtml     = buildReasoningTab(d);
+  const deltaHtml         = buildDeltaTab(d);
+  const timelineHtml      = buildTimelineTab(d);
+  const pipelineStepsHtml = buildPipelineStepsTab(gateTrace || []);
 
   return `<div style="background:#f8f9fa; border-top:1px solid #dee2e6; padding:10px 14px">
     <div class="d-flex gap-3 border-bottom mb-2 pb-1" style="font-size:0.82rem">
@@ -1340,6 +1438,9 @@ function buildDetailPanel(d, panelId) {
       <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
               data-tab="timeline" data-panel="${panelId}"
               onclick="switchAuditTab(this,'${panelId}')">Timeline</button>
+      <button class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+              data-tab="pipeline" data-panel="${panelId}"
+              onclick="switchAuditTab(this,'${panelId}')">Pipeline steps</button>
       <span class="ms-auto text-muted" style="font-size:0.72rem">lazy · loaded on expand</span>
     </div>
     <div data-pane="summary" data-panel="${panelId}">${summaryHtml}</div>
@@ -1347,7 +1448,35 @@ function buildDetailPanel(d, panelId) {
     <div data-pane="reasoning" data-panel="${panelId}" style="display:none">${reasoningHtml}</div>
     <div data-pane="delta" data-panel="${panelId}" style="display:none">${deltaHtml}</div>
     <div data-pane="timeline" data-panel="${panelId}" style="display:none">${timelineHtml}</div>
+    <div data-pane="pipeline" data-panel="${panelId}" style="display:none">${pipelineStepsHtml}</div>
   </div>`;
+}
+
+function buildPipelineStepsTab(trace) {
+  if (!trace || !trace.length) {
+    return '<div class="text-muted small py-2">No gate trace for this run (pre-refactor run or run that skipped before Phase 0).</div>';
+  }
+  const phaseLabels = {entry: 'Entry', skip_gate: 'Skip Gate', triage: 'Triage', analysis: 'Analysis'};
+  let html = '<div style="font-size:0.82rem">';
+  let lastPhase = null;
+  for (const step of trace) {
+    if (step.phase !== lastPhase) {
+      if (lastPhase !== null) html += '</div>';
+      html += `<div class="mb-3">
+        <div class="text-muted mb-1" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600">
+          ${escHtml(phaseLabels[step.phase] || step.phase)}
+        </div>`;
+      lastPhase = step.phase;
+    }
+    html += `<div class="d-flex align-items-baseline gap-2 mb-1">
+      <span class="badge gt-${escHtml(step.verdict)}" style="min-width:72px;text-align:center;flex-shrink:0">${escHtml(step.verdict)}</span>
+      <span class="fw-semibold text-dark" style="min-width:110px;flex-shrink:0;font-size:0.8rem">${escHtml(step.gate)}</span>
+      <span class="text-muted" style="font-size:0.78rem">${escHtml(step.detail || '')}</span>
+    </div>`;
+  }
+  if (lastPhase !== null) html += '</div>';
+  html += '</div>';
+  return html;
 }
 
 function switchAuditTab(btn, panelId) {

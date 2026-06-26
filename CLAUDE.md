@@ -252,3 +252,31 @@ Results visible on the dashboard Audit page → Documentation Audits panel.
 ### Key alert rules in `problem_tracker._SYSTEM`
 - **GCS DELTA RULE** — no GCS alert without ≥2-point drop in the last 6 hours, regardless of absolute value, plan status, or treatment-inadequate override.
 - **NOTE FRESHNESS RULE** — a plan note <24h old is always a current active plan (`being_addressed=True`, `should_alert=False`). Apply the treatment-inadequate override only when the most recent plan note is >24h old AND the problem is worsening.
+
+### Per-chart pipeline — four-phase architecture (`_run_live_pipeline`)
+
+`_run_live_pipeline()` in `app/backend/scheduler.py` is organized into four named phases. Each phase appends records to `status["gate_trace"]` (visible on the Run Audit dashboard → Pipeline steps tab). All legacy `status[...]` keys are preserved.
+
+| Phase | What it does |
+|---|---|
+| **Prelude** | Note indexing, delta extraction, report selection, overdue next-checks. Outputs: `delta`, `_has_new_reports`, `force_expensive`, `force_glucose_check`. |
+| **Phase 0 — Entry** | empty-chart gate → cadence gate → delta gate. Skips the chart if there is nothing to look at, not yet due, or no new data. `delta_gate = "bypassed_forced"` when an overdue next-check forces a run with no new data. |
+| **Phase 1 — Skip Gate** | Independent per-category check: **vitals** (unified — fires for any new vitals, not only vitals-only deltas), **ABG** (threshold check), **other labs** (rule-based normal-range check for 5 known panel types; unknown panels still treated as significant), **notes** (Pass-1 screener, runs before summary update). SKIP only when ALL present categories are NORMAL. |
+| **Phase 2 — Triage** | Routes the chart: forced-recheck shortcut (no new data, overdue) → glucose-only path → full analysis. |
+| **Phase 3 — Analysis** | report interpret → summary update → status classifier → problem tracker → glucose side-step → fn_detector. |
+
+**Key behavioral change (Phase 1 unified vitals):** abnormal vitals arriving alongside trivial notes no longer skip — the vitals check now fires regardless of whether other categories are also present. Previously only vitals-only deltas triggered Gate 2.5.
+
+**Pass-1 screener moved to Phase 1** (before summary update). It only needs `delta` + `last_problems` — no dependency on the new summary — so this is safe and avoids wasting a summary LLM call on charts that will be skipped.
+
+**`gate_trace` schema:**
+```python
+{"phase": "entry"|"skip_gate"|"triage"|"analysis",
+ "gate":  "empty_chart"|"cadence"|"delta"|"vitals"|"abg"|"other_labs"|"notes"|
+          "combined"|"glucose"|"forced_recheck"|"scope"|"summary"|"classifier"|
+          "problem_tracker"|"glucose_sidestep"|"fn_detector",
+ "verdict": "skip"|"normal"|"significant"|"limited"|"forced"|"bypassed"|"ran"|"error",
+ "detail": "short human-readable string"}
+```
+
+Dashboard: Run Audit table → row strip shows phase/gate verdicts; expand a row → "Pipeline steps" tab shows the full ordered trace.

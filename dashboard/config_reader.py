@@ -83,6 +83,36 @@ def get_lab_alert_rules() -> dict[str, Any]:
     return {"_id": "lab_alert_rules", "enabled": False, "rules": []}
 
 
+# ── lab normal ranges ─────────────────────────────────────────────────────────
+
+def get_lab_normal_ranges() -> dict[str, Any]:
+    """
+    Return the lab normal ranges config doc used by the Phase-1 skip gate.
+    Falls back to DEFAULT_CONFIG from the module if not yet seeded to GCS.
+    """
+    try:
+        db = _get_db()
+        doc = db["app_settings"].find_one({"_id": "lab_normal_ranges"})
+        if doc:
+            return doc
+    except Exception:
+        log.exception("config_reader: could not read lab_normal_ranges")
+
+    log.info("config_reader: lab_normal_ranges not in GCS — loading from module defaults")
+    try:
+        import sys
+        from pathlib import Path
+        _root = Path(__file__).resolve().parents[1]
+        for p in [str(_root / "app"), str(_root)]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        from tools.radar_sync.lab_normal_ranges import DEFAULT_CONFIG
+        return dict(DEFAULT_CONFIG, _source="module_default")
+    except Exception:
+        log.exception("config_reader: could not import DEFAULT_CONFIG from lab_normal_ranges")
+    return {"_id": "lab_normal_ranges", "enabled": False, "panels": {}}
+
+
 # ── symptom alert rules ───────────────────────────────────────────────────────
 
 def get_symptom_alert_rules() -> dict[str, Any]:
