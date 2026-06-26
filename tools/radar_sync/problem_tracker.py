@@ -3134,6 +3134,38 @@ def track_problems(
         except Exception:
             logger.exception("problem_tracker: study_alerts BQ write failed for %s", cpmrn)
 
+    # Enqueue documentation audits for any problems that match an audit protocol
+    # and haven't been seen in the queue before. The BQ sweep query deduplicates
+    # by queue_id so re-inserting on every run is safe.
+    try:
+        from tools.radar_sync.protocol_engine import match_for_audit as _match_for_audit
+        from datetime import timedelta
+        _audit_pairs = _match_for_audit(
+            _all_protocols,
+            [{"name": a["problem_name"], "clinical_status": a.get("clinical_status")} for a in final_assessments],
+        )
+        if _audit_pairs:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _root2 = _Path(__file__).resolve().parents[2]
+            for _p in [str(_root2 / "app"), str(_root2)]:
+                if _p not in _sys.path:
+                    _sys.path.insert(0, _p)
+            from backend.services.bq_store import get_bq_store as _get_bq_store
+            _bq2 = _get_bq_store()
+            for _prob_stub, _proto in _audit_pairs:
+                _window_h = int(_proto["audit"].get("window_hours") or 12)
+                _bq2.enqueue_documentation_audit({
+                    "CPMRN":        cpmrn,
+                    "encounter":    encounter,
+                    "problem_name": _prob_stub["name"],
+                    "protocol_id":  _proto["protocol_id"],
+                    "detected_at":  now,
+                    "audit_due_at": now + timedelta(hours=_window_h),
+                })
+    except Exception:
+        logger.exception("problem_tracker: audit enqueue failed for %s enc=%d", cpmrn, encounter)
+
     tracer.save(final_output={
         "assessments": [(a["problem_name"], a.get("clinical_status"), a.get("should_alert")) for a in final_assessments],
         "alerts_sent":       alerts_sent,

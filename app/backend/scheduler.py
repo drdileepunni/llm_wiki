@@ -1604,128 +1604,94 @@ def _run_study_jobs():
 
 def _run_documentation_audits():
     """
-    Hourly sweep: for each active patient_problems doc matched by a protocol
-    with an `audit` section, check whether the protocol's window has elapsed
-    (now >= first_detected_at + window_hours) and, if so, run the documentation
-    audit and write a row to the documentation_audit BQ table.
+    Hourly sweep: queries the documentation_audit_queue BQ table for problems
+    whose audit window has elapsed and that haven't been audited yet, then runs
+    the LLM documentation check and writes results to documentation_audit.
 
-    Idempotent: skips problems already marked documentation_audit_done=true.
-    Independent of run-scoping: reads patient_problems directly so a tachycardia
-    problem is audited at its 12h mark regardless of recent delta activity.
+    The queue is populated by problem_tracker when it first assesses a problem
+    that matches a protocol with an audit section. The sweep never reads GCS —
+    all candidate discovery goes through BigQuery.
     """
     try:
-        from datetime import timedelta
-        from backend.services.emr.db import get_db
         from backend.services.bq_store import get_bq_store
+        from backend.services.emr.db import get_db
         from backend.config import GOOGLE_API_KEY
         from backend.services.llm_client import GeminiLLMClient
-        from tools.radar_sync.protocol_engine import load_protocols, match_for_audit
         from tools.radar_sync.documentation_audit import check_documentation
+        from tools.radar_sync.protocol_engine import load_protocols
 
-        db = get_db()
         bq = get_bq_store()
-        protocols = load_protocols(db)
+        db = get_db()
         now = datetime.now(timezone.utc)
 
-        # Load active problems (not yet audit-done) with a first_detected_at
-        candidate_docs = list(db["patient_problems"].find(
-            {
-                "first_detected_at": {"$exists": True, "$ne": None},
-                "documentation_audit_done": {"$ne": True},
-            },
-            {"CPMRN": 1, "encounter": 1, "problem_name": 1,
-             "first_detected_at": 1, "clinical_status": 1},
-        ))
-
-        if not candidate_docs:
+        pending = bq.find_pending_audit_queue()
+        if not pending:
             return
 
-        # Group by (CPMRN, encounter) so we load protocols once per patient
-        from collections import defaultdict
-        by_patient: dict = defaultdict(list)
-        for doc in candidate_docs:
-            key = (doc["CPMRN"], int(doc.get("encounter") or 0))
-            by_patient[key].append(doc)
-
+        protocols = load_protocols(db)
+        proto_by_id = {p["protocol_id"]: p for p in protocols}
         client = GeminiLLMClient(api_key=GOOGLE_API_KEY, model="gemini-3.1-flash-lite")
         audited = 0
 
-        for (cpmrn, encounter), prob_docs in by_patient.items():
-            # Build minimal problem list for matching
-            problems = [
-                {"name": d["problem_name"], "clinical_status": d.get("clinical_status")}
-                for d in prob_docs
-            ]
-            pairs = match_for_audit(protocols, problems)
-            if not pairs:
+        for item in pending:
+            cpmrn        = item["CPMRN"]
+            encounter    = int(item["encounter"] or 0)
+            prob_name    = item["problem_name"]
+            protocol_id  = item["protocol_id"]
+            detected_at  = item["detected_at"]
+
+            proto = proto_by_id.get(protocol_id)
+            if not proto or not proto.get("audit"):
+                logger.warning(
+                    "documentation_audit: queue item references unknown protocol '%s' — skipping",
+                    protocol_id,
+                )
                 continue
 
-            for prob_stub, proto in pairs:
-                prob_name = prob_stub["name"]
-                # Find the full doc for this problem
-                full_doc = next(
-                    (d for d in prob_docs if d["problem_name"] == prob_name), None
-                )
-                if not full_doc:
-                    continue
-
-                detected_at = full_doc.get("first_detected_at")
-                if not detected_at:
-                    continue
-                if isinstance(detected_at, str):
-                    try:
-                        detected_at = datetime.fromisoformat(detected_at.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                if detected_at.tzinfo is None:
-                    detected_at = detected_at.replace(tzinfo=timezone.utc)
-
-                audit_spec = proto["audit"]
-                window_h = int(audit_spec.get("window_hours") or 12)
-                audit_due_at = detected_at + timedelta(hours=window_h)
-
-                if now < audit_due_at:
-                    continue  # window not yet elapsed
-
-                logger.info(
-                    "documentation_audit: running for %s enc=%d problem='%s' protocol='%s'",
-                    cpmrn, encounter, prob_name, proto["protocol_id"],
-                )
+            if isinstance(detected_at, str):
                 try:
-                    result = check_documentation(
-                        cpmrn, encounter, audit_spec, detected_at, client, db
-                    )
-                    bq.insert_documentation_audit({
-                        "CPMRN":            cpmrn,
-                        "encounter":        encounter,
-                        "problem_name":     prob_name,
-                        "protocol_id":      proto["protocol_id"],
-                        "detected_at":      detected_at,
-                        "audited_at":       now,
-                        "window_hours":     window_h,
-                        "verdict":          result.get("verdict"),
-                        "note_count":       result.get("note_count", 0),
-                        "required_items":   audit_spec.get("required_documentation") or [],
-                        "documented_items": result.get("documented_items") or [],
-                        "missing_items":    result.get("missing_items") or [],
-                    })
-                    db["patient_problems"].update_one(
-                        {"CPMRN": cpmrn, "encounter": encounter, "problem_name": prob_name},
-                        {"$set": {"documentation_audit_done": True}},
-                    )
-                    audited += 1
-                    logger.info(
-                        "documentation_audit: done for %s enc=%d '%s' — verdict=%s (%d/%d items documented)",
-                        cpmrn, encounter, prob_name,
-                        result.get("verdict"),
-                        len(result.get("documented_items") or []),
-                        len(audit_spec.get("required_documentation") or []),
-                    )
-                except Exception:
-                    logger.exception(
-                        "documentation_audit: failed for %s enc=%d '%s'",
-                        cpmrn, encounter, prob_name,
-                    )
+                    detected_at = datetime.fromisoformat(detected_at.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if detected_at.tzinfo is None:
+                detected_at = detected_at.replace(tzinfo=timezone.utc)
+
+            audit_spec = proto["audit"]
+            logger.info(
+                "documentation_audit: running for %s enc=%d problem='%s' protocol='%s'",
+                cpmrn, encounter, prob_name, protocol_id,
+            )
+            try:
+                result = check_documentation(
+                    cpmrn, encounter, audit_spec, detected_at, client, db
+                )
+                bq.insert_documentation_audit({
+                    "CPMRN":            cpmrn,
+                    "encounter":        encounter,
+                    "problem_name":     prob_name,
+                    "protocol_id":      protocol_id,
+                    "detected_at":      detected_at,
+                    "audited_at":       now,
+                    "window_hours":     int(audit_spec.get("window_hours") or 12),
+                    "verdict":          result.get("verdict"),
+                    "note_count":       result.get("note_count", 0),
+                    "required_items":   audit_spec.get("required_documentation") or [],
+                    "documented_items": result.get("documented_items") or [],
+                    "missing_items":    result.get("missing_items") or [],
+                })
+                audited += 1
+                logger.info(
+                    "documentation_audit: done for %s enc=%d '%s' — verdict=%s (%d/%d items documented)",
+                    cpmrn, encounter, prob_name,
+                    result.get("verdict"),
+                    len(result.get("documented_items") or []),
+                    len(audit_spec.get("required_documentation") or []),
+                )
+            except Exception:
+                logger.exception(
+                    "documentation_audit: failed for %s enc=%d '%s'",
+                    cpmrn, encounter, prob_name,
+                )
 
         if audited:
             logger.info("documentation_audit sweep: %d problem(s) audited", audited)

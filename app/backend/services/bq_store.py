@@ -441,6 +441,20 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.patient_next_checks` (
 OPTIONS (description = "Per-problem next_check state captured at each pipeline run — NULL due_after means cleared/resolved")
 """
 
+_DDL["documentation_audit_queue"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.documentation_audit_queue` (
+  queue_id      STRING    NOT NULL,
+  CPMRN         STRING,
+  encounter     INT64,
+  problem_name  STRING,
+  protocol_id   STRING,
+  detected_at   TIMESTAMP,
+  audit_due_at  TIMESTAMP,
+  enqueued_at   TIMESTAMP
+)
+OPTIONS (description = "Audit work queue — one row per (patient, problem) that needs a documentation audit. Deduped by queue_id at sweep time.")
+"""
+
 _DDL["documentation_audit"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.documentation_audit` (
   audit_id           STRING    NOT NULL,
@@ -1349,6 +1363,65 @@ class BQStudyStore:
         if errors:
             log.error("bq_store: insert_documentation_audit errors: %s", errors)
         return audit_id
+
+    def enqueue_documentation_audit(self, doc: dict) -> None:
+        """
+        Insert one row into documentation_audit_queue.
+        queue_id = CPMRN_encounter_problem_name — stable natural key used by the
+        sweep to deduplicate multiple inserts for the same problem.
+        """
+        self._ensure_table("documentation_audit_queue")
+        cpmrn        = doc.get("CPMRN") or ""
+        encounter    = int(doc.get("encounter") or 0)
+        problem_name = doc.get("problem_name") or ""
+        queue_id     = f"{cpmrn}_{encounter}_{problem_name}"
+        row = {
+            "queue_id":     queue_id,
+            "CPMRN":        cpmrn,
+            "encounter":    encounter,
+            "problem_name": problem_name,
+            "protocol_id":  doc.get("protocol_id"),
+            "detected_at":  _dt_to_iso(doc.get("detected_at")),
+            "audit_due_at": _dt_to_iso(doc.get("audit_due_at")),
+            "enqueued_at":  _now_iso(),
+        }
+        errors = self._client.insert_rows_json(
+            f"{self._project}.{self._dataset}.documentation_audit_queue", [row]
+        )
+        if errors:
+            log.error("bq_store: enqueue_documentation_audit errors: %s", errors)
+
+    def find_pending_audit_queue(self) -> list[dict]:
+        """
+        Return queue rows whose audit window has elapsed and that have not yet
+        been audited. Deduplicates by queue_id (takes the earliest detected_at).
+        Joins against documentation_audit to exclude already-completed audits.
+        """
+        self._ensure_table("documentation_audit_queue")
+        self._ensure_table("documentation_audit")
+        sql = f"""
+        SELECT
+          q.queue_id,
+          q.CPMRN,
+          q.encounter,
+          q.problem_name,
+          q.protocol_id,
+          MIN(q.detected_at) AS detected_at,
+          MIN(q.audit_due_at) AS audit_due_at
+        FROM {self._fqn('documentation_audit_queue')} q
+        LEFT JOIN (
+          SELECT CPMRN, encounter, problem_name
+          FROM {self._fqn('documentation_audit')}
+        ) a ON a.CPMRN = q.CPMRN
+           AND a.encounter = q.encounter
+           AND a.problem_name = q.problem_name
+        WHERE a.CPMRN IS NULL
+          AND q.audit_due_at <= CURRENT_TIMESTAMP()
+        GROUP BY q.queue_id, q.CPMRN, q.encounter, q.problem_name, q.protocol_id
+        ORDER BY MIN(q.audit_due_at)
+        LIMIT 500
+        """
+        return self._query(sql)
 
     def find_documentation_audits(self, hours_back: int = 72) -> list[dict]:
         """Return recent documentation audit rows ordered by audited_at desc."""
