@@ -385,13 +385,13 @@ def _run_live_pipeline(
                     status["vital_normal_gate"] = "triggered"
                     _trace("skip_gate", "vitals", "significant", _vitals_detail)
 
-        # Always write the NEWS2 snapshot for this run so future runs have a baseline.
-        # Done unconditionally (normal or abnormal vitals) — normal runs anchor the baseline too.
-        try:
-            from tools.radar_sync.fn_detector import write_news2_run_snapshot
-            write_news2_run_snapshot(_gate_new_vitals, cpmrn, encounter, db)
-        except Exception:
-            logger.exception("pipeline: write_news2_run_snapshot failed for %s enc=%d", cpmrn, encounter)
+            # Always write the NEWS2 snapshot for this run so future runs have a baseline.
+            # Done unconditionally (normal or abnormal vitals) — normal runs anchor the baseline too.
+            try:
+                from tools.radar_sync.fn_detector import write_news2_run_snapshot
+                write_news2_run_snapshot(_gate_new_vitals, cpmrn, encounter, db)
+            except Exception:
+                logger.exception("pipeline: write_news2_run_snapshot failed for %s enc=%d", cpmrn, encounter)
         except Exception:
             logger.exception("pipeline: vital-normal gate check failed for %s enc=%d — treating as significant", cpmrn, encounter)
             force_full_vitals = True
