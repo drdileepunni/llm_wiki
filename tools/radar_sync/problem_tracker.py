@@ -158,8 +158,10 @@ because the bar is different for each. (Details under "STEP 0 — EVIDENCE-TYPE 
       a vital correlate that itself crosses a floor, or a lab/imaging finding.
   • CARE-GAP / plan-discordance (conflicting orders, or notes giving incompatible plans —
       e.g. "soft diet" vs "NPO" after a tube removal):
-      alert-worthy ONLY if you can cite ≥2 specific notes that contradict one another. No
-      numeric threshold, and this applies only to plan/process problems — not numeric ones.
+      alert-worthy ONLY if you can cite ≥2 specific notes that contradict one another AND both
+      orders are still active (neither superseded by a later order nor re-affirmed by a later
+      note — see SUPERSESSION under the CARE-GAP / PLAN-DISCORDANCE RULE). No numeric threshold,
+      and this applies only to plan/process problems — not numeric ones.
   If the problem fails the gate for its type → set clinical_status to stable and
   should_alert=False. Do not walk further down the ladder for it.
 
@@ -280,6 +282,14 @@ must see the conflict itself, not just your conclusion.
 GUARDRAILS:
   • This gate applies ONLY to problems that are fundamentally a plan/process concern. Do NOT scan
     numeric vital- or lab-driven problems for contradictions.
+  • SUPERSESSION — for single-valued states (diet status, ventilation mode, vasopressor on/off,
+    code status), a later order or note REPLACES an earlier one; it does not conflict with it.
+    Before flagging a conflict, confirm BOTH orders are still active — i.e. neither has been
+    superseded by a later order for the same state NOR re-affirmed by a later note. NPO → soft
+    diet → continued NPO is a resolved sequence (current state = NPO), NOT a live conflict. A
+    stale order that later events overtook is at most a housekeeping cleanup — never a clinical
+    safety alert. Order the candidate events by timestamp and read the LATEST one as the current
+    state before concluding anything.
   • Use the prefetched notes already in context ([0]-[N]). Do NOT issue additional
     query_patient_notes calls to hunt for contradictions unless a specific discordance is already
     visible in the prefetch.
@@ -498,8 +508,21 @@ OUTPUT CONTRACT  (how to write each assessment)
       A newer event that describes a different state than an older event (diet advanced from NPO to
       oral, ventilator weaned, vasopressors stopped) is CLINICAL PROGRESSION — not a contradiction.
       Do NOT flag progression as a care-gap.
+    • SINGLE-VALUED STATES — some clinical states hold exactly ONE value at a time: diet status
+      (NPO / soft / oral / …), ventilation mode, vasopressor on/off, code status. For these, the
+      LATEST event of that kind IS the active state and every earlier event is SUPERSEDED, not
+      coexisting. NPO → soft diet → NPO is a sequence of state transitions, not three conflicting
+      orders. Only flag a contradiction when two events for the SAME single-valued state are the
+      latest of their kind AND no later event re-affirms one of them. If any later note or order
+      re-affirms one value, THAT value is current and there is NO conflict.
     • Only flag a contradiction when two events from the same care period describe incompatible
-      active orders, OR when the most recent note itself explicitly describes an unresolved conflict.
+      active orders that are BOTH still current (neither superseded by a later event), OR when the
+      most recent note itself explicitly describes an unresolved conflict.
+    • Timeline events are NEUTRAL FACTS — record what was ordered or observed, never your
+      interpretation of it. Write "Soft diet ordered", NEVER "Soft diet ordered (conflicting with
+      NPO)". Baking a conflict/progression verdict into an event poisons every future run, which
+      re-reads your conclusion as recorded truth and re-fires the same alert. Judge conflict vs.
+      progression at READ time from the neutral events — do not persist the judgment.
     • In set_all_assessments, always emit timeline_updates with new events from this run. Each
       event MUST include a `source` citing the note/lab/vital it came from. If the timeline is
       empty or absent, seed it by recording the key events implied by the current summary.
@@ -764,8 +787,9 @@ _SET_ALL_TOOL = {
                     "New clinical events from this run to append to the patient timeline. "
                     "Include any clinically meaningful changes: new orders, findings, "
                     "interventions, status changes. Each event MUST have a `source` "
-                    "citing the note/lab/vital. Omit events already in the == CLINICAL "
-                    "TIMELINE == block."
+                    "citing the note/lab/vital. Event text must be a NEUTRAL FACT free of "
+                    "interpretation (see the `event` field). Omit events already in the "
+                    "== CLINICAL TIMELINE == block."
                 ),
                 "items": {
                     "type": "object",
@@ -776,7 +800,14 @@ _SET_ALL_TOOL = {
                         },
                         "event": {
                             "type": "string",
-                            "description": "One concise sentence describing what happened.",
+                            "description": (
+                                "One concise sentence stating the NEUTRAL FACT of what was "
+                                "ordered, observed, or done — never your interpretation of it. "
+                                "Write 'Soft diet ordered', NEVER 'Soft diet ordered "
+                                "(conflicting with NPO)'. The timeline is a factual ledger; "
+                                "conflict/progression judgments are made at read time, not "
+                                "baked into the event text."
+                            ),
                         },
                         "problem": {
                             "type": "string",

@@ -1728,6 +1728,8 @@ def _collect_all(max_patients: int | None = None):
     except Exception:
         logger.exception("scheduler: _collect_all crashed")
 
+    _run_documentation_audits()
+
 
 def start_scheduler():
     global _scheduler
@@ -1904,15 +1906,8 @@ def _boot_scheduler():
         name="Hourly study matcher + metrics",
         replace_existing=True,
     )
-    _scheduler.add_job(
-        _run_documentation_audits,
-        trigger=CronTrigger(minute=20),
-        id="hourly_doc_audits",
-        name="Hourly documentation audit sweep",
-        replace_existing=True,
-    )
     _scheduler.start()
-    logger.info("APScheduler started (PID %d) — hourly snapshot + study jobs + doc audits active", os.getpid())
+    logger.info("APScheduler started (PID %d) — hourly snapshot + study jobs active", os.getpid())
 
 
 def stop_scheduler():
