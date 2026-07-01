@@ -350,12 +350,48 @@ def _run_live_pipeline(
                 _trace("skip_gate", "vitals", "normal", f"{len(_gate_new_vitals)} vital(s) in range")
             else:
                 logger.info(
-                    "pipeline: vital-normal gate — abnormal vital(s) for %s enc=%d, forcing full analysis",
+                    "pipeline: vital-normal gate — abnormal vital(s) for %s enc=%d, checking NEWS2 delta",
                     cpmrn, encounter,
                 )
-                force_full_vitals = True
-                status["vital_normal_gate"] = "triggered"
-                _trace("skip_gate", "vitals", "significant", "abnormal vital(s) detected")
+                # Smart skip: check whether the NEWS2 component profile has meaningfully
+                # changed vs the last-run baseline AND vs the 6h baseline (drift check).
+                # Applies to ALL patients — not just those in cooldown.
+                # If both baselines are stable, skip the expensive run.
+                try:
+                    from tools.radar_sync.fn_detector import check_vitals_news2_delta
+                    _skip_vitals, _vitals_detail = check_vitals_news2_delta(
+                        _gate_new_vitals, cpmrn, encounter, db,
+                    )
+                except Exception:
+                    logger.exception(
+                        "pipeline: NEWS2 delta check failed for %s enc=%d — treating as significant",
+                        cpmrn, encounter,
+                    )
+                    _skip_vitals, _vitals_detail = False, "check error"
+
+                if _skip_vitals:
+                    logger.info(
+                        "pipeline: vital smart skip for %s enc=%d — %s",
+                        cpmrn, encounter, _vitals_detail,
+                    )
+                    status["vital_normal_gate"] = "news2_stable_skip"
+                    _trace("skip_gate", "vitals", "news2_stable_skip", _vitals_detail)
+                else:
+                    logger.info(
+                        "pipeline: vital-normal gate — forcing full analysis for %s enc=%d — %s",
+                        cpmrn, encounter, _vitals_detail,
+                    )
+                    force_full_vitals = True
+                    status["vital_normal_gate"] = "triggered"
+                    _trace("skip_gate", "vitals", "significant", _vitals_detail)
+
+        # Always write the NEWS2 snapshot for this run so future runs have a baseline.
+        # Done unconditionally (normal or abnormal vitals) — normal runs anchor the baseline too.
+        try:
+            from tools.radar_sync.fn_detector import write_news2_run_snapshot
+            write_news2_run_snapshot(_gate_new_vitals, cpmrn, encounter, db)
+        except Exception:
+            logger.exception("pipeline: write_news2_run_snapshot failed for %s enc=%d", cpmrn, encounter)
         except Exception:
             logger.exception("pipeline: vital-normal gate check failed for %s enc=%d — treating as significant", cpmrn, encounter)
             force_full_vitals = True
@@ -504,7 +540,7 @@ def _run_live_pipeline(
 
     # Combined skip decision: skip only when ALL present categories are NORMAL
     if _skip_gate_active and not _force_full_upstream:
-        _vitals_ok = not _gate_new_vitals or status.get("vital_normal_gate") == "normal"
+        _vitals_ok = not _gate_new_vitals or status.get("vital_normal_gate") in ("normal", "news2_stable_skip")
         _abg_ok    = not _abg_labs or status.get("abg_gate") == "no_threshold"
         _labs_ok   = not bool(_other_labs)
         _notes_ok  = not _gate_new_notes or (pass1 is not None and not pass1.needs_full_analysis)

@@ -181,10 +181,159 @@ def is_vital_row_normal(vrow: dict) -> bool:
 
 
 def all_new_vitals_normal(new_vitals: list[dict]) -> bool:
-    """Return True if every new vital row is within normal bounds (no LLM needed)."""
+    """Return True if the latest new vital row is within normal bounds (no LLM needed).
+    Only the most recent row is evaluated — older rows in the same delta window are ignored."""
     if not new_vitals:
         return True
-    return all(is_vital_row_normal(v) for v in new_vitals)
+    return is_vital_row_normal(new_vitals[0])
+
+
+def _news2_delta_exceeds_threshold(
+    current_score: int,
+    current_components: dict,
+    baseline_score: int,
+    baseline_components: dict,
+) -> tuple[bool, str]:
+    """Return (exceeded, reason). exceeded=True means run the expensive analysis."""
+    total_delta = current_score - baseline_score
+    all_keys = set(list(current_components.keys()) + list(baseline_components.keys()))
+    component_deltas = {
+        k: current_components.get(k, 0) - baseline_components.get(k, 0)
+        for k in all_keys
+    }
+    max_component_delta = max(component_deltas.values(), default=0)
+    worst_component     = max(component_deltas, key=component_deltas.get, default="?")
+
+    if total_delta >= _NEWS2_TOTAL_DELTA or max_component_delta >= _NEWS2_COMPONENT_DELTA:
+        return True, (
+            f"NEWS2 rose: total {baseline_score}→{current_score} (+{total_delta}), "
+            f"worst component {worst_component} +{max_component_delta}"
+        )
+    return False, (
+        f"NEWS2 stable {baseline_score}→{current_score} "
+        f"(Δtotal={total_delta}, max_component_Δ={max_component_delta} on {worst_component})"
+    )
+
+
+def check_vitals_news2_delta(
+    new_vitals: list[dict],
+    cpmrn: str,
+    encounter: int,
+    db: Any,
+) -> tuple[bool, str]:
+    """
+    Smart skip gate — called when the latest vital row is abnormal.
+    Applies to ALL patients (not just those in cooldown).
+
+    Returns (should_skip, detail_string).
+
+    Two baselines are checked against `snapshot_schedule`:
+      1. last-run baseline  (news2_last_run_*) — catches acute run-to-run changes.
+      2. 6h baseline        (news2_baseline_6h_*) — catches slow drift.
+
+    If EITHER baseline shows a meaningful NEWS2 change (component ≥ _NEWS2_COMPONENT_DELTA
+    or total ≥ _NEWS2_TOTAL_DELTA), should_skip=False → expensive run.
+    If both baselines show stable vitals → should_skip=True → skip expensive run.
+    If no baseline exists yet (first run for this patient) → should_skip=False (safe fallback).
+    """
+    if not new_vitals:
+        return True, "no new vitals"
+
+    current_row = new_vitals[0]
+    current_score, current_components = compute_news2(current_row)
+
+    sched = db.snapshot_schedule.find_one(
+        {"CPMRN": cpmrn, "encounter": encounter},
+        {"news2_last_run_score": 1, "news2_last_run_components": 1,
+         "news2_baseline_6h_score": 1, "news2_baseline_6h_components": 1,
+         "news2_baseline_6h_at": 1},
+    ) or {}
+
+    last_score      = sched.get("news2_last_run_score")
+    last_components = sched.get("news2_last_run_components")
+    b6h_score       = sched.get("news2_baseline_6h_score")
+    b6h_components  = sched.get("news2_baseline_6h_components")
+
+    if last_score is None or last_components is None:
+        return False, "no prior NEWS2 baseline — running full analysis"
+
+    # Check 1: delta vs last run
+    exceeded, reason = _news2_delta_exceeds_threshold(
+        current_score, current_components, last_score, last_components,
+    )
+    if exceeded:
+        return False, f"vs last run: {reason} — running full analysis"
+
+    # Check 2: delta vs 6h baseline (if available)
+    if b6h_score is not None and b6h_components is not None:
+        exceeded, reason = _news2_delta_exceeds_threshold(
+            current_score, current_components, b6h_score, b6h_components,
+        )
+        if exceeded:
+            return False, f"vs 6h baseline: {reason} — running full analysis (drift detected)"
+
+    # Both baselines stable — safe to skip
+    detail = (
+        f"NEWS2 stable vs last run ({last_score}→{current_score}) "
+        f"and vs 6h baseline ({b6h_score}→{current_score}) — skipping expensive run"
+    )
+    return True, detail
+
+
+def write_news2_run_snapshot(
+    new_vitals: list[dict],
+    cpmrn: str,
+    encounter: int,
+    db: Any,
+) -> None:
+    """
+    Write the current NEWS2 score + components to snapshot_schedule after every
+    vitals gate evaluation. Called unconditionally whenever new vitals are present.
+
+    Updates:
+      news2_last_run_score/components  — always (captures this run's baseline)
+      news2_baseline_6h_score/components/at — only when the stored value is >6h old
+        (or missing), so it naturally freezes a snapshot from ~6h ago.
+    """
+    if not new_vitals:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        current_row = new_vitals[0]
+        current_score, current_components = compute_news2(current_row)
+
+        sched = db.snapshot_schedule.find_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"news2_baseline_6h_at": 1},
+        ) or {}
+
+        b6h_at = sched.get("news2_baseline_6h_at")
+        if isinstance(b6h_at, str):
+            try:
+                b6h_at = datetime.fromisoformat(b6h_at.replace("Z", "+00:00"))
+            except ValueError:
+                b6h_at = None
+        if b6h_at is not None and b6h_at.tzinfo is None:
+            b6h_at = b6h_at.replace(tzinfo=timezone.utc)
+
+        update_fields: dict = {
+            "news2_last_run_score":      current_score,
+            "news2_last_run_components": current_components,
+        }
+        # Update 6h baseline only when missing or older than 6h
+        if b6h_at is None or (now - b6h_at).total_seconds() >= 6 * 3600:
+            update_fields["news2_baseline_6h_score"]      = current_score
+            update_fields["news2_baseline_6h_components"] = current_components
+            update_fields["news2_baseline_6h_at"]         = now
+
+        db.snapshot_schedule.update_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            {"$set": update_fields},
+        )
+    except Exception:
+        logger.exception(
+            "fn_detector: write_news2_run_snapshot failed for %s enc=%d", cpmrn, encounter
+        )
 
 
 def _get_latest_vitals_row(cpmrn: str, encounter: int, db: Any) -> dict | None:

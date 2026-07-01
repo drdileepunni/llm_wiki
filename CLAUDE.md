@@ -210,7 +210,7 @@ A protocol document can carry any combination of three optional sections:
 | **Guidance** | `guidance` | Verbatim reasoning text injected into the system prompt when the patient has a matching problem. Replaces `clinical_rule_blocks.py` (retired). |
 | **Audit** | `audit.required_documentation`, `audit.window_hours`, `audit.record_when_none` | Documentation audit spec — hourly sweep checks 12h after first detection. |
 
-**Current protocols (12):**
+**Current protocols (14):**
 
 | Protocol slug | Type | Purpose |
 |---|---|---|
@@ -222,9 +222,11 @@ A protocol document can carry any combination of three optional sections:
 | `acknowledged-myocardial-injury` | gate (1 scenario) | Suppress troponin alerts when care team acknowledged within 24h |
 | `guidance-neuro` | guidance | GCS delta rule — only alert on ≥2-point drop in 6h |
 | `guidance-respiratory` | guidance | SF-ratio rule, FiO2-change rule |
+| `guidance-vital-hard-ceiling` | guidance | BP/HR/SpO2 hard ceilings — breach forces `being_addressed=False`, `should_alert=True` even when a plan is documented (only permissive gate + active emergency procedure take precedence) |
 | `guidance-renal` | guidance | get_io instruction, oliguria charting caveat |
 | `guidance-symptom` | guidance | Objective evidence required for symptom-based alerts |
 | `guidance-causal-secondary` | guidance | Secondary organ dysfunction reasoning |
+| `guidance-objectivity` | guidance (global) | Alerts must be based on measurable, threshold-crossing findings — not administrative status labels or broad descriptive terms |
 | `tachycardia` | guidance + audit | HR>100 entry; unstable (HR>150 or + coexisting derangement) → immediate alert; stable isolated → care-gap if no documented cause; 12h documentation audit |
 
 **Adding a protocol:**
@@ -267,6 +269,18 @@ Results visible on the dashboard Audit page → Documentation Audits panel.
 
 **Key behavioral change (Phase 1 unified vitals):** abnormal vitals arriving alongside trivial notes no longer skip — the vitals check now fires regardless of whether other categories are also present. Previously only vitals-only deltas triggered Gate 2.5.
 
+**Phase 1 vitals smart-skip (NEWS2 delta, all patients):** When the latest vital row is abnormal, the skip gate runs a dual NEWS2 component-delta check instead of immediately forcing a full expensive run. Applies to ALL patients, not just those in cooldown. Logic (in `fn_detector.check_vitals_news2_delta`):
+- Reads two baselines from `snapshot_schedule` (written by `write_news2_run_snapshot` after every run with new vitals):
+  - `news2_last_run_*` — updated every run (catches acute run-to-run change)
+  - `news2_baseline_6h_*` — frozen for ≥6h (catches slow drift; updates only when >6h old)
+- Computes current NEWS2 from the latest vital row.
+- Checks both baselines: if any component rose ≥ 3 pts (`_NEWS2_COMPONENT_DELTA`) OR total rose ≥ 6 pts (`_NEWS2_TOTAL_DELTA`) vs either baseline → **expensive run**.
+- If both baselines are stable → **skip** (`vital_normal_gate = "news2_stable_skip"`). The fn_detector NEWS2 cooldown-override still runs on the skip path as the safety net for genuine deterioration.
+- If no baseline exists yet (first run for patient) → falls back to expensive run (safe).
+- Gate trace verdict: `news2_stable_skip` (amber badge in dashboard, detail shows score deltas on hover).
+
+This prevents "chronic-abnormal thrash" — patients with persistently abnormal but stable vitals (e.g. SpO₂ 87 on NIV, RR 23 on BiPAP) triggering a full LLM run every hour when nothing has changed. The dual-baseline catches both acute step-changes AND gradual drift that a single run-to-run check would miss.
+
 **Pass-1 screener moved to Phase 1** (before summary update). It only needs `delta` + `last_problems` — no dependency on the new summary — so this is safe and avoids wasting a summary LLM call on charts that will be skipped.
 
 **`gate_trace` schema:**
@@ -275,7 +289,7 @@ Results visible on the dashboard Audit page → Documentation Audits panel.
  "gate":  "empty_chart"|"cadence"|"delta"|"vitals"|"abg"|"other_labs"|"notes"|
           "combined"|"glucose"|"forced_recheck"|"scope"|"summary"|"classifier"|
           "problem_tracker"|"glucose_sidestep"|"fn_detector",
- "verdict": "skip"|"normal"|"significant"|"limited"|"forced"|"bypassed"|"ran"|"error",
+ "verdict": "skip"|"normal"|"significant"|"news2_stable_skip"|"limited"|"forced"|"bypassed"|"ran"|"error",
  "detail": "short human-readable string"}
 ```
 

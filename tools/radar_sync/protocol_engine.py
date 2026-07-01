@@ -100,9 +100,9 @@ def match_for_guidance(
             seen_ids.add(pid)
             continue
 
-        # Keyword trigger
+        # Keyword trigger — empty applies_when means "global, matches every problem"
         keywords = [kw.lower() for kw in (proto.get("applies_when") or [])]
-        if any(kw in haystack for kw in keywords):
+        if not keywords or any(kw in haystack for kw in keywords):
             matched.append(proto)
             seen_ids.add(pid)
 

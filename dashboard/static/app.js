@@ -1371,10 +1371,13 @@ function auditPatientRow(r) {
         // Skip gate: show which categories were evaluated
         if (skipGateSteps.length) {
           const catBadges = skipGateSteps.map(s => {
-            const cls = s.verdict === 'significant' ? 'bg-danger bg-opacity-50 text-dark'
-                      : s.verdict === 'normal'      ? 'bg-success bg-opacity-20 text-success'
+            const cls = s.verdict === 'significant'       ? 'bg-danger bg-opacity-50 text-dark'
+                      : s.verdict === 'normal'            ? 'bg-success bg-opacity-20 text-success'
+                      : s.verdict === 'news2_stable_skip' ? 'bg-warning bg-opacity-75 text-dark'
                       : 'bg-secondary bg-opacity-20 text-muted';
-            return `<span class="badge ${cls}" style="font-size:0.6rem">${escHtml(s.gate)}: ${escHtml(s.verdict)}</span>`;
+            const label = s.verdict === 'news2_stable_skip' ? 'vitals: NEWS2 stable skip' : `${s.gate}: ${s.verdict}`;
+            const title = s.detail ? ` title="${escHtml(s.detail)}"` : '';
+            return `<span class="badge ${cls}" style="font-size:0.6rem;cursor:default"${title}>${escHtml(label)}</span>`;
           }).join(' ');
           badge += `<div class="mt-1 d-flex flex-wrap gap-1">${catBadges}</div>`;
         }

@@ -554,6 +554,34 @@ PROTOCOLS = [
         ),
     },
     {
+        "protocol_id": "guidance-vital-hard-ceiling",
+        "applies_when": [
+            "hypertension", "high bp", "blood pressure", "hypertensive",
+            "hypotension", "low bp", "shock", "map",
+            "tachycard", "bradycard", "heart rate",
+            "hypox", "spo2", "sp02", "desaturat",
+        ],
+        "guidance": (
+            "HARD-CEILING OVERRIDE (BP / HR / SpO2) — a documented management plan does NOT justify "
+            "staying silent when the CURRENT value is in an emergency range. For these problems, "
+            "if the most recent reading breaches ANY of the hard ceilings below, the plan is by "
+            "definition not controlling the problem: set being_addressed=FALSE and should_alert=TRUE, "
+            "clinical_status=\"critical\". This overrides note-freshness (Step 3), the response buffer "
+            "(Step 4), and the being_addressed suppression — a plan that leaves the patient in these "
+            "ranges is inadequate, not reassuring.\n"
+            "  Hard ceilings (any single breach on the most recent reading triggers the override):\n"
+            "    • Systolic BP ≥ 180 mmHg  (hypertensive emergency)\n"
+            "    • Systolic BP ≤ 90 mmHg  OR  MAP < 60 mmHg  (haemodynamic compromise)\n"
+            "    • Heart rate ≥ 130 bpm  OR  ≤ 40 bpm\n"
+            "    • SpO2 ≤ 88%  (severe hypoxia — the SF-ratio co-requirement does NOT apply at this depth)\n"
+            "Only the permissive-context gate (Step 1, e.g. a matched permissive-hypertension scenario) "
+            "and an emergency procedure already underway (Step 2, e.g. active CPR/intubation) still take "
+            "precedence. If neither applies and a ceiling is breached, you MUST alert even if a plan is "
+            "documented. Do NOT set being_addressed=True alongside should_alert=True — that contradiction "
+            "is suppressed downstream; report being_addressed=False so the alert is delivered."
+        ),
+    },
+    {
         "protocol_id": "guidance-renal",
         "applies_when": [
             "aki", "kidney", "oliguri", "anuri", "creatinine", "renal",
@@ -615,6 +643,48 @@ PROTOCOLS = [
             "    • A value in a life-threatening range (K+ ≥ 6.0, pH < 7.20, bicarb < 12)\n"
             "    • A clinical sign requiring independent intervention (RRT indication, dialysis)\n"
             "- If the primary driver is NOT being_addressed, assess the secondary problem normally."
+        ),
+    },
+
+    # ── Global objectivity rule — applies to every problem ───────────────────
+    {
+        "protocol_id": "guidance-objectivity",
+        "applies_when": [],           # empty = matches every problem
+        "guidance": (
+            "OBJECTIVITY RULE — applies to every tracked problem, without exception.\n"
+            "\n"
+            "Only alert on clinical findings that meet ALL of the following:\n"
+            "  1. MEASURABLE — the finding must be expressible as a number, a validated score, "
+            "     a confirmed diagnosis, a documented procedure, or a concrete clinical observation "
+            "(e.g. new peripheral oedema on exam, documented desaturation). "
+            "Vague status labels such as 'Watcher', 'High Dependency Watch', 'Step-down', "
+            "'condition fair', 'condition critical', 'deteriorating', 'improving', "
+            "or any other administrative triage designation are NOT clinical findings.\n"
+            "  2. THRESHOLD-CROSSING — the value or finding must breach a documented clinical "
+            "     threshold (a vital sign alert floor, a lab reference range, a validated score "
+            "     cut-off, or a clearly worsening trend with a quantified delta). A change from "
+            "     one descriptive label to another (e.g. 'fair' → 'Watcher') is NOT a "
+            "     threshold crossing.\n"
+            "  3. INDEPENDENT — the finding must not be solely derived from an administrative "
+            "     EMR field, a monitoring category, or a triage designation. 'Patient placed on "
+            "Watcher status' documents a monitoring level — it is not a clinical problem "
+            "requiring its own management plan.\n"
+            "\n"
+            "If the only evidence for a 'problem' is a broad status label or a note that the "
+            "patient's overall condition has changed category, do NOT create it as a tracked "
+            "problem and do NOT alert. Instead, look for the underlying objective reason "
+            "(e.g. new tachycardia, rising creatinine) and assess that finding directly.\n"
+            "\n"
+            "Examples — DO NOT alert:\n"
+            "  • 'Patient placed on Watcher status'\n"
+            "  • 'Condition changed from stable to guarded'\n"
+            "  • 'Patient deteriorating per nursing note'\n"
+            "  • 'Overall clinical status worsening'\n"
+            "Examples — DO alert (if thresholds met):\n"
+            "  • HR increased from 88 to 118 bpm over 2 hours\n"
+            "  • Creatinine rose from 1.2 to 2.1 mg/dL in 24h\n"
+            "  • Pain NRS score 8/10 with objective tachycardia\n"
+            "  • SpO₂ dropped from 97% to 88% on current FiO₂"
         ),
     },
 
