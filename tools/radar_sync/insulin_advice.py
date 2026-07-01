@@ -125,7 +125,14 @@ def gather_inputs(cpmrn: str, encounter: int) -> tuple[dict, dict]:
             dose_val = 0.0
         prior_doses.append(dose_val)
         r = (m.get("route") or "").lower()
-        if "iv" in r or "infusion" in r or "drip" in r:
+        freq_type = ((m.get("frequency") or {}).get("fType") or "").lower()
+        # Only treat as IV infusion if the route says IV/infusion/drip AND the
+        # order is not a one-time dose. A single IV bolus (fType="once") is a
+        # correction dose and should not drive the engine into IV infusion mode.
+        is_iv_infusion = ("infusion" in r or "drip" in r) or (
+            "iv" in r and freq_type in ("continuous",)
+        )
+        if is_iv_infusion:
             route = "iv"
             route_found = True
         elif "sc" in r or "subcut" in r:

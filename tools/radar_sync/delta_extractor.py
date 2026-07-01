@@ -68,10 +68,21 @@ def _new_vitals(chart: dict, cutoff: datetime | None) -> list[dict]:
     if not cutoff:
         return vitals[:6]  # first run: newest 6 (array is newest-first)
     result = []
+    latest_ts: datetime | None = None
     for v in vitals:
         ts = _parse_ts(v.get("timestamp"))
-        if ts and ts > cutoff:
-            result.append(v)
+        if ts:
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+            if ts > cutoff:
+                result.append(v)
+    if not result and vitals:
+        logger.warning(
+            "delta: 0 new vitals from %d filtered vitals — latest vital ts=%s cutoff=%s",
+            len(vitals),
+            latest_ts.strftime("%Y-%m-%d %H:%M UTC") if latest_ts else "none",
+            cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+        )
     return result
 
 
@@ -80,10 +91,21 @@ def _new_labs(chart: dict, cutoff: datetime | None) -> list[dict]:
     if not cutoff:
         return docs[-10:]  # first run: newest 10 (labs array is oldest-first)
     result = []
+    latest_ts: datetime | None = None
     for d in docs:
         ts = _parse_ts(d.get("reportedAt"))
-        if ts and ts > cutoff:
-            result.append(d)
+        if ts:
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+            if ts > cutoff:
+                result.append(d)
+    if not result and docs:
+        logger.warning(
+            "delta: 0 new labs from %d lab docs — latest lab ts=%s cutoff=%s",
+            len(docs),
+            latest_ts.strftime("%Y-%m-%d %H:%M UTC") if latest_ts else "none",
+            cutoff.strftime("%Y-%m-%d %H:%M UTC"),
+        )
     return result
 
 

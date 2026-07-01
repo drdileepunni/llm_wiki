@@ -73,7 +73,7 @@ def get_active_next_checks() -> list[dict]:
         WITH latest AS (
           SELECT
             CPMRN, encounter, problem_name,
-            nc_type, nc_key, nc_label, due_after, clinical_status,
+            nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning,
             ROW_NUMBER() OVER (
               PARTITION BY CPMRN, encounter, problem_name
               ORDER BY run_started_at DESC
@@ -81,7 +81,7 @@ def get_active_next_checks() -> list[dict]:
           FROM `{store._project}.{store._dataset}.patient_next_checks`
           WHERE run_started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {_ACTIVE_WINDOW_HOURS} HOUR)
         )
-        SELECT CPMRN, encounter, problem_name, nc_type, nc_key, nc_label, due_after, clinical_status
+        SELECT CPMRN, encounter, problem_name, nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning
         FROM latest
         WHERE rn = 1
           AND due_after IS NOT NULL
@@ -111,15 +111,16 @@ def get_active_next_checks() -> list[dict]:
             nc_label = r.get("nc_label") or nc_key or r.get("nc_type") or ""
 
             results.append({
-                "CPMRN":           r.get("CPMRN", ""),
-                "encounter":       int(r.get("encounter") or 1),
-                "problem_name":    r.get("problem_name", ""),
-                "type":            r.get("nc_type") or "",
-                "key":             nc_key,
-                "label":           nc_label,
-                "due_after":       due.isoformat(),
-                "overdue":         now > due,
-                "clinical_status": r.get("clinical_status", ""),
+                "CPMRN":              r.get("CPMRN", ""),
+                "encounter":          int(r.get("encounter") or 1),
+                "problem_name":       r.get("problem_name", ""),
+                "type":               r.get("nc_type") or "",
+                "key":                nc_key,
+                "label":              nc_label,
+                "due_after":          due.isoformat(),
+                "overdue":            now > due,
+                "clinical_status":    r.get("clinical_status", ""),
+                "tracker_reasoning":  r.get("tracker_reasoning") or "",
             })
 
         return results

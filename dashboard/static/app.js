@@ -1110,7 +1110,7 @@ async function loadAuditNextChecks() {
     if (countBadge) { countBadge.textContent = items.length + ' active'; countBadge.style.display = ''; }
     if (overdueBadge && overdue.length) { overdueBadge.textContent = overdue.length + ' overdue'; overdueBadge.style.display = ''; }
 
-    const rows = items.map(i => {
+    const rows = items.map((i, idx) => {
       const due = new Date(i.due_after);
       const diffMs = due - now;
       const diffMin = Math.round(diffMs / 60000);
@@ -1122,15 +1122,22 @@ async function loadAuditNextChecks() {
         ? '<span class="badge bg-danger" style="font-size:0.7rem">overdue</span>'
         : '<span class="badge bg-warning text-dark" style="font-size:0.7rem">pending</span>';
 
-      const watching = escHtml(i.label || i.key || i.type || '—');
-      const problem  = escHtml(i.problem_name || '—');
+      const watching  = escHtml(i.label || i.key || i.type || '—');
+      const problem   = escHtml(i.problem_name || '—');
+      const reasoning = i.tracker_reasoning
+        ? `<div class="text-muted mt-1" style="font-size:0.74rem; line-height:1.35">${escHtml(i.tracker_reasoning)}</div>`
+        : '';
+      const detailId  = `nc-detail-${idx}`;
 
-      return `<tr style="font-size:0.82rem">
+      return `<tr style="font-size:0.82rem; cursor:pointer" onclick="toggleNcDetail('${detailId}','${escHtml(i.CPMRN)}',${i.encounter},'${escHtml(i.problem_name)}')">
         <td class="ps-3">${escHtml(i.CPMRN)}</td>
-        <td>${problem}</td>
+        <td><div>${problem}</div>${reasoning}</td>
         <td>${watching}</td>
         <td>${dueLabel}</td>
         <td>${statusBadge}</td>
+      </tr>
+      <tr id="${detailId}" style="display:none">
+        <td colspan="5" style="padding:0; background:#f8f9fa; border-top:none"></td>
       </tr>`;
     }).join('');
 
@@ -1138,9 +1145,9 @@ async function loadAuditNextChecks() {
       <table class="table table-sm mb-0">
         <thead style="font-size:0.76rem; color:#6c757d">
           <tr>
-            <th class="ps-3" style="width:20%">Patient</th>
-            <th style="width:25%">Problem</th>
-            <th style="width:25%">Watching</th>
+            <th class="ps-3" style="width:18%">Patient</th>
+            <th style="width:28%">Problem</th>
+            <th style="width:20%">Watching</th>
             <th style="width:20%">Due</th>
             <th style="width:10%">State</th>
           </tr>
@@ -1154,7 +1161,84 @@ async function loadAuditNextChecks() {
 }
 
 function fmtDue(date) {
-  return date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  return date.toLocaleTimeString('en-IN', {timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'});
+}
+
+async function toggleNcDetail(detailId, cpmrn, encounter, problemName) {
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const cell = row.querySelector('td');
+  if (row.style.display !== 'none') {
+    row.style.display = 'none';
+    return;
+  }
+  row.style.display = '';
+  if (cell._loaded) return;
+  cell.innerHTML = '<div class="p-3 text-muted small">Loading history…</div>';
+  try {
+    const d = await apiFetch(`/api/audit/patient/${encodeURIComponent(cpmrn)}/${encounter}`);
+    const patProbs = d.patient_problems || [];
+    const prob = patProbs.find(p => p.problem_name === problemName);
+    cell.innerHTML = buildNcProblemHistory(prob, problemName);
+    cell._loaded = true;
+  } catch (e) {
+    cell.innerHTML = `<div class="p-3 text-danger small">Error loading history: ${escHtml(String(e))}</div>`;
+  }
+}
+
+function buildNcProblemHistory(prob, problemName) {
+  if (!prob) return `<div class="p-3 text-muted small">No stored history for "${escHtml(problemName)}".</div>`;
+
+  const assessments = (prob.assessments || []).slice().reverse(); // newest first
+  if (!assessments.length) return '<div class="p-3 text-muted small">No assessment history yet.</div>';
+
+  const firstDetected = prob.first_detected_at
+    ? `<span class="text-muted" style="font-size:0.72rem">First detected: ${escHtml(new Date(prob.first_detected_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata'}))}</span>`
+    : '';
+
+  const rows = assessments.map(a => {
+    const ts = a.assessed_at
+      ? new Date(a.assessed_at).toLocaleString('en-IN', {timeZone: 'Asia/Kolkata', hour:'2-digit', minute:'2-digit', day:'2-digit', month:'short'})
+      : '—';
+    const alertBadge = a.alerted
+      ? '<span class="badge bg-danger ms-1" style="font-size:0.62rem">alerted</span>'
+      : '';
+    const suppressedBadge = (!a.alerted && a.should_alert === false && a.being_addressed)
+      ? '<span class="badge bg-secondary ms-1" style="font-size:0.62rem">suppressed</span>'
+      : '';
+    const nc = a.next_check;
+    const ncBadge = nc
+      ? `<span class="badge bg-warning text-dark ms-1" style="font-size:0.62rem">next: ${escHtml(nc.label || nc.key || nc.type || '?')}</span>`
+      : '';
+    const reasoning = a.tracker_reasoning || a.addressed_evidence || a.alert_reason || '';
+    return `<tr style="font-size:0.75rem; vertical-align:top">
+      <td style="white-space:nowrap; padding:4px 8px; color:#6c757d">${escHtml(ts)}</td>
+      <td style="padding:4px 8px; white-space:nowrap">
+        <span class="badge ${statusBadgeClass(a.clinical_status)}" style="font-size:0.62rem">${escHtml(a.clinical_status || '?')}</span>
+        ${alertBadge}${suppressedBadge}${ncBadge}
+      </td>
+      <td style="padding:4px 8px; color:#444; line-height:1.35; word-break:break-word">${escHtml(reasoning)}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div style="padding:10px 14px">
+    <div class="d-flex align-items-baseline gap-3 mb-2">
+      <span class="fw-semibold" style="font-size:0.82rem">${escHtml(problemName)} — history</span>
+      ${firstDetected}
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" style="border:1px solid #dee2e6">
+        <thead style="font-size:0.7rem; color:#6c757d; background:#f1f3f5">
+          <tr>
+            <th style="padding:4px 8px; white-space:nowrap">Time (IST)</th>
+            <th style="padding:4px 8px">Status</th>
+            <th style="padding:4px 8px">Reasoning / evidence</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
 }
 
 function fmtRunTs(isoStr) {
@@ -1253,6 +1337,19 @@ function auditPatientRow(r) {
       ? `<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">flagged</span>`
       : `<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>`;
 
+  // Extract the decisive skip step and skip_gate breakdown from gate_trace
+  const _gateSkipInfo = (() => {
+    const trace = r.gate_trace || [];
+    // Find the first step that caused a stop (skip/normal on entry gates, or combined skip)
+    const decisiveSkip = trace.find(s =>
+      (s.phase === 'entry' && s.verdict === 'skip') ||
+      (s.phase === 'skip_gate' && s.gate === 'combined' && s.verdict === 'skip')
+    );
+    // Collect skip_gate phase individual verdicts (vitals/abg/labs/notes)
+    const skipGateSteps = trace.filter(s => s.phase === 'skip_gate' && s.gate !== 'combined');
+    return { decisiveSkip, skipGateSteps };
+  })();
+
   const pass2Label = (() => {
     const p = r.pass2_outcome || '';
     let badge = '';
@@ -1261,7 +1358,30 @@ function auditPatientRow(r) {
     else if (p === 'upstream_forced')         badge = '<span class="badge bg-danger bg-opacity-75" style="font-size:0.7rem">expensive (gate forced)</span>';
     else if (p.startsWith('pass2:'))          badge = `<span class="badge bg-primary bg-opacity-75" style="font-size:0.7rem">${escHtml(p.replace('pass2:',''))}</span>`;
     else if (p)                               badge = `<span class="badge bg-secondary" style="font-size:0.7rem">${escHtml(p)}</span>`;
-    else                                      badge = '—';
+    else {
+      // No pass2_outcome recorded — derive from gate_trace
+      const { decisiveSkip, skipGateSteps } = _gateSkipInfo;
+      if (decisiveSkip) {
+        const gateNames = { empty_chart: 'empty chart', cadence: 'cadence', delta: 'no new data', combined: 'all normal' };
+        const label = gateNames[decisiveSkip.gate] || decisiveSkip.gate;
+        badge = `<span class="badge bg-secondary bg-opacity-20 text-secondary" style="font-size:0.7rem">skip: ${escHtml(label)}</span>`;
+        if (decisiveSkip.detail) {
+          badge += `<div class="text-muted mt-1" style="font-size:0.68rem;line-height:1.3">${escHtml(decisiveSkip.detail)}</div>`;
+        }
+        // Skip gate: show which categories were evaluated
+        if (skipGateSteps.length) {
+          const catBadges = skipGateSteps.map(s => {
+            const cls = s.verdict === 'significant' ? 'bg-danger bg-opacity-50 text-dark'
+                      : s.verdict === 'normal'      ? 'bg-success bg-opacity-20 text-success'
+                      : 'bg-secondary bg-opacity-20 text-muted';
+            return `<span class="badge ${cls}" style="font-size:0.6rem">${escHtml(s.gate)}: ${escHtml(s.verdict)}</span>`;
+          }).join(' ');
+          badge += `<div class="mt-1 d-flex flex-wrap gap-1">${catBadges}</div>`;
+        }
+      } else {
+        badge = '<span class="text-muted" style="font-size:0.8rem">—</span>';
+      }
+    }
 
     const scoped = r.problems_scoped;
     if (scoped && scoped.length) {
@@ -1314,14 +1434,38 @@ function auditPatientRow(r) {
   })();
 
   const dv = r.delta_vitals || 0, dl = r.delta_labs || 0, dn = r.delta_notes || 0, dr = r.delta_reports || 0;
-  const deltaHtml = (dv + dl + dn + dr === 0)
-    ? '<span class="text-muted" style="font-size:0.72rem">—</span>'
-    : `<span style="font-size:0.72rem;line-height:1.6">` +
-      (dv ? `<span class="text-primary">${dv}v</span> ` : '') +
-      (dl ? `<span class="text-success">${dl}l</span> ` : '') +
-      (dn ? `<span class="text-warning">${dn}n</span> ` : '') +
-      (dr ? `<span class="text-info">${dr}r</span>` : '') +
-      `</span>`;
+  const deltaHtml = (() => {
+    if (dv + dl + dn + dr > 0) {
+      return `<span style="font-size:0.72rem;line-height:1.6">` +
+        (dv ? `<span class="text-primary">${dv}v</span> ` : '') +
+        (dl ? `<span class="text-success">${dl}l</span> ` : '') +
+        (dn ? `<span class="text-warning">${dn}n</span> ` : '') +
+        (dr ? `<span class="text-info">${dr}r</span>` : '') +
+        `</span>`;
+    }
+    // Extract delta cutoff from gate_trace delta step detail ("no new data since last LLM run" or entry delta step)
+    const trace = r.gate_trace || [];
+    const deltaStep = trace.find(s => s.gate === 'delta');
+    const emptyStep = trace.find(s => s.gate === 'empty_chart' && s.verdict === 'skip');
+    if (emptyStep) {
+      return `<span class="text-muted" style="font-size:0.68rem">empty chart</span>`;
+    }
+    if (deltaStep && deltaStep.verdict === 'skip') {
+      // Try to pull cutoff from detail string e.g. "no new data since last LLM run"
+      return `<span class="text-muted" style="font-size:0.68rem">no new data</span>`;
+    }
+    // Skip gate fired (all categories normal) — had data but all within normal range
+    const combinedStep = trace.find(s => s.phase === 'skip_gate' && s.gate === 'combined' && s.verdict === 'skip');
+    if (combinedStep) {
+      return `<span style="font-size:0.68rem;line-height:1.6">` +
+        (dv ? `<span class="text-primary">${dv}v</span> ` : '') +
+        (dl ? `<span class="text-success">${dl}l</span> ` : '') +
+        (dn ? `<span class="text-warning">${dn}n</span> ` : '') +
+        (dr ? `<span class="text-info">${dr}r</span>` : '') +
+        `<span class="text-muted d-block" style="font-size:0.65rem">all normal</span></span>`;
+    }
+    return '<span class="text-muted" style="font-size:0.72rem">—</span>';
+  })();
 
   const rowId = `audit-row-${escHtml(r.CPMRN)}-${r.encounter}`;
   // Store gate_trace in a global map so togglePatientDetail can read it

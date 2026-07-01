@@ -384,6 +384,49 @@ def report_feedback():
     })
 
 
+@app.route("/debug/run-one", methods=["POST"])
+def debug_run_one():
+    """Run the live pipeline for a SINGLE patient and return a detailed debug dump.
+
+    Guarded by the ALERT_FEEDBACK_TOKEN secret. Supply the token either as an
+    `X-Debug-Token` header or a `token` field in the JSON body. Body also takes
+    `cpmrn` (required) and `encounter` (optional, default 1).
+
+    Example:
+      curl -X POST $URL/debug/run-one \
+        -H "X-Debug-Token: $TOKEN" -H "Content-Type: application/json" \
+        -d '{"cpmrn": "INKABEL469245", "encounter": 1}'
+    """
+    import os
+
+    body = request.get_json(silent=True) or {}
+    expected_token = os.getenv("ALERT_FEEDBACK_TOKEN", "")
+    supplied = request.headers.get("X-Debug-Token", "") or body.get("token", "")
+    if not expected_token or supplied != expected_token:
+        logging.warning("debug/run-one: rejected request with bad/missing token")
+        return jsonify({"error": "unauthorized"}), 401
+
+    cpmrn = (body.get("cpmrn") or "").strip()
+    if not cpmrn:
+        return jsonify({"error": "cpmrn is required"}), 400
+    try:
+        encounter = int(body.get("encounter", 1))
+    except (ValueError, TypeError):
+        encounter = 1
+
+    logging.info("debug/run-one: triggered for CPMRN=%s encounter=%d", cpmrn, encounter)
+    try:
+        import json
+        from app.backend.scheduler import run_single_patient
+        result = run_single_patient(cpmrn, encounter)
+        # Coerce any datetimes / non-JSON objects to strings so jsonify never fails.
+        safe = json.loads(json.dumps({"status": "ok", **result}, default=str))
+        return jsonify(safe)
+    except Exception as exc:
+        logging.exception("debug/run-one: failed for %s enc=%d", cpmrn, encounter)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/test-bq", methods=["GET"])
 def test_bq():
     """Smoke-test: query prod-tech BQ directly and return a few rows from latest_sbar_fact."""

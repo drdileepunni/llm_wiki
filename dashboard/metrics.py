@@ -377,13 +377,13 @@ def get_run_patient_audit(run_started_at: str) -> list[dict]:
     ORDER BY CPMRN
     """
     rows = query(sql)
+    import json as _json
     result = []
     for r in rows:
         pd_raw = r.get("problem_details")
         problems = []
         if pd_raw:
             try:
-                import json as _json
                 problems = _json.loads(pd_raw) if isinstance(pd_raw, str) else pd_raw
             except Exception:
                 problems = []

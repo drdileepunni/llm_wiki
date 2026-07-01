@@ -545,6 +545,63 @@ def _run_live_pipeline(
                 cpmrn, encounter,
             )
 
+        # True zero-delta overdue: nothing new in the chart at all.
+        # Skip the LLM entirely — send a lightweight care-gap alert for each
+        # overdue next_check telling the clinician the expected check wasn't documented.
+        _truly_zero_delta = (
+            not delta.get("new_vitals")
+            and not delta.get("new_labs")
+            and not delta.get("new_notes")
+            and not delta.get("io_changed")
+        )
+        if _truly_zero_delta and _overdue:
+            try:
+                from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
+                import uuid as _uuid
+                recipients = get_alert_recipients(db)
+                if recipients:
+                    care_gap_alerts = []
+                    for o in _overdue:
+                        pname  = o.get("problem_name", "Unknown problem")
+                        label  = o.get("label") or o.get("key") or o.get("type") or "check"
+                        care_gap_alerts.append(({
+                            "problem_name":    pname,
+                            "clinical_status": o.get("clinical_status", ""),
+                            "should_alert":    True,
+                            "being_addressed": False,
+                            "alert_title":     f"Care gap — {pname}",
+                            "alert_reason":    (
+                                f"Expected {label} check is overdue and no new data has been "
+                                f"charted in the last hour. Please document or perform the check."
+                            ),
+                            "note_vs_objective": "",
+                        }, _uuid.uuid4().hex))
+                    send_batch_alert_cards(
+                        cpmrn, encounter, care_gap_alerts,
+                        ctx.get("structured_summary") or {},
+                        recipients,
+                    )
+                    logger.info(
+                        "pipeline: care-gap alert(s) sent for %s enc=%d — %d overdue next_check(s), zero delta",
+                        cpmrn, encounter, len(care_gap_alerts),
+                    )
+                else:
+                    logger.warning(
+                        "pipeline: care-gap — no recipients configured for %s enc=%d",
+                        cpmrn, encounter,
+                    )
+            except Exception:
+                logger.exception("pipeline: care-gap alert failed for %s enc=%d", cpmrn, encounter)
+            _trace("analysis", "problem_tracker", "ran", f"care-gap alert — zero delta, {len(_overdue)} overdue")
+            status["problem_tracker"] = {"care_gap": True, "overdue_count": len(_overdue)}
+            status["summary"]    = "skipped_care_gap"
+            status["pass1"]      = "skipped_care_gap"
+            status["pass2"]      = "care_gap_alert"
+            status["classifier"] = "skipped_care_gap"
+            _run_fn_detector_step(cpmrn, encounter, ctx.get("structured_summary") or {}, snapshot_at, db, status)
+            _trace("analysis", "fn_detector", "ran", "")
+            return status
+
         new_structured = ctx.get("structured_summary") or {}
         status["summary"]    = "skipped_forced_no_data"
         status["pass1"]      = "skipped_forced_no_data"
@@ -919,11 +976,11 @@ def _run_glucose_alert(
             _next_h = _reco.get("next_grbs_after") or None
             _dose = _reco.get("Suggested_insulin_dose", -1)
 
-            # Suppress alert when recommended dose is 0 IU — no clinical action needed.
-            if _dose == 0:
+            # Suppress alert when there is no recommendation or dose is 0 IU — nothing to show.
+            if _dose in (-1, 0):
                 logger.info(
-                    "pipeline: glucose alert — dose is 0 IU, suppressing alert for %s enc=%d",
-                    cpmrn, encounter,
+                    "pipeline: glucose alert — dose is %s (no actionable recommendation), suppressing alert for %s enc=%d",
+                    _dose, cpmrn, encounter,
                 )
                 if _next_h and isinstance(_next_h, (int, float)):
                     try:
@@ -1093,15 +1150,16 @@ def _write_patient_run_audit(
                 nc_label = nc.get("label", "")
                 due_raw  = nc.get("due_after")
                 nc_rows.append({
-                    "run_started_at":  run_started_at,
-                    "CPMRN":           cpmrn,
-                    "encounter":       encounter,
-                    "problem_name":    pname,
-                    "nc_type":         nc_type,
-                    "nc_key":          nc_key,
-                    "nc_label":        nc_label,
-                    "due_after":       due_raw,
-                    "clinical_status": pd.get("clinical_status", ""),
+                    "run_started_at":    run_started_at,
+                    "CPMRN":             cpmrn,
+                    "encounter":         encounter,
+                    "problem_name":      pname,
+                    "nc_type":           nc_type,
+                    "nc_key":            nc_key,
+                    "nc_label":          nc_label,
+                    "due_after":         due_raw,
+                    "clinical_status":   pd.get("clinical_status", ""),
+                    "tracker_reasoning": pd.get("tracker_reasoning", ""),
                 })
             store.insert_next_check_events(nc_rows)
     except Exception:
@@ -1303,6 +1361,95 @@ def _run_report_interpret_step(
         logger.exception("pipeline: report_interpret failed for %s enc=%d", cpmrn, encounter)
         status["report_interpret"] = {"error": "exception"}
         return {"error": "exception"}
+
+
+def run_single_patient(cpmrn: str, encounter: int = 1) -> dict:
+    """Pull a FRESH chart for one patient and run the live pipeline end-to-end,
+    returning a rich debug dict. Used by the /debug/run-one endpoint.
+
+    Unlike _collect_all, this always pulls a fresh chart (bypasses the 50-min
+    snapshot-reuse idempotency guard) and surfaces the exact inputs to the delta
+    gate — raw vs verified vital counts, newest vital timestamps, the cutoff used,
+    delta counts, and the full gate_trace — so a "no new data" skip can be
+    diagnosed from a single call without sifting all 30-40 charts.
+    """
+    from backend.services.emr.db import get_db
+    from tools.radar_sync.chart_puller import pull_chart
+
+    db = get_db()
+    snapshot_at = datetime.now(timezone.utc)
+    debug: dict = {
+        "cpmrn": cpmrn,
+        "encounter": encounter,
+        "snapshot_at": snapshot_at.isoformat(),
+    }
+    logger.info("debug-run: ===== single-patient run start for %s enc=%d =====", cpmrn, encounter)
+
+    # ── 1. Snapshot-schedule state (the cutoff inputs) ───────────────────────
+    sched_doc = db.snapshot_schedule.find_one({"CPMRN": cpmrn, "encounter": encounter}) or {}
+    if not sched_doc:
+        debug["warning"] = "patient not found in snapshot_schedule (not enrolled / inactive)"
+    last_llm_run_at = _coerce_dt(sched_doc.get("last_llm_run_at"))
+    next_run_at     = _coerce_dt(sched_doc.get("next_run_at"))
+    debug["schedule"] = {
+        "active":          sched_doc.get("active"),
+        "last_llm_run_at": last_llm_run_at.isoformat() if last_llm_run_at else None,
+        "next_run_at":     next_run_at.isoformat() if next_run_at else None,
+        "last_io_aggregate": sched_doc.get("last_io_aggregate"),
+    }
+
+    # patient_contexts cutoff fallback
+    try:
+        from tools.radar_sync.patient_context import get_context
+        _ctx = get_context(cpmrn, encounter)
+        _last_snap = _coerce_dt(_ctx.get("last_snapshot_at"))
+        debug["context_last_snapshot_at"] = _last_snap.isoformat() if _last_snap else None
+    except Exception:
+        logger.exception("debug-run: get_context failed for %s enc=%d", cpmrn, encounter)
+        debug["context_last_snapshot_at"] = "error"
+
+    cutoff = last_llm_run_at or _coerce_dt(debug.get("context_last_snapshot_at"))
+    debug["delta_cutoff_used"] = cutoff.isoformat() if cutoff else None
+
+    # ── 2. Fresh chart pull with vital-verification diagnostics ──────────────
+    try:
+        chart = pull_chart(cpmrn, encounter, _debug=debug)
+    except Exception as exc:
+        logger.exception("debug-run: pull_chart failed for %s enc=%d", cpmrn, encounter)
+        debug["pull_chart_error"] = str(exc)
+        return {"debug": debug, "pipeline_status": None}
+
+    # Newest verified vital timestamp vs cutoff — the crux of "no new data"
+    from tools.radar_sync.delta_extractor import _parse_ts as _dx_parse_ts
+    verified_ts = [
+        _dx_parse_ts(v.get("timestamp")) for v in (chart.get("vitals") or [])
+        if _dx_parse_ts(v.get("timestamp"))
+    ]
+    latest_verified = max(verified_ts) if verified_ts else None
+    debug["latest_verified_vital_ts"] = latest_verified.isoformat() if latest_verified else None
+    if latest_verified and cutoff:
+        debug["latest_verified_vital_is_after_cutoff"] = latest_verified > cutoff
+        debug["vital_to_cutoff_gap_minutes"] = round((cutoff - latest_verified).total_seconds() / 60, 1)
+
+    # ── 3. Store the fresh snapshot so the pipeline writes are consistent ────
+    try:
+        db.snapshots.insert_one({
+            "CPMRN": cpmrn, "encounter": encounter,
+            "snapshot_at": snapshot_at, "chart": chart,
+        })
+    except Exception:
+        logger.exception("debug-run: snapshot insert failed for %s enc=%d", cpmrn, encounter)
+
+    # ── 4. Run the live pipeline and capture the full status/gate_trace ──────
+    try:
+        pipeline_status = _run_live_pipeline(cpmrn, encounter, chart, snapshot_at, db)
+    except Exception as exc:
+        logger.exception("debug-run: pipeline failed for %s enc=%d", cpmrn, encounter)
+        debug["pipeline_error"] = str(exc)
+        return {"debug": debug, "pipeline_status": None}
+
+    logger.info("debug-run: ===== single-patient run done for %s enc=%d =====", cpmrn, encounter)
+    return {"debug": debug, "pipeline_status": pipeline_status}
 
 
 def _collect_all(max_patients: int | None = None):

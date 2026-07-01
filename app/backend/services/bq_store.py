@@ -427,16 +427,17 @@ OPTIONS (description = "FN adjudications from review UI")
 
 _DDL["patient_next_checks"] = f"""
 CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.patient_next_checks` (
-  run_started_at  TIMESTAMP,
-  CPMRN           STRING,
-  encounter       INT64,
-  problem_name    STRING,
-  nc_type         STRING,
-  nc_key          STRING,
-  nc_label        STRING,
-  due_after       TIMESTAMP,
-  clinical_status STRING,
-  created_at      TIMESTAMP
+  run_started_at    TIMESTAMP,
+  CPMRN             STRING,
+  encounter         INT64,
+  problem_name      STRING,
+  nc_type           STRING,
+  nc_key            STRING,
+  nc_label          STRING,
+  due_after         TIMESTAMP,
+  clinical_status   STRING,
+  tracker_reasoning STRING,
+  created_at        TIMESTAMP
 )
 OPTIONS (description = "Per-problem next_check state captured at each pipeline run — NULL due_after means cleared/resolved")
 """
@@ -1184,25 +1185,26 @@ class BQStudyStore:
         sql = f"""
         INSERT INTO {self._fqn("patient_next_checks")}
           (run_started_at, CPMRN, encounter, problem_name,
-           nc_type, nc_key, nc_label, due_after, clinical_status, created_at)
+           nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning, created_at)
         VALUES
           (@run_started_at, @CPMRN, @encounter, @problem_name,
-           @nc_type, @nc_key, @nc_label, @due_after, @clinical_status, @created_at)
+           @nc_type, @nc_key, @nc_label, @due_after, @clinical_status, @tracker_reasoning, @created_at)
         """
         written = 0
         for row in rows:
             try:
                 self._execute(sql, [
-                    bigquery.ScalarQueryParameter("run_started_at",  "TIMESTAMP", _dt_to_iso(row.get("run_started_at"))),
-                    bigquery.ScalarQueryParameter("CPMRN",           "STRING",    row.get("CPMRN", "")),
-                    bigquery.ScalarQueryParameter("encounter",       "INT64",     row.get("encounter", 1)),
-                    bigquery.ScalarQueryParameter("problem_name",    "STRING",    row.get("problem_name", "")),
-                    bigquery.ScalarQueryParameter("nc_type",         "STRING",    row.get("nc_type") or ""),
-                    bigquery.ScalarQueryParameter("nc_key",          "STRING",    row.get("nc_key") or ""),
-                    bigquery.ScalarQueryParameter("nc_label",        "STRING",    row.get("nc_label") or ""),
-                    bigquery.ScalarQueryParameter("due_after",       "TIMESTAMP", _dt_to_iso(row.get("due_after"))),
-                    bigquery.ScalarQueryParameter("clinical_status", "STRING",    row.get("clinical_status") or ""),
-                    bigquery.ScalarQueryParameter("created_at",      "TIMESTAMP", _now_iso()),
+                    bigquery.ScalarQueryParameter("run_started_at",    "TIMESTAMP", _dt_to_iso(row.get("run_started_at"))),
+                    bigquery.ScalarQueryParameter("CPMRN",             "STRING",    row.get("CPMRN", "")),
+                    bigquery.ScalarQueryParameter("encounter",         "INT64",     row.get("encounter", 1)),
+                    bigquery.ScalarQueryParameter("problem_name",      "STRING",    row.get("problem_name", "")),
+                    bigquery.ScalarQueryParameter("nc_type",           "STRING",    row.get("nc_type") or ""),
+                    bigquery.ScalarQueryParameter("nc_key",            "STRING",    row.get("nc_key") or ""),
+                    bigquery.ScalarQueryParameter("nc_label",          "STRING",    row.get("nc_label") or ""),
+                    bigquery.ScalarQueryParameter("due_after",         "TIMESTAMP", _dt_to_iso(row.get("due_after"))),
+                    bigquery.ScalarQueryParameter("clinical_status",   "STRING",    row.get("clinical_status") or ""),
+                    bigquery.ScalarQueryParameter("tracker_reasoning", "STRING",    row.get("tracker_reasoning") or ""),
+                    bigquery.ScalarQueryParameter("created_at",        "TIMESTAMP", _now_iso()),
                 ])
                 written += 1
             except Exception:

@@ -90,8 +90,24 @@ def _filter_vitals(vitals: list[dict]) -> list[dict]:
     return kept
 
 
-def pull_chart(cpmrn: str, encounter: int = 1) -> dict:
-    """Fetch full chart for a single patient from Radar."""
+_VITAL_TS_FIELDS = ("timestamp", "createdAt", "recordedAt", "verifiedAt", "isVerifiedAt", "updatedAt")
+
+
+def _vital_debug_sample(v: dict) -> dict:
+    """A compact, log/JSON-safe view of one vital's verification + timestamp fields."""
+    return {
+        "isVerified": v.get("isVerified"),
+        "ts_fields": {k: str(v[k]) for k in _VITAL_TS_FIELDS if k in v},
+    }
+
+
+def pull_chart(cpmrn: str, encounter: int = 1, _debug: dict | None = None) -> dict:
+    """Fetch full chart for a single patient from Radar.
+
+    Pass a mutable dict as `_debug` to collect vital verification/timestamp
+    diagnostics (raw vs verified counts, newest sample timestamps). Used by the
+    single-patient debug endpoint; normal callers leave it None.
+    """
     result = _radar_post({
         "function": "get_patient_json",
         "filter_using": {"CPMRN": cpmrn, "encounters": encounter},
@@ -105,9 +121,30 @@ def pull_chart(cpmrn: str, encounter: int = 1) -> dict:
         chart = result
 
     if "vitals" in chart:
-        before = len(chart["vitals"])
-        chart["vitals"] = _filter_vitals(chart["vitals"])
-        logger.info("pull_chart: vitals %d → %d after filter (CPMRN=%s)", before, len(chart["vitals"]), cpmrn)
+        raw_vitals = chart["vitals"]
+        before = len(raw_vitals)
+        chart["vitals"] = _filter_vitals(raw_vitals)
+        after = len(chart["vitals"])
+        if before > 0 and after == 0:
+            logger.warning(
+                "pull_chart: ALL %d vitals dropped by isVerified filter for CPMRN=%s — "
+                "this will cause 'no new data' in every pipeline run",
+                before, cpmrn,
+            )
+        else:
+            logger.info("pull_chart: vitals %d → %d after filter (CPMRN=%s)", before, after, cpmrn)
+
+        if _debug is not None:
+            # vitals array is newest-first; sample newest 5 raw (verified or not)
+            raw_samples = [_vital_debug_sample(v) for v in raw_vitals[:5]]
+            _debug["raw_vitals_total"] = before
+            _debug["verified_vitals_total"] = after
+            _debug["newest_raw_vital_samples"] = raw_samples
+            _debug["all_dropped_by_verify_filter"] = (before > 0 and after == 0)
+            logger.info(
+                "pull_chart[debug]: CPMRN=%s raw=%d verified=%d newest_raw_samples=%s",
+                cpmrn, before, after, raw_samples,
+            )
 
     return chart
 
