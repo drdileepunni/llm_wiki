@@ -1203,13 +1203,23 @@ function buildNcProblemHistory(prob, problemName) {
     const alertBadge = a.alerted
       ? '<span class="badge bg-danger ms-1" style="font-size:0.62rem">alerted</span>'
       : '';
-    const suppressedBadge = (!a.alerted && a.should_alert === false && a.being_addressed)
-      ? '<span class="badge bg-secondary ms-1" style="font-size:0.62rem">suppressed</span>'
-      : '';
+    // Distinguish two suppression modes:
+    // cooldown: model wanted to alert (should_alert=true) but code blocked it
+    // being_addressed: model itself said no alert (being_addressed, plan documented)
+    const suppressedBadge = (!a.alerted && a.should_alert === true)
+      ? '<span class="badge ms-1" style="font-size:0.62rem;background:#6f42c1;color:#fff">cooldown</span>'
+      : (!a.alerted && a.should_alert === false && a.being_addressed)
+        ? '<span class="badge bg-secondary ms-1" style="font-size:0.62rem">plan active</span>'
+        : '';
     const nc = a.next_check;
-    const ncBadge = nc
-      ? `<span class="badge bg-warning text-dark ms-1" style="font-size:0.62rem">next: ${escHtml(nc.label || nc.key || nc.type || '?')}</span>`
-      : '';
+    let ncBadge = '';
+    if (nc) {
+      const dueStr = nc.due_after
+        ? new Date(nc.due_after).toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit'})
+        : null;
+      const dueLabel = dueStr ? ` · ${dueStr}` : '';
+      ncBadge = `<span class="badge bg-warning text-dark ms-1" style="font-size:0.62rem">next: ${escHtml(nc.label || nc.key || nc.type || '?')}${escHtml(dueLabel)}</span>`;
+    }
     const reasoning = a.tracker_reasoning || a.addressed_evidence || a.alert_reason || '';
     return `<tr style="font-size:0.75rem; vertical-align:top">
       <td style="white-space:nowrap; padding:4px 8px; color:#6c757d">${escHtml(ts)}</td>
@@ -1698,10 +1708,23 @@ function buildProblemsTab(d) {
       const due = nc.due_after ? new Date(nc.due_after) : null;
       const now = new Date();
       const overdue = due && now > due;
+      const fmtTime = d => d.toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit'});
+      const dueHtml = due
+        ? `<span class="${overdue ? 'text-danger fw-semibold' : 'text-warning'}" style="font-size:0.75rem"> · recheck ${overdue ? 'overdue since' : 'due'} ${fmtTime(due)}${overdue ? ` (${Math.round((now-due)/60000)}m ago)` : ''}</span>`
+        : '';
+      // Show cooldown window: alert can't re-fire until last_alerted_at + current_interval_h
+      let cooldownHtml = '';
+      if (p.last_alerted_at && p.current_interval_h) {
+        const cooldownUntil = new Date(new Date(p.last_alerted_at).getTime() + p.current_interval_h * 3600000);
+        if (cooldownUntil > now) {
+          const minLeft = Math.round((cooldownUntil - now) / 60000);
+          cooldownHtml = `<span style="font-size:0.72rem;color:#6f42c1"> · in cooldown — alert sendable at ${fmtTime(cooldownUntil)} (${minLeft}m)</span>`;
+        }
+      }
       return `<div style="font-size:0.8rem; padding:2px 0">
         <strong>${escHtml(p.problem_name)}</strong> →
         watching <em>${escHtml(nc.label || nc.key || nc.type || '?')}</em>
-        ${due ? `<span class="${overdue ? 'text-danger' : 'text-warning'}" style="font-size:0.75rem"> · due ${due.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}${overdue ? ' (overdue)' : ''}</span>` : ''}
+        ${dueHtml}${cooldownHtml}
       </div>`;
     }).join('');
     html += '</div>';
@@ -1718,10 +1741,12 @@ function buildReasoningTab(d) {
     const assessments = (p.assessments || []).slice().reverse(); // newest first
     if (!assessments.length) return '';
     const rows = assessments.slice(0, 10).map(a => {
-      const ts = a.assessed_at ? new Date(a.assessed_at).toLocaleString() : '—';
+      const ts = a.assessed_at ? new Date(a.assessed_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit'}) : '—';
       const alerted = a.alerted ? '<span class="badge bg-danger ms-1" style="font-size:0.65rem">alerted</span>' : '';
-      const suppressed = (!a.alerted && a.should_alert === false && a.being_addressed)
-        ? '<span class="badge bg-secondary ms-1" style="font-size:0.65rem">suppressed</span>' : '';
+      const suppressed = (!a.alerted && a.should_alert === true)
+        ? '<span class="badge ms-1" style="font-size:0.65rem;background:#6f42c1;color:#fff">cooldown</span>'
+        : (!a.alerted && a.should_alert === false && a.being_addressed)
+          ? '<span class="badge bg-secondary ms-1" style="font-size:0.65rem">plan active</span>' : '';
       const reason = a.addressed_evidence || a.alert_reason || '';
       return `<tr style="font-size:0.76rem">
         <td class="text-muted" style="white-space:nowrap; padding:3px 6px">${escHtml(ts)}</td>

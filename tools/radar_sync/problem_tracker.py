@@ -39,6 +39,7 @@ _VITAL_STALENESS_HOURS      = 8   # vitals older than this → hard block on vit
 _VITAL_CARD_WARNING_HOURS   = 2   # vitals older than this → soft warning in prefetch + card marker
 _LAB_STALENESS_HOURS        = 24  # labs older than this are considered stale for alert purposes
 _CITED_NOTE_STALENESS_HOURS = 48  # if ALL cited notes are older than this, suppress — chronic audit issue not urgent alert
+_LAB_UPLOAD_LAG_WARN_H     = 1   # labs uploaded >1h after reportedAt → show lag notice on card
 
 # ── next_check interval config ────────────────────────────────────────────────
 # Base intervals (hours) before backoff is applied.
@@ -58,8 +59,9 @@ _FAST_LAB_KEYS: frozenset[str] = frozenset({
 
 # Exponential backoff: interval doubles each unacknowledged re-alert,
 # stopping at whichever limit is hit first.
-_BACKOFF_MAX_ATTEMPTS = 4   # growth stops after this many attempts
-_BACKOFF_CAP_H        = 24  # hard ceiling regardless of attempts
+_BACKOFF_MAX_ATTEMPTS  = 4   # growth stops after this many attempts
+_BACKOFF_CAP_H         = 24  # hard ceiling for lab problems
+_VITAL_BACKOFF_CAP_H   = 2   # vital/IO problems: never more than 2h between alerts
 
 
 def _base_interval_h(nc_type: str, nc_key: str) -> int:
@@ -73,14 +75,47 @@ def _backoff_interval_h(nc_type: str, nc_key: str, attempts: int) -> int:
     """
     Compute the decayed next_check / re-alert interval.
     Doubles each attempt; stops growing once attempts >= _BACKOFF_MAX_ATTEMPTS
-    or the 24h cap is reached (whichever comes first).
+    or the type-specific cap is reached (whichever comes first).
 
-    Examples (vital, base=1h): 0→1h, 1→2h, 2→4h, 3→8h, 4→16h (stops)
+    Vital/IO problems cap at 2h so a critically ill patient is never more than
+    2h from the next forced check, regardless of how many unacknowledged alerts.
+
+    Examples (vital, base=1h): 0→1h, 1→2h, 2→2h (cap), 3→2h (cap)
     Examples (fast-lab, base=6h): 0→6h, 1→12h, 2→24h (cap, stops)
     """
     base = _base_interval_h(nc_type, nc_key)
     clamped = min(attempts, _BACKOFF_MAX_ATTEMPTS)
-    return min(base * (2 ** clamped), _BACKOFF_CAP_H)
+    cap = _VITAL_BACKOFF_CAP_H if nc_type in ("vital", "io") else _BACKOFF_CAP_H
+    return min(base * (2 ** clamped), cap)
+
+def _compute_lab_upload_lag(delta: dict | None) -> dict | None:
+    """Return {lag_hours, reported_ist, created_ist} for the lab with the largest upload lag, or None."""
+    if not delta:
+        return None
+    labs = delta.get("new_labs") or []
+    if not labs:
+        return None
+    from tools.radar_sync.delta_extractor import _parse_ts
+    best = None
+    for d in labs:
+        reported = _parse_ts(d.get("reportedAt"))
+        created  = _parse_ts(d.get("createdAt"))
+        if reported and created and created > reported:
+            lag_h = (created - reported).total_seconds() / 3600
+            if lag_h > _LAB_UPLOAD_LAG_WARN_H and (best is None or lag_h > best[0]):
+                best = (lag_h, reported, created)
+    if best is None:
+        return None
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    lag_h, reported, created = best
+    r_ist = reported.replace(tzinfo=timezone.utc).astimezone(_IST) if reported.tzinfo is None else reported.astimezone(_IST)
+    c_ist = created.replace(tzinfo=timezone.utc).astimezone(_IST) if created.tzinfo is None else created.astimezone(_IST)
+    return {
+        "lag_hours": round(lag_h, 1),
+        "reported_ist": r_ist.strftime("%-I:%M %p"),
+        "created_ist":  c_ist.strftime("%-I:%M %p"),
+    }
+
 
 # ── Treatment response buffers ────────────────────────────────────────────────
 # If a plan note is written within this window AFTER the triggering data,
@@ -1251,7 +1286,7 @@ def _upsert_problem(
         # Load prior state once for both due_after and backoff computation.
         prev_doc = db["patient_problems"].find_one(
             {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
-            {"next_check": 1, "alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1},
+            {"next_check": 1, "alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1, "last_alerted_at": 1},
         ) or {}
 
         # ── Backoff computation ───────────────────────────────────────────────
@@ -1274,7 +1309,25 @@ def _upsert_problem(
         interval_h = _backoff_interval_h(nc_type, nc_key, alert_attempts)
 
         if fulfilled:
-            due_after = now + timedelta(hours=interval_h)
+            if not alerted:
+                # Alert was suppressed (cooldown). Align due_after with the cooldown expiry
+                # so the forced recheck fires exactly when the alert becomes sendable again —
+                # not at now+interval_h which would waste an expensive run mid-cooldown.
+                _last = prev_doc.get("last_alerted_at")
+                if isinstance(_last, str):
+                    try:
+                        _last = datetime.fromisoformat(_last.replace("Z", "+00:00"))
+                    except ValueError:
+                        _last = None
+                if isinstance(_last, datetime):
+                    if _last.tzinfo is None:
+                        _last = _last.replace(tzinfo=timezone.utc)
+                    cooldown_expiry = _last + timedelta(hours=interval_h)
+                    due_after = cooldown_expiry if cooldown_expiry > now else now + timedelta(hours=interval_h)
+                else:
+                    due_after = now + timedelta(hours=interval_h)
+            else:
+                due_after = now + timedelta(hours=interval_h)
         else:
             stored_due = (prev_doc.get("next_check") or {}).get("due_after")
             if isinstance(stored_due, datetime):
@@ -2759,6 +2812,7 @@ def track_problems(
     # Phase 1 — evaluate eligibility, upsert all problems, collect what needs alerting.
     # Alerting is deferred so all problems for this patient go in one batched message.
     to_alert: list[tuple[dict, str]] = []   # (assessment, alert_id)
+    _lab_lag = _compute_lab_upload_lag(delta)
 
     # Audit dict — one entry per assessed problem, returned for dashboard run-audit table.
     _problem_audit: dict[str, dict] = {}
@@ -2988,6 +3042,8 @@ def track_problems(
                     if _latest_vt is not None and snapshot_at is not None:
                         _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
                         assessment["_vital_age_hours"] = round((_snap - _latest_vt).total_seconds() / 3600, 1)
+                    if _lab_lag:
+                        assessment["_lab_upload_lag"] = _lab_lag
                     to_alert.append((assessment, alert_id))
                     alerts_sent.append(problem_name)
             else:
@@ -3043,6 +3099,8 @@ def track_problems(
                 if _latest_vt is not None and snapshot_at is not None:
                     _snap = snapshot_at if snapshot_at.tzinfo else snapshot_at.replace(tzinfo=timezone.utc)
                     assessment["_vital_age_hours"] = round((_snap - _latest_vt).total_seconds() / 3600, 1)
+                if _lab_lag:
+                    assessment["_lab_upload_lag"] = _lab_lag
                 to_alert.append((assessment, alert_id))
                 alerts_sent.append(problem_name)
 

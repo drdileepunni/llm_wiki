@@ -55,13 +55,34 @@ _SUBMIT_TOOL = {
 
 
 def _fetch_notes_since(cpmrn: str, encounter: int, since: datetime, db: Any) -> list[dict]:
-    """Fetch clinical notes written after `since` for this patient."""
+    """Fetch clinical notes written after `since` for this patient from the stored snapshot."""
     try:
-        from tools.radar_sync.status_classifier import _get_notes as _gn
-        notes = _gn(cpmrn, encounter) or []
+        snap = db.snapshots.find_one(
+            {"CPMRN": cpmrn, "encounter": encounter},
+            sort=[("snapshot_at", -1)],
+        )
+        if not snap:
+            return []
+        chart = snap.get("chart") or {}
+        notes_obj = chart.get("notes") or {}
+        raw_notes = []
+        for note in (notes_obj.get("finalNotes") or []):
+            for content in (note.get("content") or []):
+                import re
+                ts_raw = content.get("timestamp") or note.get("createdTimestamp")
+                text_parts = [
+                    re.sub(r"<[^>]+>", " ", comp["value"]).strip()
+                    for comp in (content.get("components") or [])
+                    if isinstance(comp, dict) and comp.get("value")
+                ]
+                text = " ".join(p for p in text_parts if p).strip()
+                if not text:
+                    continue
+                author = (content.get("author") or {}).get("name", "") if isinstance(content.get("author"), dict) else ""
+                raw_notes.append({"reportedAt": ts_raw, "author": author, "text": text})
         result = []
-        for n in notes:
-            ts = n.get("reportedAt") or n.get("createdAt") or n.get("updatedAt")
+        for n in raw_notes:
+            ts = n.get("reportedAt")
             if not ts:
                 continue
             try:

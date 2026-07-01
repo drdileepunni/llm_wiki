@@ -283,6 +283,23 @@ def _build_problem_body_sections(
             }}],
         })
 
+    # ── Lab upload lag warning ─────────────────────────────────────────────────
+    _lab_lag = assessment.get("_lab_upload_lag")
+    if _lab_lag:
+        sections.append({
+            "header": "⚠ Lab results uploaded late",
+            "widgets": [{"decoratedText": {
+                "startIcon": {"materialIcon": {"name": "schedule"}},
+                "text": (
+                    f"These lab results were reported at <b>{_lab_lag['reported_ist']} IST</b> "
+                    f"but only uploaded to the chart at <b>{_lab_lag['created_ist']} IST</b> "
+                    f"(<b>{_lab_lag['lag_hours']:.0f}h delay</b>). "
+                    f"The alert could not fire until the results appeared in the chart."
+                ),
+                "wrapText": True,
+            }}],
+        })
+
     # ── Note vs. objective discordance ────────────────────────────────────────
     if note_vs_objective:
         sections.append({
