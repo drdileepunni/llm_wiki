@@ -437,9 +437,15 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.patient_next_checks` (
   due_after         TIMESTAMP,
   clinical_status   STRING,
   tracker_reasoning STRING,
+  protocol_ids      STRING,
   created_at        TIMESTAMP
 )
 OPTIONS (description = "Per-problem next_check state captured at each pipeline run — NULL due_after means cleared/resolved")
+"""
+
+_ALTER_DDL["patient_next_checks"] = f"""
+ALTER TABLE `{_PROJECT}.{_DATASET}.patient_next_checks`
+ADD COLUMN IF NOT EXISTS protocol_ids STRING
 """
 
 _DDL["documentation_audit_queue"] = f"""
@@ -474,6 +480,26 @@ CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.documentation_audit` (
   created_at         TIMESTAMP
 )
 OPTIONS (description = "Documentation audit results — fired 12h after first problem detection per protocol audit spec")
+"""
+
+_DDL["problem_resolution_events"] = f"""
+CREATE TABLE IF NOT EXISTS `{_PROJECT}.{_DATASET}.problem_resolution_events` (
+  event_id                       STRING NOT NULL,
+  CPMRN                          STRING,
+  encounter                      INT64,
+  problem_name                   STRING,
+  protocol_ids                   STRING,
+  first_detected_at              TIMESTAMP,
+  resolved_at                    TIMESTAMP,
+  duration_monitored_hours       FLOAT64,
+  resolution_status              STRING,
+  resolution_reasoning           STRING,
+  last_status_before_resolution  STRING,
+  was_ever_alerted               BOOL,
+  alert_attempts_total           INT64,
+  created_at                     TIMESTAMP
+)
+OPTIONS (description = "One row per problem-resolution transition — captures how a monitored problem closed (self-resolved vs alerted) for alert-burden analysis")
 """
 
 
@@ -1185,10 +1211,10 @@ class BQStudyStore:
         sql = f"""
         INSERT INTO {self._fqn("patient_next_checks")}
           (run_started_at, CPMRN, encounter, problem_name,
-           nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning, created_at)
+           nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning, protocol_ids, created_at)
         VALUES
           (@run_started_at, @CPMRN, @encounter, @problem_name,
-           @nc_type, @nc_key, @nc_label, @due_after, @clinical_status, @tracker_reasoning, @created_at)
+           @nc_type, @nc_key, @nc_label, @due_after, @clinical_status, @tracker_reasoning, @protocol_ids, @created_at)
         """
         written = 0
         for row in rows:
@@ -1204,6 +1230,7 @@ class BQStudyStore:
                     bigquery.ScalarQueryParameter("due_after",         "TIMESTAMP", _dt_to_iso(row.get("due_after"))),
                     bigquery.ScalarQueryParameter("clinical_status",   "STRING",    row.get("clinical_status") or ""),
                     bigquery.ScalarQueryParameter("tracker_reasoning", "STRING",    row.get("tracker_reasoning") or ""),
+                    bigquery.ScalarQueryParameter("protocol_ids",      "STRING",    row.get("protocol_ids") or ""),
                     bigquery.ScalarQueryParameter("created_at",        "TIMESTAMP", _now_iso()),
                 ])
                 written += 1
@@ -1392,6 +1419,48 @@ class BQStudyStore:
         )
         if errors:
             log.error("bq_store: enqueue_documentation_audit errors: %s", errors)
+
+    def insert_resolution_event(self, doc: dict) -> str:
+        """
+        Insert one row into problem_resolution_events, fired when a worsening/critical
+        problem's next_check clears without ever being deleted from tracking — i.e. it
+        resolved (self-resolved or after being alerted). event_id is timestamped so a
+        problem that later re-worsens and re-resolves gets a fresh row, not a dedupe.
+        """
+        self._ensure_table("problem_resolution_events")
+        cpmrn        = doc.get("CPMRN") or ""
+        encounter    = int(doc.get("encounter") or 0)
+        problem_name = doc.get("problem_name") or ""
+        resolved_at  = doc.get("resolved_at")
+        first_detected_at = doc.get("first_detected_at")
+        duration_hours: float | None = None
+        if isinstance(resolved_at, datetime) and isinstance(first_detected_at, datetime):
+            _ra = resolved_at if resolved_at.tzinfo else resolved_at.replace(tzinfo=timezone.utc)
+            _fd = first_detected_at if first_detected_at.tzinfo else first_detected_at.replace(tzinfo=timezone.utc)
+            duration_hours = round((_ra - _fd).total_seconds() / 3600, 2)
+        event_id = f"{cpmrn}_{encounter}_{problem_name}_{_dt_to_iso(resolved_at)}"
+        row = {
+            "event_id":                      event_id,
+            "CPMRN":                         cpmrn,
+            "encounter":                     encounter,
+            "problem_name":                  problem_name,
+            "protocol_ids":                  ",".join(doc.get("protocol_ids") or []),
+            "first_detected_at":             _dt_to_iso(first_detected_at),
+            "resolved_at":                   _dt_to_iso(resolved_at),
+            "duration_monitored_hours":      duration_hours,
+            "resolution_status":             doc.get("resolution_status") or "",
+            "resolution_reasoning":          doc.get("resolution_reasoning") or "",
+            "last_status_before_resolution": doc.get("last_status_before_resolution") or "",
+            "was_ever_alerted":              bool(doc.get("was_ever_alerted")),
+            "alert_attempts_total":          int(doc.get("alert_attempts_total") or 0),
+            "created_at":                    _now_iso(),
+        }
+        errors = self._client.insert_rows_json(
+            f"{self._project}.{self._dataset}.problem_resolution_events", [row]
+        )
+        if errors:
+            log.error("bq_store: insert_resolution_event errors: %s", errors)
+        return event_id
 
     def find_pending_audit_queue(self) -> list[dict]:
         """

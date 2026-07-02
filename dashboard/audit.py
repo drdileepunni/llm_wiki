@@ -74,7 +74,7 @@ def get_active_next_checks() -> list[dict]:
         WITH latest AS (
           SELECT
             CPMRN, encounter, problem_name,
-            nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning,
+            nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning, protocol_ids,
             ROW_NUMBER() OVER (
               PARTITION BY CPMRN, encounter, problem_name
               ORDER BY run_started_at DESC
@@ -82,7 +82,7 @@ def get_active_next_checks() -> list[dict]:
           FROM `{store._project}.{store._dataset}.patient_next_checks`
           WHERE run_started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {_ACTIVE_WINDOW_HOURS} HOUR)
         )
-        SELECT CPMRN, encounter, problem_name, nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning
+        SELECT CPMRN, encounter, problem_name, nc_type, nc_key, nc_label, due_after, clinical_status, tracker_reasoning, protocol_ids
         FROM latest
         WHERE rn = 1
           AND due_after IS NOT NULL
@@ -122,6 +122,7 @@ def get_active_next_checks() -> list[dict]:
                 "overdue":            now > due,
                 "clinical_status":    r.get("clinical_status", ""),
                 "tracker_reasoning":  r.get("tracker_reasoning") or "",
+                "protocol_ids":       r.get("protocol_ids") or "",
             })
 
         return results

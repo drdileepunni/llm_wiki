@@ -15,8 +15,8 @@ Every protocol document may carry any combination of three optional sections:
                window_hours (int), record_when_none (str).
 
 The single entry point for problem_tracker is build_injection() which returns
-(guidance_block, gate_block) in one call.  match_for_audit() is the entry point
-for the hourly documentation audit sweep in scheduler.py.
+(guidance_block, gate_block, matched_gate) in one call.  match_for_audit() is the
+entry point for the hourly documentation audit sweep in scheduler.py.
 """
 from __future__ import annotations
 
@@ -282,13 +282,15 @@ def build_injection(
     encounter: int,
     db: Any,
     snapshot_at: datetime,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, dict]]:
     """
     Single call site for problem_tracker.
 
     Returns:
         guidance_block  — inject into system prompt (replaces _category_block)
         gate_block      — inject into user message (replaces the inline gate_block)
+        matched_gate    — {problem_name: protocol_doc} for the gate protocols matched
+                           this run, so callers can persist protocol identity
     """
     # ── Guidance ──────────────────────────────────────────────────────────────
     guidance_protocols = match_for_guidance(protocols, problems, prefetch_block, delta_categories)
@@ -323,4 +325,4 @@ def build_injection(
         logger.exception("protocol_engine: gate block build failed for %s enc=%d", cpmrn, encounter)
         gate_block = ""
 
-    return guidance_block, gate_block
+    return guidance_block, gate_block, matched_gate

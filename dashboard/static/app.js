@@ -1127,6 +1127,7 @@ async function loadAuditNextChecks() {
 
       const watching  = escHtml(i.label || i.key || i.type || '—');
       const problem   = escHtml(i.problem_name || '—');
+      const protocol  = escHtml(i.protocol_ids || '—');
       const reasoning = i.tracker_reasoning
         ? `<div class="text-muted mt-1" style="font-size:0.74rem; line-height:1.35">${escHtml(i.tracker_reasoning)}</div>`
         : '';
@@ -1137,11 +1138,12 @@ async function loadAuditNextChecks() {
         <td class="ps-3">${escHtml(i.CPMRN)}</td>
         <td><div>${problem}</div>${reasoning}</td>
         <td>${watching}</td>
+        <td>${protocol}</td>
         <td>${dueLabel}</td>
         <td>${statusBadge}</td>
       </tr>
       <tr id="${detailId}" style="display:none">
-        <td colspan="5" style="padding:0; background:#f8f9fa; border-top:none"></td>
+        <td colspan="6" style="padding:0; background:#f8f9fa; border-top:none"></td>
       </tr>`;
     }).join('');
 
@@ -1149,10 +1151,11 @@ async function loadAuditNextChecks() {
       <table class="table table-sm mb-0">
         <thead style="font-size:0.76rem; color:#6c757d">
           <tr>
-            <th class="ps-3" style="width:18%">Patient</th>
-            <th style="width:28%">Problem</th>
-            <th style="width:20%">Watching</th>
-            <th style="width:20%">Due</th>
+            <th class="ps-3" style="width:16%">Patient</th>
+            <th style="width:24%">Problem</th>
+            <th style="width:16%">Watching</th>
+            <th style="width:16%">Protocol</th>
+            <th style="width:18%">Due</th>
             <th style="width:10%">State</th>
           </tr>
         </thead>

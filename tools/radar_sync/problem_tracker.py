@@ -1242,6 +1242,29 @@ def _should_suppress_alert(cpmrn: str, encounter: int, problem_name: str, db: An
     return (datetime.now(timezone.utc) - last) < timedelta(hours=cooldown_h)
 
 
+# ── Resolution-event capture (alert-burden research) ────────────────────────────
+
+def _write_resolution_event(db: Any, cpmrn: str, encounter: int, problem_name: str, **fields: Any) -> None:
+    """
+    Fire-and-forget write to BigQuery problem_resolution_events. Never let a BQ
+    hiccup break problem tracking — same defensive pattern as the documentation
+    audit enqueue.
+    """
+    try:
+        from backend.services.bq_store import get_bq_store
+        get_bq_store().insert_resolution_event({
+            "CPMRN": cpmrn,
+            "encounter": encounter,
+            "problem_name": problem_name,
+            **fields,
+        })
+    except Exception:
+        logger.exception(
+            "problem_tracker: resolution event write failed for '%s' %s enc=%d",
+            problem_name, cpmrn, encounter,
+        )
+
+
 # ── Upsert problem state ───────────────────────────────────────────────────────
 
 def _upsert_problem(
@@ -1252,6 +1275,8 @@ def _upsert_problem(
     alerted: bool,
     db: Any,
     delta: dict | None = None,
+    gate_protocol_id: str | None = None,
+    resolution_protocol_ids: list[str] | None = None,
 ) -> None:
     problem_name    = assessment["problem_name"]
     clinical_status = assessment.get("clinical_status", "stable")
@@ -1426,7 +1451,8 @@ def _upsert_problem(
         next_check = None
         prev_doc = db["patient_problems"].find_one(
             {"CPMRN": cpmrn, "encounter": encounter, "problem_name": problem_name},
-            {"alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1},
+            {"alert_attempts": 1, "first_alerted_at": 1, "being_addressed": 1,
+             "next_check": 1, "first_detected_at": 1, "clinical_status": 1},
         ) or {}
         prev_attempts    = int(prev_doc.get("alert_attempts") or 0)
         normalized       = clinical_status in ("stable", "improving", "resolved")
@@ -1445,6 +1471,25 @@ def _upsert_problem(
         # Use a neutral interval for problems without a next_check (alert cooldown only)
         nc_type_fb, nc_key_fb = "vital", ""
         interval_h = _backoff_interval_h(nc_type_fb, nc_key_fb, alert_attempts)
+
+        # Resolution-event capture (for alert-burden research): fires only when a
+        # problem that WAS under active worsening/critical next_check monitoring
+        # (prev_doc had one) has now normalized. "was ever alerted" must be read
+        # from prev_doc — first_alerted_at is about to be wiped to None above for
+        # the normalized case, so prev_doc is the only place the problem's alert
+        # history across its whole monitored life survives.
+        if normalized and prev_doc.get("next_check"):
+            _write_resolution_event(
+                db, cpmrn, encounter, problem_name,
+                protocol_ids=resolution_protocol_ids or [],
+                first_detected_at=prev_doc.get("first_detected_at"),
+                resolved_at=now,
+                resolution_status=clinical_status,
+                resolution_reasoning=assessment.get("addressed_evidence", "") or assessment.get("alert_reason", ""),
+                last_status_before_resolution=prev_doc.get("clinical_status", ""),
+                was_ever_alerted=bool(prev_doc.get("first_alerted_at")),
+                alert_attempts_total=prev_attempts,
+            )
 
     audit_entry = {
         "assessed_at":        now,
@@ -1519,6 +1564,7 @@ def _upsert_problem(
             "anchored_at":      now,
             "verdict":          verdict,
             "eligibility":      eligibility,
+            "protocol_id":      gate_protocol_id,
             "scenario":         raw_gate.get("scenario", "none"),
             "band_description": raw_gate.get("band_description", ""),
             "valid_until":      valid_until,
@@ -2630,9 +2676,10 @@ def track_problems(
         from tools.radar_sync.protocol_engine import (
             load_protocols as _load_protocols,
             build_injection as _build_injection,
+            match_for_guidance as _match_for_guidance,
         )
         _all_protocols = _load_protocols(db)
-        _category_block, gate_block = _build_injection(
+        _category_block, gate_block, _matched_gate = _build_injection(
             _all_protocols, problems, prefetch_block, _delta_cats,
             cpmrn, encounter, db, snapshot_at,
         )
@@ -2641,6 +2688,8 @@ def track_problems(
         _all_protocols = []
         _category_block = ""
         gate_block = ""
+        _matched_gate = {}
+        _match_for_guidance = lambda *a, **kw: []  # noqa: E731
 
     # Build the stored state summary for the model
     stored_names = [
@@ -2895,6 +2944,10 @@ def track_problems(
     # Audit dict — one entry per assessed problem, returned for dashboard run-audit table.
     _problem_audit: dict[str, dict] = {}
 
+    # Lookup for the original problem dict (carries "cause") — used below to derive
+    # per-problem protocol_ids for dashboard display, independent of the alert path.
+    _problems_by_name = {p.get("name", ""): p for p in problems}
+
     # Pre-compute vital staleness once for the whole batch.
     # Used by the hard suppression gate below — avoids a DB call per problem.
     _vital_is_stale = False
@@ -2931,6 +2984,23 @@ def track_problems(
             "next_check":      assessment.get("next_check"),
         }
 
+        # Protocol identity for this problem — gate protocol (if any) plus guidance
+        # protocols keyword-matched against this problem alone, excluding global
+        # protocols (empty applies_when — matches every problem in match_for_guidance's
+        # keyword fallback regardless of applies_when_secondary, e.g. both
+        # guidance-objectivity and guidance-causal-secondary) which would otherwise
+        # show up on every single row and add no signal.
+        _gate_proto = _matched_gate.get(problem_name)
+        _gate_pid = _gate_proto.get("protocol_id") if _gate_proto else None
+        _prob_for_match = _problems_by_name.get(problem_name, {"name": problem_name})
+        _guidance_matches = _match_for_guidance(_all_protocols, [_prob_for_match])
+        _display_ids = sorted({
+            p["protocol_id"]
+            for p in ([_gate_proto] if _gate_proto else []) + _guidance_matches
+            if p.get("applies_when")
+        })
+        _problem_audit[problem_name]["protocol_ids"] = _display_ids
+
         # Hard gate: being_addressed=True must always mean should_alert=False.
         # If the model set both (it sometimes does for "critical" acute events),
         # override here — alerting on something already being actively managed
@@ -2945,7 +3015,7 @@ def track_problems(
             )
             alerts_suppressed.append(problem_name)
             _problem_audit[problem_name]["suppression_rule"] = "being_addressed"
-            _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+            _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
             continue
 
         if should_alert:
@@ -2988,7 +3058,7 @@ def track_problems(
                         "problem_tracker: permissive suppression event write failed for '%s' %s",
                         problem_name, cpmrn,
                     )
-                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
                 continue  # skip remaining gates for this problem
 
             # ── Gate 0b: Code-side GCS stability gate ─────────────────────────
@@ -3022,7 +3092,7 @@ def track_problems(
                             "scenario": "established_neurological_injury",
                             "rationale": f"Code-side gate: GCS 6h delta={_gcs_delta:+d} (stable/improving)",
                         }
-                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
                         continue
                 except Exception:
                     logger.exception(
@@ -3105,7 +3175,7 @@ def track_problems(
                                         "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
                                         problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
                                     )
-                                    _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+                                    _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
                                     continue
                         except Exception:
                             logger.exception(
@@ -3141,7 +3211,7 @@ def track_problems(
                             "(pre-send vital check — %s improved since snapshot)",
                             problem_name, cpmrn, encounter, _vk,
                         )
-                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
                         continue
 
                 # ── Pre-send lab value cross-check ────────────────────────────
@@ -3161,7 +3231,7 @@ def track_problems(
                                     "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
                                     problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
                                 )
-                                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
+                                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
                                 continue
                     except Exception:
                         logger.exception(
@@ -3182,7 +3252,7 @@ def track_problems(
                 to_alert.append((assessment, alert_id))
                 alerts_sent.append(problem_name)
 
-        _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db, delta)
+        _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db, delta, gate_protocol_id=_gate_pid, resolution_protocol_ids=_display_ids)
 
         # For problems where the model itself set should_alert=False, record the model reason.
         if not assessment.get("should_alert", False) and _problem_audit[problem_name]["suppression_rule"] == "none":

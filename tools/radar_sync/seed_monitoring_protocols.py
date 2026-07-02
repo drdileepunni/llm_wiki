@@ -254,6 +254,7 @@ PROTOCOLS = [
             "respiratory distress",
             "oxygen requirement",
             "respiratory failure",
+            "respiratory depression",
             "refractory hypox",
         ],
         "gate_question": (

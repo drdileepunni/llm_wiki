@@ -1217,6 +1217,7 @@ def _write_patient_run_audit(
                     "due_after":         due_raw,
                     "clinical_status":   pd.get("clinical_status", ""),
                     "tracker_reasoning": pd.get("tracker_reasoning", ""),
+                    "protocol_ids":      ",".join(pd.get("protocol_ids") or []),
                 })
             store.insert_next_check_events(nc_rows)
     except Exception:
