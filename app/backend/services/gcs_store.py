@@ -61,19 +61,54 @@ def _dumps(obj: Any) -> str:
 
 # ── MongoDB update operator emulation ────────────────────────────────────────
 
+def _set_nested(doc: dict, dotted_key: str, value: Any) -> None:
+    """
+    Support MongoDB-style dotted-path field updates, e.g. "next_check.due_after"
+    sets doc["next_check"]["due_after"], creating intermediate dicts as needed
+    (and overwriting a non-dict intermediate value, same as real MongoDB).
+    """
+    parts = dotted_key.split(".")
+    node = doc
+    for part in parts[:-1]:
+        if not isinstance(node.get(part), dict):
+            node[part] = {}
+        node = node[part]
+    node[parts[-1]] = value
+
+
+def _unset_nested(doc: dict, dotted_key: str) -> None:
+    """Dotted-path counterpart to _set_nested for $unset."""
+    parts = dotted_key.split(".")
+    node = doc
+    for part in parts[:-1]:
+        node = node.get(part)
+        if not isinstance(node, dict):
+            return
+    node.pop(parts[-1], None)
+
+
 def _apply_update(doc: dict, update: dict, is_insert: bool) -> dict:
     """Apply MongoDB-style update operators to a plain Python dict in-place."""
     for op, fields in update.items():
         if op == "$set":
             for k, v in fields.items():
-                doc[k] = v
+                if "." in k:
+                    _set_nested(doc, k, v)
+                else:
+                    doc[k] = v
         elif op == "$setOnInsert":
             if is_insert:
                 for k, v in fields.items():
-                    doc[k] = v
+                    if "." in k:
+                        _set_nested(doc, k, v)
+                    else:
+                        doc[k] = v
         elif op == "$unset":
             for k in fields:
-                doc.pop(k, None)
+                if "." in k:
+                    _unset_nested(doc, k)
+                else:
+                    doc.pop(k, None)
         elif op == "$inc":
             for k, v in fields.items():
                 doc[k] = doc.get(k, 0) + v
