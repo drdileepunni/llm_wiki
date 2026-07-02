@@ -63,7 +63,8 @@ def get_active_next_checks() -> list[dict]:
       - due_after IS NOT NULL   — only open windows (NULL = resolved/closed)
       - run_started_at > NOW() - 36h — patients must have run recently (discharge safety net)
 
-    Returns a list sorted by due_after ascending.
+    Returns a list sorted by CPMRN, encounter, then due_after ascending — so a
+    patient's multiple active next-checks render as adjacent rows.
     """
     try:
         store = _get_bq_store()
@@ -85,7 +86,7 @@ def get_active_next_checks() -> list[dict]:
         FROM latest
         WHERE rn = 1
           AND due_after IS NOT NULL
-        ORDER BY due_after ASC
+        ORDER BY CPMRN ASC, encounter ASC, due_after ASC
         """
         rows = store._query(sql)
 

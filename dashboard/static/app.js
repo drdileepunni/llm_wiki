@@ -1035,12 +1035,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (window.PAGE === 'config')    loadConfig();
   if (window.PAGE === 'docs')      loadDocsList();
   if (window.PAGE === 'audit')     loadAuditPage();
+  if (window.PAGE === 'doc-audits') loadDocAudits();
 });
 
 // ── AUDIT PAGE ────────────────────────────────────────────────────────────────
 
 async function loadAuditPage() {
-  await Promise.all([loadAuditNextChecks(), loadAuditRuns(), loadDocAudits()]);
+  await Promise.all([loadAuditNextChecks(), loadAuditRuns()]);
 }
 
 async function loadDocAudits() {
@@ -1113,10 +1114,11 @@ async function loadAuditNextChecks() {
     const rows = items.map((i, idx) => {
       const due = new Date(i.due_after);
       const diffMs = due - now;
-      const diffMin = Math.round(diffMs / 60000);
+      const diffMin = Math.round(Math.abs(diffMs) / 60000);
+      const fmtDuration = m => m >= 60 ? `${(m/60).toFixed(1)}h` : `${m}m`;
       const dueLabel = i.overdue
-        ? `<span class="text-danger fw-semibold">${fmtDue(due)} (${Math.abs(diffMin)}m ago)</span>`
-        : `<span class="text-warning">${fmtDue(due)} (in ${diffMin}m)</span>`;
+        ? `<span class="text-danger fw-semibold">${fmtDue(due)} (${fmtDuration(diffMin)} ago)</span>`
+        : `<span class="text-warning">${fmtDue(due)} (in ${fmtDuration(diffMin)})</span>`;
 
       const statusBadge = i.overdue
         ? '<span class="badge bg-danger" style="font-size:0.7rem">overdue</span>'
@@ -1129,7 +1131,8 @@ async function loadAuditNextChecks() {
         : '';
       const detailId  = `nc-detail-${idx}`;
 
-      return `<tr style="font-size:0.82rem; cursor:pointer" onclick="toggleNcDetail('${detailId}','${escHtml(i.CPMRN)}',${i.encounter},'${escHtml(i.problem_name)}')">
+      const activeKey = i.key || i.type || '';
+      return `<tr style="font-size:0.82rem; cursor:pointer" onclick="toggleNcDetail('${detailId}','${escHtml(i.CPMRN)}',${i.encounter},'${escHtml(i.problem_name)}','${escHtml(activeKey)}')">
         <td class="ps-3">${escHtml(i.CPMRN)}</td>
         <td><div>${problem}</div>${reasoning}</td>
         <td>${watching}</td>
@@ -1164,7 +1167,7 @@ function fmtDue(date) {
   return date.toLocaleTimeString('en-IN', {timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'});
 }
 
-async function toggleNcDetail(detailId, cpmrn, encounter, problemName) {
+async function toggleNcDetail(detailId, cpmrn, encounter, problemName, activeKey) {
   const row = document.getElementById(detailId);
   if (!row) return;
   const cell = row.querySelector('td');
@@ -1179,22 +1182,53 @@ async function toggleNcDetail(detailId, cpmrn, encounter, problemName) {
     const d = await apiFetch(`/api/audit/patient/${encodeURIComponent(cpmrn)}/${encounter}`);
     const patProbs = d.patient_problems || [];
     const prob = patProbs.find(p => p.problem_name === problemName);
-    cell.innerHTML = buildNcProblemHistory(prob, problemName);
+    cell._prob = prob;
+    cell._problemName = problemName;
+    cell._activeKey = activeKey;
+    cell.innerHTML = buildNcProblemHistory(prob, problemName, activeKey, false, detailId);
     cell._loaded = true;
   } catch (e) {
     cell.innerHTML = `<div class="p-3 text-danger small">Error loading history: ${escHtml(String(e))}</div>`;
   }
 }
 
-function buildNcProblemHistory(prob, problemName) {
+function toggleNcFullHistory(detailId, showFull) {
+  const row = document.getElementById(detailId);
+  const cell = row && row.querySelector('td');
+  if (!cell || !cell._loaded) return;
+  cell.innerHTML = buildNcProblemHistory(cell._prob, cell._problemName, cell._activeKey, showFull, detailId);
+}
+
+// An "episode" is the run of most-recent assessments that share the currently
+// active next_check target — walking backward, it ends the moment an older
+// assessment was watching a *different* non-null key (a distinct prior concern).
+function _episodeCutoffIndex(assessments, activeKey) {
+  if (!activeKey) return assessments.length;
+  for (let idx = 0; idx < assessments.length; idx++) {
+    const nc = assessments[idx].next_check;
+    const key = nc ? (nc.key || nc.type || '') : '';
+    if (key && key !== activeKey) return idx;
+  }
+  return assessments.length;
+}
+
+function buildNcProblemHistory(prob, problemName, activeKey, showFull, detailId) {
   if (!prob) return `<div class="p-3 text-muted small">No stored history for "${escHtml(problemName)}".</div>`;
 
-  const assessments = (prob.assessments || []).slice().reverse(); // newest first
-  if (!assessments.length) return '<div class="p-3 text-muted small">No assessment history yet.</div>';
+  const allAssessments = (prob.assessments || []).slice().reverse(); // newest first
+  if (!allAssessments.length) return '<div class="p-3 text-muted small">No assessment history yet.</div>';
 
-  const firstDetected = prob.first_detected_at
-    ? `<span class="text-muted" style="font-size:0.72rem">First detected: ${escHtml(new Date(prob.first_detected_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata'}))}</span>`
-    : '';
+  const cutoff = _episodeCutoffIndex(allAssessments, activeKey);
+  const hiddenCount = allAssessments.length - cutoff;
+  const assessments = showFull ? allAssessments : allAssessments.slice(0, cutoff);
+
+  const isScoped = !showFull && hiddenCount > 0;
+  const episodeStartAt = isScoped && assessments.length ? assessments[assessments.length - 1].assessed_at : null;
+  const firstDetected = isScoped && episodeStartAt
+    ? `<span class="text-muted" style="font-size:0.72rem">Episode started: ${escHtml(new Date(episodeStartAt).toLocaleString('en-IN', {timeZone:'Asia/Kolkata'}))}</span>`
+    : prob.first_detected_at
+      ? `<span class="text-muted" style="font-size:0.72rem">First detected: ${escHtml(new Date(prob.first_detected_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata'}))}</span>`
+      : '';
 
   const rows = assessments.map(a => {
     const ts = a.assessed_at
@@ -1231,10 +1265,22 @@ function buildNcProblemHistory(prob, problemName) {
     </tr>`;
   }).join('');
 
+  const scopeLabel = (!showFull && activeKey)
+    ? `<span class="text-muted" style="font-size:0.72rem">— current episode (watching ${escHtml(activeKey)})</span>`
+    : (showFull ? '<span class="text-muted" style="font-size:0.72rem">— full history</span>' : '');
+
+  const toggleLink = hiddenCount > 0
+    ? (showFull
+        ? `<a href="#" class="ms-auto" style="font-size:0.72rem" onclick="event.preventDefault(); toggleNcFullHistory('${detailId}', false)">Show current episode only</a>`
+        : `<a href="#" class="ms-auto" style="font-size:0.72rem" onclick="event.preventDefault(); toggleNcFullHistory('${detailId}', true)">Show full history (${hiddenCount} earlier assessment${hiddenCount === 1 ? '' : 's'} from a different watch target)</a>`)
+    : '';
+
   return `<div style="padding:10px 14px">
     <div class="d-flex align-items-baseline gap-3 mb-2">
       <span class="fw-semibold" style="font-size:0.82rem">${escHtml(problemName)} — history</span>
+      ${scopeLabel}
       ${firstDetected}
+      ${toggleLink}
     </div>
     <div class="table-responsive">
       <table class="table table-sm mb-0" style="border:1px solid #dee2e6">
@@ -1376,7 +1422,7 @@ function auditPatientRow(r) {
         const label = gateNames[decisiveSkip.gate] || decisiveSkip.gate;
         badge = `<span class="badge bg-secondary bg-opacity-20 text-secondary" style="font-size:0.7rem">skip: ${escHtml(label)}</span>`;
         if (decisiveSkip.detail) {
-          badge += `<div class="text-muted mt-1" style="font-size:0.68rem;line-height:1.3">${escHtml(decisiveSkip.detail)}</div>`;
+          badge += `<div class="text-muted mt-1" style="font-size:0.68rem;line-height:1.3">${escHtml(fmtGateDetail(decisiveSkip.detail))}</div>`;
         }
         // Skip gate: show which categories were evaluated
         if (skipGateSteps.length) {
@@ -1504,6 +1550,18 @@ function auditPatientRow(r) {
   </tr>`;
 }
 
+// Convert "not due until HH:MM UTC" → "not due until HH:MM IST" in gate detail strings.
+// Handles both stored-UTC strings (old runs) and already-converted IST strings (new runs).
+function fmtGateDetail(detail) {
+  if (!detail) return detail;
+  return detail.replace(/not due until (\d{2}):(\d{2}) UTC/g, (_, hh, mm) => {
+    const d = new Date();
+    d.setUTCHours(parseInt(hh, 10), parseInt(mm, 10), 0, 0);
+    const ist = d.toLocaleTimeString('en-IN', {timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false});
+    return `not due until ${ist} IST`;
+  });
+}
+
 function buildGateTraceStrip(trace) {
   if (!trace || !trace.length) return '';
   const phaseLabels = {entry: 'Entry', skip_gate: 'Skip gate', triage: 'Triage', analysis: 'Analysis'};
@@ -1517,7 +1575,7 @@ function buildGateTraceStrip(trace) {
     .filter(p => byPhase[p])
     .map(p => {
       const badges = byPhase[p].map(s =>
-        `<span class="badge gt-${escHtml(s.verdict)}" title="${escHtml(s.gate + (s.detail ? ': ' + s.detail : ''))}">${escHtml(s.gate)}</span>`
+        `<span class="badge gt-${escHtml(s.verdict)}" title="${escHtml(s.gate + (s.detail ? ': ' + fmtGateDetail(s.detail) : ''))}">${escHtml(s.gate)}</span>`
       ).join(' ');
       return `<span class="gt-phase-label">${escHtml(phaseLabels[p] || p)}</span>${badges}`;
     })
@@ -1709,8 +1767,9 @@ function buildProblemsTab(d) {
       const now = new Date();
       const overdue = due && now > due;
       const fmtTime = d => d.toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit'});
+      const fmtAge = ms => { const m = Math.round(ms/60000); return m >= 60 ? `${(m/60).toFixed(1)}h` : `${m}m`; };
       const dueHtml = due
-        ? `<span class="${overdue ? 'text-danger fw-semibold' : 'text-warning'}" style="font-size:0.75rem"> · recheck ${overdue ? 'overdue since' : 'due'} ${fmtTime(due)}${overdue ? ` (${Math.round((now-due)/60000)}m ago)` : ''}</span>`
+        ? `<span class="${overdue ? 'text-danger fw-semibold' : 'text-warning'}" style="font-size:0.75rem"> · recheck ${overdue ? 'overdue since' : 'due'} ${fmtTime(due)}${overdue ? ` (${fmtAge(now-due)} ago)` : ''}</span>`
         : '';
       // Show cooldown window: alert can't re-fire until last_alerted_at + current_interval_h
       let cooldownHtml = '';

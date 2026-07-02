@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Documentation Audits{% endblock %}
+
+{% block content %}
+
+<div class="card">
+  <div class="card-header card-header-sm d-flex align-items-center gap-2 flex-wrap">
+    <i class="bi bi-clipboard-check text-primary"></i>
+    <span class="fw-semibold">Documentation Audits</span>
+    <span class="text-muted small ms-auto">last 72 h · 12h after first detection</span>
+  </div>
+  <div id="doc-audits-body" class="card-body p-0">
+    <div class="text-muted text-center py-3 small">Loading…</div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>window.PAGE = 'doc-audits';</script>
+{% endblock %}

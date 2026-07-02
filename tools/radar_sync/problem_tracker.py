@@ -404,6 +404,11 @@ SETTING next_check  (worsening / critical problems only)
   - "fulfilled": true if the expected result from the PREVIOUS next_check is already present in the
     chart; false if it has not arrived yet. The system uses "fulfilled" to manage the check window
     — do not skip it. (due_after resets automatically when fulfilled=true: vital=+1h, lab=+6h, io=+1h)
+  - "plan_note_time": ISO 8601 UTC timestamp of the note that constitutes the active plan (e.g.
+    "2026-07-01T07:46:00Z"). The system uses this to anchor the check window to when the plan was
+    WRITTEN, not when this pipeline run executed — so a plan written 5 hours ago with a 6h buffer
+    is already 5h into its window and will fire in 1h, not 6h. Always emit this when setting a new
+    next_check (fulfilled=true). Omit when fulfilled=false (window is already anchored).
 - For SUBJECTIVE SYMPTOM problems: the next_check MUST be the objective vital that corroborates the
   alert, not an unrelated parameter. If HR is the objective correlate, set vital_key="HR". If there
   is no objective vital correlate (e.g. the problem is corroborated only by a lab or imaging
@@ -730,6 +735,15 @@ _SET_ALL_TOOL = {
                                         "True if you found the expected result from the PREVIOUS next_check "
                                         "in the chart and are now setting a new follow-up target. "
                                         "False if the result has not yet arrived and you are repeating the same pending check."
+                                    ),
+                                },
+                                "plan_note_time": {
+                                    "type": "string",
+                                    "description": (
+                                        "ISO 8601 UTC timestamp of the note that constitutes the active plan "
+                                        "(e.g. '2026-07-01T07:46:00Z'). Emit when fulfilled=true so the check "
+                                        "window is anchored to when the plan was written, not the current run time. "
+                                        "Omit when fulfilled=false."
                                     ),
                                 },
                             },
@@ -1327,7 +1341,33 @@ def _upsert_problem(
                 else:
                     due_after = now + timedelta(hours=interval_h)
             else:
-                due_after = now + timedelta(hours=interval_h)
+                # If the model provided plan_note_time and this is the first window
+                # (no prior due_after stored), anchor due_after to when the plan was
+                # written + response buffer instead of the current run time.
+                # This ensures "plan written at 01:00, run at 07:00" fires immediately
+                # rather than scheduling the next check 6h after the 07:00 run.
+                _pnt_raw = nc_raw.get("plan_note_time") if nc_raw else None
+                _prev_due = (prev_doc.get("next_check") or {}).get("due_after")
+                if _pnt_raw and not _prev_due:
+                    try:
+                        if isinstance(_pnt_raw, str):
+                            _pnt = datetime.fromisoformat(_pnt_raw.replace("Z", "+00:00"))
+                        elif isinstance(_pnt_raw, datetime):
+                            _pnt = _pnt_raw
+                        else:
+                            _pnt = None
+                        if _pnt is not None:
+                            if _pnt.tzinfo is None:
+                                _pnt = _pnt.replace(tzinfo=timezone.utc)
+                            buf_h = _buffer_hours_for_problem(problem_name, nc_type)
+                            _anchored = _pnt + timedelta(hours=buf_h)
+                            due_after = _anchored if _anchored > now else now
+                        else:
+                            due_after = now + timedelta(hours=interval_h)
+                    except Exception:
+                        due_after = now + timedelta(hours=interval_h)
+                else:
+                    due_after = now + timedelta(hours=interval_h)
         else:
             stored_due = (prev_doc.get("next_check") or {}).get("due_after")
             if isinstance(stored_due, datetime):

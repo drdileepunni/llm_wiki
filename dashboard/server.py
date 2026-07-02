@@ -54,6 +54,10 @@ def create_app() -> Flask:
     def audit_page():
         return render_template("audit.html")
 
+    @app.route("/doc-audits")
+    def doc_audits_page():
+        return render_template("doc_audits.html")
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _date_params():

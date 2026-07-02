@@ -254,11 +254,12 @@ def _run_live_pipeline(
     next_run_at = _coerce_dt(sched_doc.get("next_run_at"))
     if next_run_at is not None and now < next_run_at:
         if not _has_new_reports and not force_expensive and not force_glucose_check:
+            _next_run_ist = next_run_at.astimezone(timezone(timedelta(hours=5, minutes=30)))
             logger.info(
                 "pipeline: cadence gate — skipping LLM for %s enc=%d (next_run_at %s)",
-                cpmrn, encounter, next_run_at.strftime("%H:%M UTC"),
+                cpmrn, encounter, _next_run_ist.strftime("%H:%M IST"),
             )
-            _trace("entry", "cadence", "skip", f"not due until {next_run_at.strftime('%H:%M UTC')}")
+            _trace("entry", "cadence", "skip", f"not due until {_next_run_ist.strftime('%H:%M IST')}")
             status["cadence_gate"] = "skipped"
             status["_report_analysis"] = None
             status["_report_sel"] = _report_sel
