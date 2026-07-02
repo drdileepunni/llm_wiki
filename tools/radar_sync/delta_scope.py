@@ -125,6 +125,34 @@ def classify_delta(delta: dict) -> DeltaScope:
     return scope
 
 
+def next_check_data_arrived(next_check: dict, delta: dict) -> bool:
+    """
+    Deterministic, no-LLM check: did the specific value a next_check is
+    watching for actually show up in this delta?
+
+    Used to decide whether an overdue next_check warrants a full LLM
+    re-assessment (value arrived) or just a lightweight care-gap alert
+    (value still missing) — independent of whether unrelated parts of the
+    chart also changed.
+    """
+    nc_type = next_check.get("type")
+    key = (next_check.get("key") or "").strip().lower()
+
+    if nc_type == "vital":
+        return key in _vital_params_present(delta.get("new_vitals") or [])
+
+    if nc_type == "lab":
+        if not key:
+            return False
+        names = [(d.get("name") or "").lower() for d in (delta.get("new_labs") or [])]
+        return any(key in n or n in key for n in names if n)
+
+    if nc_type == "io":
+        return bool(delta.get("io_changed"))
+
+    return False
+
+
 def delta_summary_line(delta: dict) -> str:
     """
     One-line human-readable description of what changed this run.

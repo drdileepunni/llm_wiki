@@ -9,9 +9,9 @@ Modes:
       Radar download, no LLM, no card. Proves the selector against real data.
 
   python -m scripts.demo_report_interpret card_offline
-      No-secret card-JSON proof. Builds the batched card from synthetic report data
-      and prints the cardsV2 JSON (interpretation inline, transcription + image
-      accordions, per-report rating). No send.
+      No-secret card-JSON proof. Builds the batched card(s) from synthetic report
+      data and prints the cardsV2 JSON (findings chips + transcription/image
+      accordions; no interpretation text, no rating). No send.
 
   python -m scripts.demo_report_interpret analyze [CPMRN] [ENCOUNTER]
       Full dry run (needs GOOGLE_API_KEY + Radar REFRESH_TOKEN/RADAR_POST_URL).
@@ -105,20 +105,20 @@ def run_card_offline():
             "image_urls": ["https://example.com/cxr.jpg"],
         },
     ]
-    cards = report_card.build_report_interpret_card(
+    card_batches = report_card.build_report_interpret_cards(
         cpmrn="INDEMO0001", encounter=1, batch_id="batch-demo",
         reports=reports,
-        gchat_webhook_url="https://gchat.example/webhook",
-        callback_url="https://cds.example/report-feedback",
-        cb_token="token",
     )
-    print(json.dumps(cards, indent=2, default=str))
+    print(json.dumps(card_batches, indent=2, default=str))
     # quick structural assertions
-    sections = cards[0]["card"]["sections"]
+    assert card_batches, "expected at least one card"
+    sections = card_batches[0][0]["card"]["sections"]
     headers = [s.get("header", "") for s in sections]
-    assert any(h.startswith("Rate report:") for h in headers), "missing rating section"
+    assert not any(h.startswith("Rate report:") for h in headers), "rating section should be gone"
+    assert not any(h == "Interpretation" for h in headers), "interpretation section should be gone"
     assert any(s.get("collapsible") for s in sections), "missing collapsible accordion"
-    print("\n✅ card structure OK:", len(sections), "sections")
+    print(f"\n✅ card structure OK: {len(card_batches)} card(s), "
+          f"{len(sections)} section(s) in first card")
 
 
 def run_analyze(cpmrn, encounter, send=False):

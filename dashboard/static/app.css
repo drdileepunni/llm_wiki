@@ -102,3 +102,4 @@ body { background: #f8f9fa; font-size: 14px; }
 .badge.gt-ran              { background: #0d6efd; font-size: 0.62rem; }
 .badge.gt-error            { background: #212529; font-size: 0.62rem; }
 .badge.gt-news2_stable_skip { background: #e6a817; color: #212529; font-size: 0.62rem; }
+.badge.gt-delivery_failed  { background: #212529; border: 1px solid #dc3545; color: #dc3545; font-size: 0.62rem; }

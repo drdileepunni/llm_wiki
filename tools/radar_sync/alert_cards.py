@@ -202,6 +202,7 @@ def _build_problem_body_sections(
     order_callback_url: str = "",
     rating_label: str = RATING_SECTION_HEADER,
     include_open_patient: bool = True,
+    include_rating: bool = True,
 ) -> list[dict]:
     """
     Build the content sections for one alerting problem.
@@ -387,6 +388,31 @@ def _build_problem_body_sections(
         })
 
     # ── Rating form ───────────────────────────────────────────────────────────
+    if include_rating:
+        sections.append(_build_rating_section(
+            cpmrn, encounter, alert_id, gchat_webhook_url, callback_url, cb_token,
+            rating_label=rating_label, include_open_patient=include_open_patient,
+        ))
+
+    return sections
+
+
+def _build_rating_section(
+    cpmrn: str,
+    encounter: int,
+    alert_id: str,
+    gchat_webhook_url: str,
+    callback_url: str,
+    cb_token: str,
+    *,
+    rating_label: str = RATING_SECTION_HEADER,
+    include_open_patient: bool = True,
+) -> dict:
+    """
+    Build one rating form section. `alert_id` may be a single alert_id (one
+    problem) or a comma-joined list of alert_ids (one shared rating covering
+    every problem in a batched card) — /alert-feedback splits on comma.
+    """
     rating_buttons = [
         {
             "text": "Submit feedback",
@@ -410,7 +436,7 @@ def _build_problem_body_sections(
             "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
         })
 
-    sections.append({
+    return {
         "header": rating_label,
         "widgets": [
             {"selectionInput": {
@@ -432,9 +458,7 @@ def _build_problem_body_sections(
             }},
             {"buttonList": {"buttons": rating_buttons}},
         ],
-    })
-
-    return sections
+    }
 
 
 def build_alert_card(
@@ -536,31 +560,47 @@ def build_batched_alert_card(
     sections.append({"header": "Patient problems", "widgets": shared_widgets})
 
     # ── Per-problem sections ──────────────────────────────────────────────────
-    for i, (assessment, alert_id) in enumerate(alerts):
+    for assessment, alert_id in alerts:
         problem_name    = assessment.get("problem_name", "Unknown")
         clinical_status = assessment.get("clinical_status", "worsening")
         emoji           = _STATUS_EMOJI.get(clinical_status, "⚠️")
         alert_title     = assessment.get("alert_title") or problem_name
 
         # Section header acts as the problem title within the combined card.
-        # hasDivider=True draws a line above (except for the first problem).
+        # Google Chat silently DROPS a section whose widgets list is empty —
+        # including its header — so this section must always carry at least
+        # one widget, or the first problem's header disappears (the bug fixed
+        # here). A leading divider widget serves double duty: keeps the
+        # section non-empty, and draws a visual separator between problems.
+        # Note: CardsV2 Section has no "hasDivider" field — dividers are a
+        # widget type (`{"divider": {}}`), not a section property.
         problem_header_section: dict = {
             "header": f"{emoji} {alert_title}",
-            "widgets": [],          # content comes in subsequent sections
+            "widgets": [{"divider": {}}],
         }
-        if i > 0:
-            problem_header_section["hasDivider"] = True
         sections.append(problem_header_section)
 
-        # Problem body (no "Open patient" — already in shared section)
+        # Problem body — no per-problem rating form; one shared rating section
+        # covers the whole batched message (see below).
         body_sections = _build_problem_body_sections(
             cpmrn, encounter, assessment, all_problems, alert_id,
             gchat_webhook_url, callback_url, cb_token,
             order_callback_url=order_callback_url,
-            rating_label=f"Rate: {problem_name}",
             include_open_patient=False,
+            include_rating=False,
         )
         sections.extend(body_sections)
+
+    # ── One shared rating section for the whole batched message ────────────────
+    # action_id carries every alert_id, comma-joined — /alert-feedback records
+    # the same rating against each problem in the batch.
+    all_alert_ids = ",".join(aid for _, aid in alerts)
+    sections.append({"widgets": [{"divider": {}}]})
+    sections.append(_build_rating_section(
+        cpmrn, encounter, all_alert_ids, gchat_webhook_url, callback_url, cb_token,
+        rating_label="Rate this alert" if n == 1 else f"Rate these {n} alerts",
+        include_open_patient=False,
+    ))
 
     first_alert_id = alerts[0][1]
     return [{
@@ -588,7 +628,7 @@ def replace_rating_section_with_status(cards_v2: list, status_text: str) -> list
         sections = card_wrapper.get("card", {}).get("sections", [])
         for i, section in enumerate(sections):
             hdr = section.get("header", "")
-            if hdr == RATING_SECTION_HEADER or hdr.startswith("Rate:"):
+            if hdr == RATING_SECTION_HEADER or hdr.startswith("Rate:") or hdr.startswith("Rate this") or hdr.startswith("Rate these"):
                 sections[i] = {
                     "widgets": [
                         {"divider": {}},

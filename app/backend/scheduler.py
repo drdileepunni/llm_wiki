@@ -190,20 +190,35 @@ def _run_live_pipeline(
     # ── PRELUDE: overdue per-problem next-checks ──────────────────────────────
     # force_expensive / force_glucose_check originate here from prior-run scheduling
     # (stored next_check.due_after on patient_problems). Consumed by all phases.
+    #
+    # Every overdue check (vital, lab, or io — no type filtering) is partitioned
+    # by whether the specific value it's watching for actually showed up in this
+    # cycle's delta:
+    #   "arrived" — the watched value is here; this is the only case that
+    #               warrants a full LLM re-assessment.
+    #   "missing" — the watched value never showed up, regardless of whether
+    #               something else in the chart changed. Never forces an
+    #               expensive run — just a lightweight care-gap alert, sent
+    #               unconditionally below regardless of what the rest of this
+    #               cycle's pipeline does.
     try:
         from tools.radar_sync.problem_tracker import overdue_next_checks
+        from tools.radar_sync.delta_scope import next_check_data_arrived
         _overdue_all = overdue_next_checks(cpmrn, encounter, db, now)
-        _overdue = [o for o in _overdue_all if o.get("type") == "lab"]
+        _arrived = [o for o in _overdue_all if next_check_data_arrived(o, delta)]
+        _missing = [o for o in _overdue_all if o not in _arrived]
     except Exception:
         logger.exception("pipeline: overdue_next_checks failed for %s enc=%d — treating as empty", cpmrn, encounter)
-        _overdue = []
+        _arrived = []
+        _missing = []
+    _overdue = _arrived  # arrived-only list feeds the existing force/glucose logic below
     _overdue_glucose = [o for o in _overdue if _is_glucose_next_check(o)]
     _overdue_generic  = [o for o in _overdue if not _is_glucose_next_check(o)]
     force_expensive     = bool(_overdue_generic)
     force_glucose_check = bool(_overdue_glucose) and not force_expensive
     if force_expensive:
         logger.info(
-            "pipeline: %d overdue generic lab next_check(s) for %s enc=%d — will force expensive run",
+            "pipeline: %d overdue next_check(s) with arrived data for %s enc=%d — will force expensive run",
             len(_overdue_generic), cpmrn, encounter,
         )
     if force_glucose_check:
@@ -211,6 +226,15 @@ def _run_live_pipeline(
             "pipeline: overdue glucose next_check for %s enc=%d — will route to cheap glucose pathway",
             cpmrn, encounter,
         )
+    if _missing:
+        logger.info(
+            "pipeline: %d overdue next_check(s) still missing watched data for %s enc=%d — will care-gap alert only",
+            len(_missing), cpmrn, encounter,
+        )
+    # Fire care-gap alerts for missing checks now, unconditionally — independent
+    # of whether the rest of this cycle's pipeline runs, skips, or forces a full
+    # analysis for unrelated reasons.
+    _send_missing_care_gap_alerts(cpmrn, encounter, _missing, db, ctx, now, status)
     status["force_expensive"]     = force_expensive
     status["force_glucose_check"] = force_glucose_check
 
@@ -279,6 +303,12 @@ def _run_live_pipeline(
         _trace("entry", "cadence", "ran", "due now")
 
     # Entry: delta
+    # Note: force_expensive/force_glucose_check can never save a truly-empty
+    # delta from being skipped here — both are derived purely from _arrived
+    # (data that showed up in THIS cycle's delta), which by definition implies
+    # has_new_data is already True. An overdue check with no arrived data is
+    # "missing" and gets a care-gap alert (handled unconditionally above in
+    # the Prelude), never a forced run.
     last_llm_run_at = _coerce_dt(last_llm_run_at_raw)
     if last_llm_run_at is not None:
         has_new_data = any([
@@ -286,29 +316,21 @@ def _run_live_pipeline(
             delta.get("io_changed"),
         ])
         if not has_new_data and not _has_new_reports:
-            if force_expensive or force_glucose_check:
-                logger.info(
-                    "pipeline: delta gate bypassed for %s enc=%d — forced by overdue next_check (no new data)",
-                    cpmrn, encounter,
-                )
-                _trace("entry", "delta", "bypassed", "forced no-new-data run")
-                status["delta_gate"] = "bypassed_forced"
-            else:
-                logger.info(
-                    "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
-                    cpmrn, encounter,
-                )
-                _trace("entry", "delta", "skip", "no new data since last LLM run")
-                status["delta_gate"] = "skipped"
-                status["_report_analysis"] = None
-                status["_report_sel"] = _report_sel
-                db.snapshot_schedule.update_one(
-                    {"CPMRN": cpmrn, "encounter": encounter},
-                    {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
-                )
-                new_structured = ctx.get("structured_summary") or {}
-                _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
-                return status
+            logger.info(
+                "pipeline: delta gate — no new data for %s enc=%d since last LLM run, skipping",
+                cpmrn, encounter,
+            )
+            _trace("entry", "delta", "skip", "no new data since last LLM run")
+            status["delta_gate"] = "skipped"
+            status["_report_analysis"] = None
+            status["_report_sel"] = _report_sel
+            db.snapshot_schedule.update_one(
+                {"CPMRN": cpmrn, "encounter": encounter},
+                {"$set": {"next_run_at": _next_run_at(snapshot_at, 1)}},
+            )
+            new_structured = ctx.get("structured_summary") or {}
+            _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
+            return status
         else:
             _trace("entry", "delta", "ran", "new data found")
     else:
@@ -331,7 +353,6 @@ def _run_live_pipeline(
     _skip_gate_active = (
         not force_expensive
         and not _has_new_reports
-        and not (status.get("delta_gate") == "bypassed_forced")
     )
 
     force_full_vitals    = False
@@ -562,109 +583,14 @@ def _run_live_pipeline(
             _trace("skip_gate", "combined", "proceed", ", ".join(_sig) + " significant")
     elif force_expensive or _has_new_reports:
         _trace("skip_gate", "combined", "forced", "overdue checks or new reports")
-    elif status.get("delta_gate") == "bypassed_forced":
-        _trace("skip_gate", "combined", "bypassed", "forced no-new-data run")
 
     # ── PHASE 2: TRIAGE ──────────────────────────────────────────────────────
-
-    # Forced-recheck shortcut — no new data, forced by overdue next_check
-    if status.get("delta_gate") == "bypassed_forced":
-        _trace("triage", "forced_recheck", "limited", "no new data — overdue next_check")
-        if force_glucose_check and not force_expensive:
-            status["pass1"] = "skipped_glucose_only"
-            status["pass2"] = "skipped_glucose_only"
-            if _run_glucose_alert(cpmrn, encounter, db, snapshot_at, ctx, delta, status):
-                _run_fn_detector_step(cpmrn, encounter, ctx.get("structured_summary") or {}, snapshot_at, db, status)
-                _trace("analysis", "fn_detector", "ran", "")
-                return status
-            logger.warning(
-                "pipeline: glucose-forced recheck — no glucose value for %s enc=%d, falling back to full tracker",
-                cpmrn, encounter,
-            )
-
-        # True zero-delta overdue: nothing new in the chart at all.
-        # Skip the LLM entirely — send a lightweight care-gap alert for each
-        # overdue next_check telling the clinician the expected check wasn't documented.
-        _truly_zero_delta = (
-            not delta.get("new_vitals")
-            and not delta.get("new_labs")
-            and not delta.get("new_notes")
-            and not delta.get("io_changed")
-        )
-        if _truly_zero_delta and _overdue:
-            try:
-                from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
-                import uuid as _uuid
-                recipients = get_alert_recipients(db)
-                if recipients:
-                    care_gap_alerts = []
-                    for o in _overdue:
-                        pname  = o.get("problem_name", "Unknown problem")
-                        label  = o.get("label") or o.get("key") or o.get("type") or "check"
-                        care_gap_alerts.append(({
-                            "problem_name":    pname,
-                            "clinical_status": o.get("clinical_status", ""),
-                            "should_alert":    True,
-                            "being_addressed": False,
-                            "alert_title":     f"Care gap — {pname}",
-                            "alert_reason":    (
-                                f"Expected {label} check is overdue and no new data has been "
-                                f"charted in the last hour. Please document or perform the check."
-                            ),
-                            "note_vs_objective": "",
-                        }, _uuid.uuid4().hex))
-                    send_batch_alert_cards(
-                        cpmrn, encounter, care_gap_alerts,
-                        ctx.get("structured_summary") or {},
-                        recipients,
-                    )
-                    logger.info(
-                        "pipeline: care-gap alert(s) sent for %s enc=%d — %d overdue next_check(s), zero delta",
-                        cpmrn, encounter, len(care_gap_alerts),
-                    )
-                else:
-                    logger.warning(
-                        "pipeline: care-gap — no recipients configured for %s enc=%d",
-                        cpmrn, encounter,
-                    )
-            except Exception:
-                logger.exception("pipeline: care-gap alert failed for %s enc=%d", cpmrn, encounter)
-            _trace("analysis", "problem_tracker", "ran", f"care-gap alert — zero delta, {len(_overdue)} overdue")
-            status["problem_tracker"] = {"care_gap": True, "overdue_count": len(_overdue)}
-            status["summary"]    = "skipped_care_gap"
-            status["pass1"]      = "skipped_care_gap"
-            status["pass2"]      = "care_gap_alert"
-            status["classifier"] = "skipped_care_gap"
-            _run_fn_detector_step(cpmrn, encounter, ctx.get("structured_summary") or {}, snapshot_at, db, status)
-            _trace("analysis", "fn_detector", "ran", "")
-            return status
-
-        new_structured = ctx.get("structured_summary") or {}
-        status["summary"]    = "skipped_forced_no_data"
-        status["pass1"]      = "skipped_forced_no_data"
-        status["pass2"]      = "forced_by_overdue_next_check"
-        status["classifier"] = "skipped_forced_only"
-        try:
-            from tools.radar_sync.problem_tracker import track_problems
-            tracker_result = track_problems(
-                cpmrn, encounter, new_structured, snapshot_at,
-                screener_flag="",
-                focus=_overdue,
-                delta=delta,
-            )
-            status["problem_tracker"] = tracker_result
-            logger.info(
-                "pipeline: forced recheck (no new data) — problem tracker done for %s enc=%d",
-                cpmrn, encounter,
-            )
-            _trace("analysis", "problem_tracker", "ran", "forced recheck — no new data")
-        except Exception:
-            logger.exception("pipeline: forced recheck problem tracker failed for %s enc=%d", cpmrn, encounter)
-            status["problem_tracker"] = {"error": "exception"}
-            _trace("analysis", "problem_tracker", "error", "forced recheck tracker failed")
-        _run_fn_detector_step(cpmrn, encounter, new_structured, snapshot_at, db, status)
-        _trace("analysis", "fn_detector", "ran", "")
-        return status
+    # Note: the old "forced-recheck shortcut" (delta_gate == "bypassed_forced")
+    # is gone — it's structurally unreachable now that force_expensive/
+    # force_glucose_check are derived purely from arrived data, which by
+    # definition means the delta gate above already found new data and never
+    # skipped. Overdue checks with no arrived data are "missing" and get a
+    # care-gap alert in the Prelude instead (see _send_missing_care_gap_alerts).
 
     # Glucose-only gate — bypass full pipeline for standalone glucose labs
     _glucose_only_delta = (
@@ -829,8 +755,13 @@ def _run_live_pipeline(
                 {"$set": {"clinical_timeline": updated_timeline}},
             )
         logger.info("pipeline: problem tracker done for %s enc=%d — %s", cpmrn, encounter, tracker_result)
-        _trace("analysis", "problem_tracker", "ran",
-               f"alerts: {tracker_result.get('alerts_sent', [])}")
+        _alerts_sent = tracker_result.get("alerts_sent", [])
+        _delivery_ok = tracker_result.get("alert_delivery_ok")
+        if _alerts_sent and _delivery_ok is False:
+            _trace("analysis", "problem_tracker", "delivery_failed",
+                   f"alert decided but NOT delivered: {_alerts_sent}")
+        else:
+            _trace("analysis", "problem_tracker", "ran", f"alerts: {_alerts_sent}")
     except Exception:
         logger.exception("pipeline: problem tracker failed for %s enc=%d", cpmrn, encounter)
         status["problem_tracker"] = {"error": "exception"}
@@ -894,6 +825,95 @@ def _is_glucose_next_check(overdue_item: dict) -> bool:
     """True if an overdue next_check item is tracking a glucose-related lab."""
     key = (overdue_item.get("key") or overdue_item.get("label") or "").lower()
     return any(kw in key for kw in _GLUCOSE_LAB_KEYWORDS)
+
+
+_CARE_GAP_COOLDOWN_H = 4  # minimum hours between repeat care-gap alerts for the same missing check
+
+
+def _send_missing_care_gap_alerts(
+    cpmrn: str,
+    encounter: int,
+    missing: list[dict],
+    db: Any,
+    ctx: dict,
+    now: datetime,
+    status: dict,
+) -> None:
+    """
+    Send a lightweight care-gap alert for each overdue next_check whose watched
+    value hasn't shown up yet — regardless of what else changed in the chart
+    this cycle. Never forces an expensive LLM run; this is a fire-and-forget
+    notification only.
+
+    Subject to a per-check cooldown (next_check.last_care_gap_alert_at) so a
+    chronically-missing item doesn't re-alert on every pipeline tick.
+    """
+    if not missing:
+        return
+
+    _due_for_alert = []
+    for o in missing:
+        doc = o.get("doc") or {}
+        nc = doc.get("next_check") or {}
+        last_sent = nc.get("last_care_gap_alert_at")
+        if isinstance(last_sent, str):
+            try:
+                last_sent = datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
+            except ValueError:
+                last_sent = None
+        if isinstance(last_sent, datetime):
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            if now - last_sent < timedelta(hours=_CARE_GAP_COOLDOWN_H):
+                continue
+        _due_for_alert.append(o)
+
+    if not _due_for_alert:
+        return
+
+    try:
+        from tools.radar_sync.chat_card_sender import get_alert_recipients, send_batch_alert_cards
+        import uuid as _uuid
+        recipients = get_alert_recipients(db)
+        if not recipients:
+            logger.warning("pipeline: care-gap — no recipients configured for %s enc=%d", cpmrn, encounter)
+            return
+
+        care_gap_alerts = []
+        for o in _due_for_alert:
+            pname = o.get("problem_name", "Unknown problem")
+            label = o.get("label") or o.get("key") or o.get("type") or "check"
+            clinical_status = (o.get("doc") or {}).get("clinical_status", "")
+            care_gap_alerts.append(({
+                "problem_name":    pname,
+                "clinical_status": clinical_status,
+                "should_alert":    True,
+                "being_addressed": False,
+                "alert_title":     f"Care gap — {pname}",
+                "alert_reason": (
+                    f"Expected {label} check is overdue and no new {label} data has been "
+                    f"charted since the check window opened. Please document or perform the check."
+                ),
+                "note_vs_objective": "",
+            }, _uuid.uuid4().hex))
+
+        send_batch_alert_cards(
+            cpmrn, encounter, care_gap_alerts,
+            ctx.get("structured_summary") or {},
+            recipients,
+        )
+        for o in _due_for_alert:
+            db["patient_problems"].update_one(
+                {"CPMRN": cpmrn, "encounter": encounter, "problem_name": o.get("problem_name")},
+                {"$set": {"next_check.last_care_gap_alert_at": now}},
+            )
+        logger.info(
+            "pipeline: care-gap alert(s) sent for %s enc=%d — %d missing next_check(s)",
+            cpmrn, encounter, len(care_gap_alerts),
+        )
+        status["care_gap_alerts_sent"] = len(care_gap_alerts)
+    except Exception:
+        logger.exception("pipeline: care-gap alert failed for %s enc=%d", cpmrn, encounter)
 
 
 _ABG_LAB_KEYWORDS = (
@@ -1291,6 +1311,11 @@ def _derive_pipeline_outcome(status: dict) -> str:
         return "cheap"
     pt = status.get("problem_tracker") or {}
     if isinstance(pt, dict) and pt.get("alerts_sent"):
+        # alerts_sent means the tracker DECIDED to alert — alert_delivery_ok reflects
+        # whether the Google Chat send actually succeeded. False means the decision
+        # was made but nothing reached a clinician (see problem_tracker logs).
+        if pt.get("alert_delivery_ok") is False:
+            return "alert_send_failed"
         return "alerted"
     pass1 = status.get("pass1") or {}
     if isinstance(pass1, dict) and pass1.get("needs_full_analysis"):

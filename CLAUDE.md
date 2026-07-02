@@ -276,8 +276,8 @@ Results visible on the dashboard Audit page → Documentation Audits panel.
 - Computes current NEWS2 from the latest vital row.
 - Checks both baselines: if any component rose ≥ 3 pts (`_NEWS2_COMPONENT_DELTA`) OR total rose ≥ 6 pts (`_NEWS2_TOTAL_DELTA`) vs either baseline → **expensive run**.
 - If both baselines are stable → **skip** (`vital_normal_gate = "news2_stable_skip"`). The fn_detector NEWS2 cooldown-override still runs on the skip path as the safety net for genuine deterioration.
-- If no baseline exists yet (first run for patient) → falls back to expensive run (safe).
-- Gate trace verdict: `news2_stable_skip` (amber badge in dashboard, detail shows score deltas on hover).
+- If no baseline exists yet (first run for patient): current NEWS2 == 0 (fully normal, including O2) → **skip**, seed the baseline for next time; otherwise → falls back to expensive run (safe — abnormal vitals with nothing to compare against).
+- Gate trace verdict: `news2_stable_skip` (amber badge in dashboard, detail shows score deltas or cold-start-zero reasoning on hover).
 
 This prevents "chronic-abnormal thrash" — patients with persistently abnormal but stable vitals (e.g. SpO₂ 87 on NIV, RR 23 on BiPAP) triggering a full LLM run every hour when nothing has changed. The dual-baseline catches both acute step-changes AND gradual drift that a single run-to-run check would miss.
 

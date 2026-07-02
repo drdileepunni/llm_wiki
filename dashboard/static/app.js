@@ -387,6 +387,7 @@ async function loadRunAudit(runTs) {
 
       const outcomeBadge = (() => {
         const o = r.pipeline_outcome || '';
+        if (o === 'alert_send_failed')   return '<span class="badge bg-dark border border-danger text-danger">⚠ alert NOT delivered</span>';
         if (o === 'alerted')             return '<span class="badge bg-danger">alerted</span>';
         if (o === 'expensive_no_alert')  return '<span class="badge bg-warning text-dark">expensive, no alert</span>';
         if (o === 'cheap')               return '<span class="badge bg-secondary bg-opacity-25 text-secondary">cheap</span>';
@@ -1485,6 +1486,7 @@ function auditPatientRow(r) {
 
   const outcomeBadge = (() => {
     const o = r.pipeline_outcome || '';
+    if (o === 'alert_send_failed')  return '<span class="badge bg-dark border border-danger text-danger" style="font-size:0.7rem">⚠ alert NOT delivered</span>';
     if (o === 'alerted')            return '<span class="badge bg-danger" style="font-size:0.7rem">alerted</span>';
     if (o === 'expensive_no_alert') return '<span class="badge bg-warning text-dark" style="font-size:0.7rem">expensive, no alert</span>';
     if (o === 'cheap')              return '<span class="badge bg-secondary bg-opacity-25 text-secondary" style="font-size:0.7rem">cheap</span>';

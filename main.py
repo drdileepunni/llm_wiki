@@ -65,7 +65,10 @@ def alert_feedback():
     message = payload.get("message", {}) or {}
     space_name = (payload.get("space", {}) or {}).get("name", "")
 
-    alert_id = parameters.get("action_id", "")
+    # action_id is one alert_id for a single-problem card, or several
+    # comma-joined alert_ids for a batched card's one shared rating section —
+    # the same rating/note is recorded against every problem in the batch.
+    alert_ids = [a for a in parameters.get("action_id", "").split(",") if a]
     rating = form_value("rating")
     note = form_value("feedback_text")
 
@@ -77,55 +80,56 @@ def alert_feedback():
         })
 
     logging.info(
-        "alert-feedback: alert_id=%s rated %s/5 by %s (note=%r)",
-        alert_id, rating, user_email, note,
+        "alert-feedback: alert_ids=%s rated %s/5 by %s (note=%r)",
+        alert_ids, rating, user_email, note,
     )
 
     from backend.services.bq_store import get_bq_store
     store = get_bq_store()
 
-    # Validate alert_id against study_alerts.  If it doesn't match a real alert
-    # row, the click came from a stale or test card — reject it rather than
-    # polluting the feedback table with a fake ID.
-    cpmrn, encounter, problem_name = "", None, ""
+    # Validate alert_ids against study_alerts. If NONE match a real alert row,
+    # the click came from a stale or test card — reject it rather than
+    # polluting the feedback table with fake IDs.
+    matched_rows = []
     try:
-        rows = store.find_alerts({"alert_id": alert_id})
-        if rows:
-            cpmrn = rows[0].get("CPMRN", "")
-            encounter = rows[0].get("encounter")
-            problem_name = rows[0].get("problem_name", "")
-        else:
-            logging.warning(
-                "alert-feedback: alert_id=%r not found in study_alerts — "
-                "rejecting feedback from stale/test card",
-                alert_id,
-            )
-            return jsonify({
-                "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
-                    "message": {"text": (
-                        "⚠️ This alert card is outdated and can no longer accept feedback. "
-                        "Please rate from the current alert card."
-                    )}
-                }}}
-            })
+        for alert_id in alert_ids:
+            rows = store.find_alerts({"alert_id": alert_id})
+            if rows:
+                matched_rows.append(rows[0])
+            else:
+                logging.warning(
+                    "alert-feedback: alert_id=%r not found in study_alerts — skipping",
+                    alert_id,
+                )
     except Exception:
-        logging.exception("alert-feedback: study_alerts lookup failed for %s", alert_id)
+        logging.exception("alert-feedback: study_alerts lookup failed for %s", alert_ids)
+
+    if not matched_rows:
+        return jsonify({
+            "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
+                "message": {"text": (
+                    "⚠️ This alert card is outdated and can no longer accept feedback. "
+                    "Please rate from the current alert card."
+                )}
+            }}}
+        })
 
     try:
-        store.insert_alert_feedback({
-            "alert_id": alert_id,
-            "CPMRN": cpmrn,
-            "encounter": encounter,
-            "problem_name": problem_name,
-            "rating": int(rating),
-            "feedback_text": note or None,
-            "user_email": user_email,
-            "user_display": user_display,
-            "space_name": space_name,
-            "message_name": message.get("name", ""),
-        })
+        for row in matched_rows:
+            store.insert_alert_feedback({
+                "alert_id": row.get("alert_id", ""),
+                "CPMRN": row.get("CPMRN", ""),
+                "encounter": row.get("encounter"),
+                "problem_name": row.get("problem_name", ""),
+                "rating": int(rating),
+                "feedback_text": note or None,
+                "user_email": user_email,
+                "user_display": user_display,
+                "space_name": space_name,
+                "message_name": message.get("name", ""),
+            })
     except Exception:
-        logging.exception("alert-feedback: BQ insert failed for %s", alert_id)
+        logging.exception("alert-feedback: BQ insert failed for %s", alert_ids)
         return jsonify({
             "hostAppDataAction": {"chatDataAction": {"createMessageAction": {
                 "message": {"text": "⚠️ Could not record your feedback. Please try again later."}

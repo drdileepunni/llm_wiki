@@ -234,7 +234,9 @@ def check_vitals_news2_delta(
     If EITHER baseline shows a meaningful NEWS2 change (component ≥ _NEWS2_COMPONENT_DELTA
     or total ≥ _NEWS2_TOTAL_DELTA), should_skip=False → expensive run.
     If both baselines show stable vitals → should_skip=True → skip expensive run.
-    If no baseline exists yet (first run for this patient) → should_skip=False (safe fallback).
+    If no baseline exists yet (first run for this patient):
+      - current NEWS2 == 0 (fully normal, including O2) → should_skip=True (nothing to catch).
+      - otherwise → should_skip=False (safe fallback — abnormal vitals with no history to compare).
     """
     if not new_vitals:
         return True, "no new vitals"
@@ -255,6 +257,11 @@ def check_vitals_news2_delta(
     b6h_components  = sched.get("news2_baseline_6h_components")
 
     if last_score is None or last_components is None:
+        if current_score == 0:
+            return True, (
+                "no prior NEWS2 baseline but current NEWS2=0 (fully normal) — "
+                "skipping cold-start run, seeding baseline"
+            )
         return False, "no prior NEWS2 baseline — running full analysis"
 
     # Check 1: delta vs last run

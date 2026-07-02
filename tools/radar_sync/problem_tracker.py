@@ -942,8 +942,12 @@ def _get_problem_state(cpmrn: str, encounter: int, problem_name: str, db: Any) -
         nc_line = (
             f"  Next check: {display} ({nc_type}) — due {due_str}"
             f"{' [OVERDUE]' if overdue else ' [pending]'}\n"
-            f"  Reminder: set next_check.fulfilled=true only if you find the above result "
-            f"in the chart; false if it has not arrived yet."
+            f"  Reminder: set next_check.fulfilled=true ONLY if the auto-fetched reading below "
+            f"is genuinely NEW since this check was set — a pre-existing value you already knew "
+            f"about does not count, even if it happens to satisfy the check. If you are not "
+            f"certain a new reading has arrived, set fulfilled=false; this is always safe and "
+            f"only means \"keep watching.\" A deterministic code check independently verifies "
+            f"fulfilled=true claims against the chart and will override unverified ones to false."
         )
     else:
         nc_line = "  Next check: none (problem was stable/resolved at last assessment)"
@@ -1247,6 +1251,7 @@ def _upsert_problem(
     now: datetime,
     alerted: bool,
     db: Any,
+    delta: dict | None = None,
 ) -> None:
     problem_name    = assessment["problem_name"]
     clinical_status = assessment.get("clinical_status", "stable")
@@ -1295,7 +1300,39 @@ def _upsert_problem(
         # fulfilled=True  → model found the expected result; start a fresh window
         # fulfilled=False → result still pending; preserve the original due_after
         #                   so the window doesn't roll forward every hour
-        fulfilled = nc_raw.get("fulfilled", True)
+        # Fail CLOSED on omission: this problem may not be the reason this cycle
+        # ran (a single tracker call reassesses every problem at once), so if the
+        # model didn't explicitly confirm fulfillment, assume it isn't fulfilled
+        # rather than silently resetting the window with no evidence.
+        fulfilled = nc_raw.get("fulfilled", False)
+
+        # Hard rule (deterministic veto, no LLM involved): a fulfilled=true claim
+        # is only honored if a genuinely new reading of the watched key actually
+        # showed up in this cycle's delta. Same rationale as the next_check-only-
+        # for-worsening/critical rule above — one tracker call reassesses every
+        # problem at once, so the model can claim fulfillment on a problem it
+        # didn't really examine this cycle. fulfilled=false is always left as-is
+        # (it only ever means "keep watching," never a false accept).
+        if fulfilled:
+            try:
+                from tools.radar_sync.delta_scope import next_check_data_arrived
+                _verified = next_check_data_arrived(
+                    {"type": nc_type, "key": nc_key}, delta or {},
+                )
+            except Exception:
+                logger.exception(
+                    "_upsert_problem: fulfilled-veto check failed for '%s' %s enc=%d — treating as unverified",
+                    problem_name, cpmrn, encounter,
+                )
+                _verified = False
+            if not _verified:
+                logger.warning(
+                    "_upsert_problem: model claimed fulfilled=true for '%s' %s enc=%d "
+                    "(next_check %s/%s) but no matching new reading found in this cycle's "
+                    "delta — overriding to fulfilled=false",
+                    problem_name, cpmrn, encounter, nc_type, nc_key,
+                )
+                fulfilled = False
 
         # Load prior state once for both due_after and backoff computation.
         prev_doc = db["patient_problems"].find_one(
@@ -2852,6 +2889,7 @@ def track_problems(
     # Phase 1 — evaluate eligibility, upsert all problems, collect what needs alerting.
     # Alerting is deferred so all problems for this patient go in one batched message.
     to_alert: list[tuple[dict, str]] = []   # (assessment, alert_id)
+    alert_delivery_ok: bool | None = None   # None = no alert attempted; True/False = delivery outcome
     _lab_lag = _compute_lab_upload_lag(delta)
 
     # Audit dict — one entry per assessed problem, returned for dashboard run-audit table.
@@ -2907,7 +2945,7 @@ def track_problems(
             )
             alerts_suppressed.append(problem_name)
             _problem_audit[problem_name]["suppression_rule"] = "being_addressed"
-            _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+            _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
             continue
 
         if should_alert:
@@ -2950,7 +2988,7 @@ def track_problems(
                         "problem_tracker: permissive suppression event write failed for '%s' %s",
                         problem_name, cpmrn,
                     )
-                _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
                 continue  # skip remaining gates for this problem
 
             # ── Gate 0b: Code-side GCS stability gate ─────────────────────────
@@ -2984,7 +3022,7 @@ def track_problems(
                             "scenario": "established_neurological_injury",
                             "rationale": f"Code-side gate: GCS 6h delta={_gcs_delta:+d} (stable/improving)",
                         }
-                        _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
                         continue
                 except Exception:
                     logger.exception(
@@ -3067,7 +3105,7 @@ def track_problems(
                                         "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
                                         problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
                                     )
-                                    _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                                    _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
                                     continue
                         except Exception:
                             logger.exception(
@@ -3103,7 +3141,7 @@ def track_problems(
                             "(pre-send vital check — %s improved since snapshot)",
                             problem_name, cpmrn, encounter, _vk,
                         )
-                        _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                        _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
                         continue
 
                 # ── Pre-send lab value cross-check ────────────────────────────
@@ -3123,7 +3161,7 @@ def track_problems(
                                     "lab value mismatch: title claims %s=%.1f, snapshot shows %.1f",
                                     problem_name, cpmrn, encounter, _lv_name, _lv_claimed, _lv_actual,
                                 )
-                                _upsert_problem(cpmrn, encounter, assessment, now, False, db)
+                                _upsert_problem(cpmrn, encounter, assessment, now, False, db, delta)
                                 continue
                     except Exception:
                         logger.exception(
@@ -3144,7 +3182,7 @@ def track_problems(
                 to_alert.append((assessment, alert_id))
                 alerts_sent.append(problem_name)
 
-        _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db)
+        _upsert_problem(cpmrn, encounter, assessment, now, will_alert, db, delta)
 
         # For problems where the model itself set should_alert=False, record the model reason.
         if not assessment.get("should_alert", False) and _problem_audit[problem_name]["suppression_rule"] == "none":
@@ -3221,21 +3259,43 @@ def track_problems(
                 sent = send_batch_alert_cards(
                     cpmrn, encounter, to_alert, structured_summary, recipients,
                 )
+                alert_delivery_ok = sent
                 if sent:
                     logger.info(
                         "problem_tracker: batch alert sent for %s enc=%d — %s",
                         cpmrn, encounter, [p for p, _ in [(a.get("problem_name"), aid) for a, aid in to_alert]],
+                    )
+                else:
+                    logger.error(
+                        "problem_tracker: batch alert delivery FAILED for %s enc=%d — %s "
+                        "(alert decided but no recipient received it — see chat_card_sender logs)",
+                        cpmrn, encounter, [a.get("problem_name") for a, _ in to_alert],
                     )
             else:
                 # Legacy webhook fallback — still batched into one text message
                 from tools.radar_sync.gchat_notifier import send_problem_alert
                 cfg = db["app_settings"].find_one({"_id": "gchat_webhook"})
                 if cfg and cfg.get("enabled") and cfg.get("url"):
+                    alert_delivery_ok = False
                     for assessment, _ in to_alert:
-                        send_problem_alert(
+                        if send_problem_alert(
                             cpmrn, encounter, assessment, structured_summary, cfg["url"],
+                        ):
+                            alert_delivery_ok = True
+                    if not alert_delivery_ok:
+                        logger.error(
+                            "problem_tracker: legacy webhook alert delivery FAILED for %s enc=%d",
+                            cpmrn, encounter,
                         )
+                else:
+                    alert_delivery_ok = False
+                    logger.error(
+                        "problem_tracker: alert decided for %s enc=%d but no recipients configured "
+                        "(alert_recipients empty and gchat_webhook disabled/unset) — nothing sent",
+                        cpmrn, encounter,
+                    )
         except Exception:
+            alert_delivery_ok = False
             logger.exception("problem_tracker: batch alert failed for %s enc=%d", cpmrn, encounter)
 
         # BQ study records — one per problem, written after send attempt
@@ -3314,6 +3374,7 @@ def track_problems(
         "problems_assessed": len(final_assessments),
         "alerts_sent":       alerts_sent,
         "alerts_suppressed": alerts_suppressed,
+        "alert_delivery_ok": alert_delivery_ok,
         "problem_details":   list(_problem_audit.values()),
         "clinical_timeline": updated_timeline,
     }

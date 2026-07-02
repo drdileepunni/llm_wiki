@@ -233,30 +233,24 @@ def finalize_report_cycle(cpmrn: str, encounter: int, analysis: dict, snapshot_a
                 logger.exception("report_interpret: image host failed for %s", r["report_id"])
         r["image_urls"] = urls
 
-    # 2. build + send one card per report (GChat caps sections at 10; batching multiple
-    #    reports into one card exceeds that limit and returns HTTP 500)
+    # 2. build + send as few cards as possible — reports are packed into cards under
+    #    GChat's ~10-section limit, so N reports typically becomes fewer than N messages.
     card_sent, recipients = False, []
     if send:
         recipients = get_alert_recipients(db)
         if recipients:
-            service_url = (os.getenv("GCHAT_SERVICE_URL") or "").rstrip("/")
-            cds_url = (os.getenv("CDS_PUBLIC_URL") or "").rstrip("/")
-            cb_token = os.getenv("ALERT_FEEDBACK_TOKEN", "")
+            card_batches = report_card.build_report_interpret_cards(
+                cpmrn=cpmrn, encounter=encounter, batch_id=batch_id, reports=reports,
+                patient_narrative=analysis.get("narrative", ""),
+            )
             any_sent = False
-            for r in reports:
-                cards = report_card.build_report_interpret_card(
-                    cpmrn=cpmrn, encounter=encounter, batch_id=batch_id, report=r,
-                    gchat_webhook_url=f"{service_url}/webhook",
-                    callback_url=f"{cds_url}/report-feedback",
-                    cb_token=cb_token,
-                    patient_narrative=analysis.get("narrative", ""),
-                )
+            for cards in card_batches:
                 if send_cards_to_recipients(cards, recipients):
                     any_sent = True
                 else:
                     logger.warning(
-                        "report_interpret: card send failed for report %s (%s enc=%d)",
-                        r.get("report_id"), cpmrn, encounter,
+                        "report_interpret: card send failed for batch %s (%s enc=%d)",
+                        batch_id, cpmrn, encounter,
                     )
             card_sent = any_sent
         else:

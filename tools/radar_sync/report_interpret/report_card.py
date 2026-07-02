@@ -1,15 +1,26 @@
 """
 Build the Google Chat cardsV2 "new diagnostic report(s) resulted" card.
 
-ONE batched card per patient per cycle. Each newly resulted report gets its own
-section group: a header (report type + relative timing), the clinical interpretation
-shown inline, a collapsed accordion with the verbatim description/transcription, a
-collapsed accordion with the report image(s), and a per-report 1–5 feedback rating.
+Each newly resulted report gets its own section group: a header (report type +
+relative timing, doubling as the Findings chip list when findings exist), a
+collapsed accordion with the verbatim description/transcription followed by
+the model's interpretation (folded into the same text block — no separate
+"Interpretation" section), and a collapsed accordion with the report image(s).
+No per-report rating — these cards are for quick visual triage, not scored
+model-output review.
+
+Google Chat caps a card at ~10 sections, so `build_report_interpret_cards()`
+packs as many reports as fit into one card and starts a new card (a separate
+Chat message) once the budget is exhausted — e.g. 5 small reports might become
+2-3 messages instead of 5.
 
 Mirrors the conventions in alert_cards.py / order_recon_card.py:
-  * onClick.action.function = full HTTPS gchat webhook URL; intent travels in parameters.
   * collapsible accordions use {"collapsible": True, "uncollapsibleWidgetsCount": 0}.
-  * a replace_rating_section_with_status() helper updates the card in place after submit.
+
+`replace_rating_section_with_status()` / `_section_report_id()` are kept even
+though new cards no longer carry a rating section — they're still needed to
+process Submit clicks on any older report card already delivered to Chat
+before this change (see /report-feedback in main.py).
 """
 from __future__ import annotations
 
@@ -20,6 +31,7 @@ _CHART_BASE = "https://cloudphysicianworld.com/patient"
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 _RATING_PREFIX = "Rate report:"
+_MAX_SECTIONS_PER_CARD = 10
 
 _TYPE_DISPLAY = {
     "xray":       "X-ray",
@@ -67,10 +79,11 @@ def _fmt_ist(dt_iso) -> str:
 _SEVERITY_EMOJI = {"critical": "🔴", "notable": "🟠", "routine": "🟢"}
 
 
-def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
-                     cb_token: str, has_divider: bool) -> list[dict]:
-    """Build the section group for one report."""
-    report_id  = report["report_id"]
+def _report_sections(report: dict) -> list[dict]:
+    """
+    Build the section group for one report: header, Findings chips (if any),
+    description/transcription, and image. No interpretation, no rating.
+    """
     rtype      = (report.get("report_type") or "other").lower()
     name       = report.get("report_name") or rtype.upper()
     ts         = _fmt_ist(report.get("reported_at"))
@@ -79,17 +92,28 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
 
     sections: list[dict] = []
 
-    # ── Report header ──
+    # ── Report header, merged with Findings chips when present ─────────────────
+    # Always carry at least one widget — Google Chat silently drops a section
+    # (header included) when its widgets list is empty. Folding Findings into
+    # the header section (rather than a separate "Findings" section) saves one
+    # section per report, letting more reports fit under the 10-section cap.
     title = f"🩻 {name}"
     if ts:
         title += f"  ·  {ts}"
-    header_section: dict = {"header": title, "widgets": []}
-    if has_divider:
-        header_section["hasDivider"] = True
-    sections.append(header_section)
+    findings = report.get("findings") or []
+    if findings and not is_xray:
+        chips = []
+        for f in findings:
+            sev = (f.get("severity") or "routine").lower()
+            emoji = _SEVERITY_EMOJI.get(sev, "•")
+            chips.append({"label": f"{emoji} {f.get('label', '')}"})
+        header_widgets = [{"chipList": {"chips": chips}}]
+    else:
+        header_widgets = [{"divider": {}}]
+    sections.append({"header": title, "widgets": header_widgets})
 
     if is_xray:
-        # X-rays: image only — no LLM interpretation, findings, description, or rating
+        # X-rays: image only — no findings or description to show
         if image_urls:
             sections.append({
                 "header": "🖼️ X-ray image",
@@ -100,36 +124,21 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
             })
         return sections
 
-    # ── Non-X-ray: full interpretation card ──
-    interp      = report.get("interpretation") or "(no interpretation produced)"
     description = report.get("description") or "(no description produced)"
-    findings    = report.get("findings") or []
+    interpretation = (report.get("interpretation") or "").strip()
 
-    sections.append({
-        "header": "Interpretation",
-        "widgets": [{"decoratedText": {
-            "startIcon": {"materialIcon": {"name": "clinical_notes"}},
-            "text": interp,
-            "wrapText": True,
-        }}],
-    })
-
-    if findings:
-        chips = []
-        for f in findings:
-            sev = (f.get("severity") or "routine").lower()
-            emoji = _SEVERITY_EMOJI.get(sev, "•")
-            chips.append({"label": f"{emoji} {f.get('label', '')}"})
-        sections.append({
-            "header": "Findings",
-            "widgets": [{"chipList": {"chips": chips}}],
-        })
+    # Interpretation folds into the same accordion as the raw transcription
+    # instead of getting its own section — no separate "Interpretation"
+    # section, but the model's read is still one tap away.
+    body_text = description
+    if interpretation:
+        body_text += f"\n\n<b>Interpretation:</b>\n{interpretation}"
 
     sections.append({
         "header": "📄 Description / transcription",
         "collapsible": True,
         "uncollapsibleWidgetsCount": 0,
-        "widgets": [{"textParagraph": {"text": description}}],
+        "widgets": [{"textParagraph": {"text": body_text}}],
     })
 
     if image_urls:
@@ -143,109 +152,91 @@ def _report_sections(report: dict, gchat_webhook_url: str, callback_url: str,
             ],
         })
 
-    sections.append({
-        "header": f"{_RATING_PREFIX} {name}",
-        "widgets": [
-            {"selectionInput": {
-                "name": "rating",
-                "label": "How accurate / useful is this interpretation?",
-                "type": "RADIO_BUTTON",
-                "items": [
-                    {"text": "⭐ 1 — Not useful at all",    "value": "1"},
-                    {"text": "⭐⭐ 2 — Mostly not useful",   "value": "2"},
-                    {"text": "⭐⭐⭐ 3 — Borderline",          "value": "3"},
-                    {"text": "⭐⭐⭐⭐ 4 — Mostly useful",     "value": "4"},
-                    {"text": "⭐⭐⭐⭐⭐ 5 — Very useful",     "value": "5"},
-                ],
-            }},
-            {"textInput": {
-                "name": "feedback_text",
-                "label": "Optional note about your rating",
-                "type": "MULTIPLE_LINE",
-            }},
-            {"buttonList": {"buttons": [{
-                "text": "Submit feedback",
-                "type": "FILLED",
-                "icon": {"materialIcon": {"name": "send"}},
-                "onClick": {"action": {
-                    "function": gchat_webhook_url,
-                    "parameters": [
-                        {"key": "action",       "value": "report_feedback_submit"},
-                        {"key": "report_id",    "value": report_id},
-                        {"key": "callback_url", "value": callback_url},
-                        {"key": "cb_token",     "value": cb_token},
-                    ],
-                }},
-            }]}},
-        ],
-    })
-
     return sections
 
 
-def build_report_interpret_card(
+def build_report_interpret_cards(
     cpmrn: str,
     encounter: int,
     batch_id: str,
-    report: dict,
-    gchat_webhook_url: str,
-    callback_url: str,
-    cb_token: str,
+    reports: list[dict],
     patient_narrative: str = "",
-) -> list:
+) -> list[list]:
     """
-    Build the cardsV2 list for a single report. Google Chat caps sections at 10 per card;
-    callers must send one card per report rather than batching multiple reports into one card.
+    Build one or more cardsV2 payloads covering all `reports`, packing as many
+    reports as fit into each card under Google Chat's ~10-section limit.
 
-    `report` is a dict: {report_id, report_type, report_name, reported_at, interpretation,
-     description, findings, image_urls}.
-    `patient_narrative` is the running clinical summary shown in the Patient section.
+    Returns a list of cardsV2 payloads — send each as a separate Chat message.
+    A batch of 5 small reports typically becomes 2-3 messages instead of 5.
+
+    `report` dicts: {report_id, report_type, report_name, reported_at,
+     description, findings, image_urls}. `patient_narrative` is the running
+    clinical summary shown once per card in the Patient section.
     """
-    rtype      = (report.get("report_type") or "").lower()
-    rname      = report.get("report_name") or ""
-    dtype      = _display_type(rtype, rname)
-    is_xray    = rtype == "xray"
+    if not reports:
+        return []
 
-    sections: list[dict] = []
+    per_report_sections = [(_report_sections(r), r) for r in reports]
 
-    # ── Patient context + Open patient ──
-    blurb = patient_narrative.strip() if patient_narrative else ""
-    if not blurb:
-        blurb = (
-            "New diagnostic report resulted. "
-            "Interpretation in context below; expand for the source image."
-            if not is_xray else
-            "New diagnostic report resulted."
-        )
-    sections.append({
-        "header": "Patient",
-        "widgets": [
-            {"textParagraph": {"text": blurb}},
-            {"buttonList": {"buttons": [{
-                "text": "Open patient",
-                "icon": {"materialIcon": {"name": "open_in_new"}},
-                "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
-            }]}},
-        ],
-    })
+    shared_section_count = 1  # the "Patient" section, once per card
+    budget = max(_MAX_SECTIONS_PER_CARD - shared_section_count, 1)
 
-    sections.extend(_report_sections(
-        report, gchat_webhook_url, callback_url, cb_token, has_divider=False,
-    ))
+    groups: list[list[tuple[list[dict], dict]]] = []
+    current: list[tuple[list[dict], dict]] = []
+    current_count = 0
+    for sections, r in per_report_sections:
+        n = len(sections)
+        if current and current_count + n > budget:
+            groups.append(current)
+            current, current_count = [], 0
+        current.append((sections, r))
+        current_count += n
+    if current:
+        groups.append(current)
 
-    report_id = report.get("report_id", batch_id)
-    return [{
-        "cardId": f"cds-report-interpret-{report_id}",
-        "card": {
-            "header": {
-                "title": f"🩻 New {dtype} resulted",
-                "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
-                "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/document_scanner/default/48px.svg",
-                "imageType": "CIRCLE",
+    blurb = patient_narrative.strip() or "New diagnostic report(s) resulted."
+    total = len(groups)
+    cards: list[list] = []
+    for gi, group in enumerate(groups):
+        group_reports = [r for _, r in group]
+        if len(group_reports) == 1:
+            rtype = (group_reports[0].get("report_type") or "").lower()
+            rname = group_reports[0].get("report_name") or ""
+            title = f"🩻 New {_display_type(rtype, rname)} resulted"
+        else:
+            title = f"🩻 {len(group_reports)} new reports resulted"
+        if total > 1:
+            title += f"  ({gi + 1}/{total})"
+
+        sections: list[dict] = [{
+            "header": "Patient",
+            "widgets": [
+                {"textParagraph": {"text": blurb}},
+                {"buttonList": {"buttons": [{
+                    "text": "Open patient",
+                    "icon": {"materialIcon": {"name": "open_in_new"}},
+                    "onClick": {"openLink": {"url": f"{_CHART_BASE}/{cpmrn}/{encounter}"}},
+                }]}},
+            ],
+        }]
+        for report_sections, _ in group:
+            sections.extend(report_sections)
+
+        first_report_id = group_reports[0].get("report_id", batch_id)
+        cards.append([{
+            "cardId": f"cds-report-interpret-{batch_id}-{gi}-{first_report_id}",
+            "card": {
+                "header": {
+                    "title": title,
+                    "subtitle": f"{cpmrn}  ·  Encounter {encounter}",
+                    "imageUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/document_scanner/default/48px.svg",
+                    "imageType": "CIRCLE",
+                },
+                "sections": sections,
             },
-            "sections": sections,
-        },
-    }]
+        }])
+
+    return cards
 
 
 def replace_rating_section_with_status(cards_v2: list, report_id: str, status_text: str) -> list:
