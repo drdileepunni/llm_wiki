@@ -827,8 +827,6 @@ def _is_glucose_next_check(overdue_item: dict) -> bool:
     return any(kw in key for kw in _GLUCOSE_LAB_KEYWORDS)
 
 
-_CARE_GAP_COOLDOWN_H = 4  # minimum hours between repeat care-gap alerts for the same missing check
-
 
 def _care_gap_detail_lines(cpmrn: str, o: dict, now: datetime) -> list[str]:
     """
@@ -913,8 +911,13 @@ def _send_missing_care_gap_alerts(
     this cycle. Never forces an expensive LLM run; this is a fire-and-forget
     notification only.
 
-    Subject to a per-check cooldown (next_check.last_care_gap_alert_at) so a
-    chronically-missing item doesn't re-alert on every pipeline tick.
+    One-shot only: once a care-gap alert has been sent for a given watch target
+    (next_check.last_care_gap_alert_at gets set), it never fires again for that
+    same target — no repeat nagging every few hours. If the watched value still
+    hasn't shown up, that's left for the clinician to notice; the pipeline moves
+    on. A genuinely NEW watch target (different key/type) still gets its own
+    one-time alert — see the key/type match guard in _upsert_problem that
+    preserves this timestamp only when the watch target is unchanged.
     """
     if not missing:
         return
@@ -923,17 +926,8 @@ def _send_missing_care_gap_alerts(
     for o in missing:
         doc = o.get("doc") or {}
         nc = doc.get("next_check") or {}
-        last_sent = nc.get("last_care_gap_alert_at")
-        if isinstance(last_sent, str):
-            try:
-                last_sent = datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
-            except ValueError:
-                last_sent = None
-        if isinstance(last_sent, datetime):
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=timezone.utc)
-            if now - last_sent < timedelta(hours=_CARE_GAP_COOLDOWN_H):
-                continue
+        if nc.get("last_care_gap_alert_at"):
+            continue  # already alerted once for this watch target — never again
         _due_for_alert.append(o)
 
     if not _due_for_alert:

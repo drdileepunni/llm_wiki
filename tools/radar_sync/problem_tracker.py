@@ -1445,6 +1445,16 @@ def _upsert_problem(
             "type":      nc_type,
             "due_after": due_after,
         }
+        # Preserve the care-gap alert cooldown timestamp when this run is still
+        # watching the SAME key/type as before — otherwise every reassessment
+        # (even ones triggered by an unrelated problem on the same patient)
+        # silently wipes it, since $set replaces the whole next_check subdocument.
+        # A genuinely new watch target (different key/type) should NOT inherit it.
+        _prev_nc = prev_doc.get("next_check") or {}
+        if _prev_nc.get("key") == nc_key and _prev_nc.get("type") == nc_type:
+            _prev_care_gap_alert_at = _prev_nc.get("last_care_gap_alert_at")
+            if _prev_care_gap_alert_at:
+                next_check["last_care_gap_alert_at"] = _prev_care_gap_alert_at
     else:
         # No next_check — stable/improving/resolved; clear any stored window.
         # Still compute backoff variables so set_fields below can reference them.
