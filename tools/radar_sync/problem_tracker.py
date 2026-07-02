@@ -2423,7 +2423,7 @@ def overdue_next_checks(
 
     docs = list(db["patient_problems"].find(
         {"CPMRN": cpmrn, "encounter": encounter, "next_check": {"$ne": None}},
-        {"problem_name": 1, "next_check": 1, "clinical_status": 1},
+        {"problem_name": 1, "next_check": 1, "clinical_status": 1, "addressed_evidence": 1},
     ))
 
     overdue = []
@@ -3379,16 +3379,19 @@ def track_problems(
             from backend.services.bq_store import get_bq_store
             bq = get_bq_store()
             for assessment, alert_id in to_alert:
+                _pname = assessment.get("problem_name", "")
                 bq.insert_alert({
                     "alert_id":     alert_id,
                     "CPMRN":        cpmrn,
                     "encounter":    encounter,
-                    "problem_name": assessment.get("problem_name", ""),
+                    "problem_name": _pname,
                     "alert_title":        assessment.get("alert_title", ""),
                     "alert_reason":       assessment.get("alert_reason", ""),
                     "note_vs_objective":  assessment.get("note_vs_objective", ""),
                     "alerted_at":         now,
                     "match_status": "pending",
+                    "alert_source": "llm_reasoned",
+                    "protocol_ids": _problem_audit.get(_pname, {}).get("protocol_ids") or [],
                 })
         except Exception:
             logger.exception("problem_tracker: study_alerts BQ write failed for %s", cpmrn)

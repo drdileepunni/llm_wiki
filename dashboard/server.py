@@ -14,6 +14,8 @@ from .metrics import (
     get_summary, get_timeseries, get_by_problem,
     get_by_rater, get_cost, get_comments, get_ratings_per_alert,
     get_alerts_per_run, get_runs, get_run_patient_audit,
+    get_study_summary, get_alerts_by_protocol, get_monitoring_by_protocol,
+    get_cost_by_tier, get_daily_cost_per_patient,
 )
 from .audit import get_active_next_checks, get_documentation_audits, get_patient_detail
 from .agreement import compute_agreement
@@ -126,6 +128,46 @@ def create_app() -> Flask:
             return _ok(get_runs(*_date_params()))
         except Exception as e:
             log.exception("api_runs failed")
+            return _err(e)
+
+    @app.route("/api/metrics/study-summary")
+    def api_study_summary():
+        try:
+            return _ok(get_study_summary(*_date_params()))
+        except Exception as e:
+            log.exception("api_study_summary failed")
+            return _err(e)
+
+    @app.route("/api/metrics/alerts-by-protocol")
+    def api_alerts_by_protocol():
+        try:
+            return _ok(get_alerts_by_protocol(*_date_params()))
+        except Exception as e:
+            log.exception("api_alerts_by_protocol failed")
+            return _err(e)
+
+    @app.route("/api/metrics/monitoring-by-protocol")
+    def api_monitoring_by_protocol():
+        try:
+            return _ok(get_monitoring_by_protocol(*_date_params()))
+        except Exception as e:
+            log.exception("api_monitoring_by_protocol failed")
+            return _err(e)
+
+    @app.route("/api/metrics/cost-by-tier")
+    def api_cost_by_tier():
+        try:
+            return _ok(get_cost_by_tier(*_date_params()))
+        except Exception as e:
+            log.exception("api_cost_by_tier failed")
+            return _err(e)
+
+    @app.route("/api/metrics/daily-cost-per-patient")
+    def api_daily_cost_per_patient():
+        try:
+            return _ok(get_daily_cost_per_patient(*_date_params()))
+        except Exception as e:
+            log.exception("api_daily_cost_per_patient failed")
             return _err(e)
 
     @app.route("/api/metrics/run-audit")

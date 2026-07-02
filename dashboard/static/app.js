@@ -433,6 +433,153 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function showDashSection(name, linkEl) {
+  ['quality', 'study'].forEach(s => {
+    document.getElementById('dash-section-' + s)?.classList.toggle('d-none', s !== name);
+  });
+  linkEl?.parentElement?.parentElement?.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  linkEl?.classList.add('active');
+}
+
+// ── study metrics ────────────────────────────────────────────────────────────
+function protocolLabel(pid) {
+  return pid === 'none' ? 'none (model reasoning)' : pid;
+}
+
+async function loadStudySummary() {
+  try {
+    const d = await apiFetch('/api/metrics/study-summary' + dateParams());
+    document.getElementById('kpi-study-patients').textContent = fmt(d.patients_monitored);
+    document.getElementById('kpi-study-resolved').textContent = fmt(d.resolved_without_alert);
+    document.getElementById('kpi-study-resolved-pct').textContent =
+      d.resolutions_total ? pct(d.resolved_without_alert_pct) + ' of ' + fmt(d.resolutions_total) + ' resolved' : '';
+    document.getElementById('kpi-study-llm-alerts').textContent = fmt(d.llm_alerts);
+    document.getElementById('kpi-study-caregap-alerts').textContent = fmt(d.care_gap_alerts);
+  } catch (e) { console.error('loadStudySummary', e); }
+}
+
+async function loadCostByTier() {
+  try {
+    const d = await apiFetch('/api/metrics/cost-by-tier' + dateParams());
+    document.getElementById('kpi-study-cost-expensive').textContent = usdShort(d.avg_cost_per_expensive_run);
+    document.getElementById('kpi-study-expensive-count').textContent = fmt(d.expensive_run_count) + ' expensive run(s)';
+    document.getElementById('kpi-study-cost-cheap').textContent = usdShort(d.avg_cost_per_cheap_run);
+    document.getElementById('kpi-study-cheap-count').textContent = fmt(d.cheap_run_count) + ' cheap run(s)';
+  } catch (e) { console.error('loadCostByTier', e); }
+}
+
+let _lastAlertsByProtocol = [];
+let _lastMonitoringByProtocol = [];
+
+function renderProtocolBreakdown() {
+  const monitored = {};
+  _lastMonitoringByProtocol.forEach(r => { monitored[r.protocol_id] = r.problem_count; });
+  const llmAlerts = {};
+  const gapAlerts = {};
+  _lastAlertsByProtocol.forEach(r => {
+    const bucket = r.alert_source === 'care_gap_shortcut' ? gapAlerts : llmAlerts;
+    bucket[r.protocol_id] = (bucket[r.protocol_id] || 0) + r.alert_count;
+  });
+  const ids = Array.from(new Set([
+    ...Object.keys(monitored), ...Object.keys(llmAlerts), ...Object.keys(gapAlerts),
+  ])).sort((a, b) => (monitored[b] || 0) - (monitored[a] || 0));
+
+  const tbody = document.querySelector('#tbl-protocol-breakdown tbody');
+  tbody.innerHTML = ids.length ? ids.map(pid => {
+    const m = monitored[pid] || 0;
+    const la = llmAlerts[pid] || 0;
+    const ga = gapAlerts[pid] || 0;
+    const rate = m ? ((la + ga) / m * 100).toFixed(1) + '%' : '—';
+    return `<tr>
+      <td>${escHtml(protocolLabel(pid))}</td>
+      <td class="text-end">${fmt(m)}</td>
+      <td class="text-end">${fmt(la)}</td>
+      <td class="text-end">${fmt(ga)}</td>
+      <td class="text-end">${rate}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" class="text-muted text-center py-3">No data for this range</td></tr>';
+}
+
+async function loadAlertsByProtocol() {
+  try {
+    const d = await apiFetch('/api/metrics/alerts-by-protocol' + dateParams());
+    _lastAlertsByProtocol = d;
+    const totals = {};
+    d.forEach(r => { totals[r.protocol_id] = (totals[r.protocol_id] || 0) + r.alert_count; });
+    const labels = Object.keys(totals).sort((a, b) => totals[b] - totals[a]);
+    destroyChart('alertsByProtocol');
+    const ctx = document.getElementById('chart-alerts-by-protocol').getContext('2d');
+    charts['alertsByProtocol'] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels.map(protocolLabel),
+        datasets: [{ label: 'Alerts', data: labels.map(l => totals[l]), backgroundColor: '#0d6efd', borderRadius: 3 }],
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } },
+      },
+    });
+    renderProtocolBreakdown();
+  } catch (e) { console.error('loadAlertsByProtocol', e); }
+}
+
+async function loadMonitoringByProtocol() {
+  try {
+    const d = await apiFetch('/api/metrics/monitoring-by-protocol' + dateParams());
+    _lastMonitoringByProtocol = d;
+    destroyChart('monitoringByProtocol');
+    const ctx = document.getElementById('chart-monitoring-by-protocol').getContext('2d');
+    charts['monitoringByProtocol'] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: d.map(r => protocolLabel(r.protocol_id)),
+        datasets: [{ label: 'Monitored problems', data: d.map(r => r.problem_count), backgroundColor: '#20c997', borderRadius: 3 }],
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } },
+      },
+    });
+    renderProtocolBreakdown();
+  } catch (e) { console.error('loadMonitoringByProtocol', e); }
+}
+
+async function loadDailyCostPerPatient() {
+  try {
+    const d = await apiFetch('/api/metrics/daily-cost-per-patient' + dateParams());
+    destroyChart('dailyCostPerPatient');
+    const ctx = document.getElementById('chart-daily-cost-per-patient').getContext('2d');
+    charts['dailyCostPerPatient'] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: d.map(r => r.day),
+        datasets: [{
+          label: 'Est. cost / patient',
+          data: d.map(r => r.estimated_cost_per_patient),
+          borderColor: '#fd7e14', backgroundColor: 'rgba(253,126,20,0.1)',
+          fill: true, tension: 0.2, pointRadius: 3,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true }, x: { ticks: { maxTicksLimit: 12, maxRotation: 30 } } },
+      },
+    });
+  } catch (e) { console.error('loadDailyCostPerPatient', e); }
+}
+
+async function loadStudyMetrics() {
+  await Promise.all([
+    loadStudySummary(), loadCostByTier(),
+    loadAlertsByProtocol(), loadMonitoringByProtocol(),
+    loadDailyCostPerPatient(),
+  ]);
+}
+
 async function loadAll() {
   if (window.PAGE !== 'dashboard') return;
   const ts = new Date().toLocaleTimeString();
@@ -441,6 +588,7 @@ async function loadAll() {
   await Promise.all([
     loadSummary(), loadTimeseries(), loadAlertsPerRun(),
     loadCost(), loadRaters(), loadAgreement(), loadComments(),
+    loadStudyMetrics(),
   ]);
   if (el) el.textContent = 'Updated ' + ts;
 }

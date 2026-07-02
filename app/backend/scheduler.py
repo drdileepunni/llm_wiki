@@ -830,6 +830,74 @@ def _is_glucose_next_check(overdue_item: dict) -> bool:
 _CARE_GAP_COOLDOWN_H = 4  # minimum hours between repeat care-gap alerts for the same missing check
 
 
+def _care_gap_detail_lines(cpmrn: str, o: dict, now: datetime) -> list[str]:
+    """
+    Build the human-readable detail lines for a care-gap alert: last known reading
+    (value + when), the expected-by deadline, and the documented plan if any — so
+    the card answers "what was measured, when, what's expected, what's missing"
+    instead of just naming the missing check.
+    """
+    from tools.radar_sync.summary_updater import _to_ist
+
+    nc_type   = o.get("type", "")
+    nc_key    = o.get("key", "")
+    label     = o.get("label") or nc_key or nc_type or "check"
+    due_after = o.get("due_after")
+    doc       = o.get("doc") or {}
+    lines: list[str] = []
+
+    # Last known reading — live lookup, not the value from when the check was set.
+    try:
+        value, ts_raw = None, None
+        if nc_type == "vital":
+            from backend.services.emr.patient import get_latest_vitals
+            vitals = get_latest_vitals(cpmrn)
+            ts_raw = vitals.get("timestamp")
+            for k, v in vitals.items():
+                if k.lower() == (nc_key or label).lower() and v is not None:
+                    value = v
+                    break
+        elif nc_type == "lab":
+            from backend.services.emr.patient import get_latest_labs
+            test_name = label or nc_key
+            labs = get_latest_labs(cpmrn, tests=[test_name] if test_name else None)
+            entry = (labs.get("labs") or {}).get(test_name)
+            if entry:
+                value, ts_raw = entry.get("value"), entry.get("reportedAt")
+
+        if value is not None and ts_raw:
+            age_str = ""
+            try:
+                import pandas as pd
+                ts_dt = pd.to_datetime(ts_raw, utc=True).to_pydatetime()
+                hours_ago = (now - ts_dt).total_seconds() / 3600
+                if hours_ago >= 0:
+                    age_str = f", {hours_ago:.1f}h ago"
+            except Exception:
+                pass
+            lines.append(f"Last known {label}: {value} — recorded {_to_ist(ts_raw)}{age_str}.")
+        else:
+            lines.append(f"No {label} reading found in the chart at all — nothing has ever been recorded for this check.")
+    except Exception:
+        logger.exception("pipeline: care-gap last-reading lookup failed for %s (%s/%s)", cpmrn, nc_type, nc_key)
+
+    if isinstance(due_after, datetime):
+        overdue_h = (now - due_after).total_seconds() / 3600
+        lines.append(
+            f"A follow-up {label} check was expected by {_to_ist(due_after)} "
+            f"— now {overdue_h:.1f}h overdue."
+        )
+
+    plan = doc.get("addressed_evidence")
+    if plan and plan.strip() and plan.strip().lower() not in ("no plan documented", "not specified"):
+        plan_text = plan.strip()
+        if not plan_text.endswith((".", "!", "?")):
+            plan_text += "."
+        lines.append(f"Documented plan: {plan_text}")
+
+    return lines
+
+
 def _send_missing_care_gap_alerts(
     cpmrn: str,
     encounter: int,
@@ -884,16 +952,17 @@ def _send_missing_care_gap_alerts(
             pname = o.get("problem_name", "Unknown problem")
             label = o.get("label") or o.get("key") or o.get("type") or "check"
             clinical_status = (o.get("doc") or {}).get("clinical_status", "")
+            detail_lines = _care_gap_detail_lines(cpmrn, o, now)
+            alert_reason = (
+                " ".join(detail_lines) + " " if detail_lines else ""
+            ) + f"No new {label} data has been charted since the check window opened. Please document or perform the check."
             care_gap_alerts.append(({
                 "problem_name":    pname,
                 "clinical_status": clinical_status,
                 "should_alert":    True,
                 "being_addressed": False,
                 "alert_title":     f"Care gap — {pname}",
-                "alert_reason": (
-                    f"Expected {label} check is overdue and no new {label} data has been "
-                    f"charted since the check window opened. Please document or perform the check."
-                ),
+                "alert_reason":    alert_reason,
                 "note_vs_objective": "",
             }, _uuid.uuid4().hex))
 
@@ -902,6 +971,37 @@ def _send_missing_care_gap_alerts(
             ctx.get("structured_summary") or {},
             recipients,
         )
+        try:
+            from backend.services.bq_store import get_bq_store
+            from tools.radar_sync.protocol_engine import load_protocols, match_for_gate, match_for_guidance
+            bq = get_bq_store()
+            _protocols = load_protocols(db)
+            for assessment, alert_id in care_gap_alerts:
+                _pname = assessment.get("problem_name", "")
+                _prob = {"name": _pname}
+                _gate_match = match_for_gate(_protocols, [_prob])
+                _guidance_matches = match_for_guidance(_protocols, [_prob])
+                _gate_proto = _gate_match.get(_pname)
+                _protocol_ids = sorted({
+                    p["protocol_id"]
+                    for p in ([_gate_proto] if _gate_proto else []) + _guidance_matches
+                    if p.get("applies_when")
+                })
+                bq.insert_alert({
+                    "alert_id":     alert_id,
+                    "CPMRN":        cpmrn,
+                    "encounter":    encounter,
+                    "problem_name": _pname,
+                    "alert_title":        assessment.get("alert_title", ""),
+                    "alert_reason":       assessment.get("alert_reason", ""),
+                    "note_vs_objective":  assessment.get("note_vs_objective", ""),
+                    "alerted_at":         now,
+                    "match_status": "pending",
+                    "alert_source": "care_gap_shortcut",
+                    "protocol_ids": _protocol_ids,
+                })
+        except Exception:
+            logger.exception("pipeline: care-gap study_alerts BQ write failed for %s enc=%d", cpmrn, encounter)
         for o in _due_for_alert:
             db["patient_problems"].update_one(
                 {"CPMRN": cpmrn, "encounter": encounter, "problem_name": o.get("problem_name")},

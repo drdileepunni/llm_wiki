@@ -19,6 +19,22 @@
   <span id="last-updated" class="text-muted small ms-auto"></span>
 </div>
 
+<!-- section switcher — keeps the study metrics from crowding the existing charts -->
+<ul class="nav nav-pills mb-3">
+  <li class="nav-item">
+    <a class="nav-link active" href="#" onclick="showDashSection('quality', this); return false;">
+      <i class="bi bi-star-half me-1"></i>Alert Quality &amp; Cost
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="#" onclick="showDashSection('study', this); return false;">
+      <i class="bi bi-clipboard-data me-1"></i>Study Metrics
+    </a>
+  </li>
+</ul>
+
+<div id="dash-section-quality">
+
 <!-- KPI row 1: alert performance -->
 <div class="row g-3 mb-3" id="kpi-alerts">
   <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
@@ -168,6 +184,106 @@
     </div>
   </div>
 </div>
+
+</div> <!-- /dash-section-quality -->
+
+<div id="dash-section-study" class="d-none">
+
+<!-- KPI row: study summary -->
+<div class="row g-3 mb-3" id="kpi-study">
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Patients Monitored</div>
+    <div class="kpi-value" id="kpi-study-patients">—</div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Resolved w/o Alert</div>
+    <div class="kpi-value" id="kpi-study-resolved">—</div>
+    <div class="kpi-sub" id="kpi-study-resolved-pct"></div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">LLM Alerts</div>
+    <div class="kpi-value" id="kpi-study-llm-alerts">—</div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card h-100"><div class="card-body">
+    <div class="kpi-label">Care-gap Alerts</div>
+    <div class="kpi-value" id="kpi-study-caregap-alerts">—</div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Cost / Expensive Run</div>
+    <div class="kpi-value" id="kpi-study-cost-expensive">—</div>
+    <div class="kpi-sub" id="kpi-study-expensive-count"></div>
+  </div></div></div>
+  <div class="col-6 col-md"><div class="card kpi-card kpi-card--cost h-100"><div class="card-body">
+    <div class="kpi-label">Cost / Cheap Run</div>
+    <div class="kpi-value" id="kpi-study-cost-cheap">—</div>
+    <div class="kpi-sub" id="kpi-study-cheap-count"></div>
+  </div></div></div>
+</div>
+<div class="text-muted small mb-3">
+  <i class="bi bi-info-circle me-1"></i>Alert source, protocol identity, and silent-resolution tracking only started being recorded recently — counts for dates before that will read low, not zero-activity.
+</div>
+
+<!-- Charts: alerts / monitoring by protocol -->
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">Alerts by Protocol</div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-alerts-by-protocol"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header card-header-sm">Monitored Problems by Protocol</div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-monitoring-by-protocol"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Per-protocol breakdown table -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header card-header-sm">Protocol Breakdown — Monitoring vs. Alerting</div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0" id="tbl-protocol-breakdown">
+          <thead><tr>
+            <th>Protocol</th>
+            <th class="text-end">Monitored Problems</th>
+            <th class="text-end">LLM Alerts</th>
+            <th class="text-end">Care-gap Alerts</th>
+            <th class="text-end">Alert Rate</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Daily cost per patient (estimate) -->
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header card-header-sm">Estimated Cost per Patient per Day</div>
+      <div class="card-body chart-wrap">
+        <canvas id="chart-daily-cost-per-patient"></canvas>
+      </div>
+      <div class="card-body pt-0">
+        <div class="text-muted small">
+          <i class="bi bi-info-circle me-1"></i>Estimate only — LLM cost is billed per pipeline run
+          (batched across all patients touched that run), not itemized per patient. This is total
+          run cost that day divided evenly by distinct patients monitored that day.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div> <!-- /dash-section-study -->
 {% endblock %}
 
 {% block scripts %}

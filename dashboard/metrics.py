@@ -454,6 +454,178 @@ def get_comments(limit: int = 50, from_date: str | None = None, to_date: str | N
     ]
 
 
+# ── study metrics (protocol persistence + resolution outcomes) ─────────────────
+#
+# NOTE: alert_source, protocol_ids (on study_alerts), and problem_resolution_events
+# only started being written from the session that added them — any date range
+# spanning earlier data will undercount these fields, not because nothing happened
+# but because it wasn't recorded yet.
+
+_PATIENT_KEY = "CONCAT(CPMRN, '#', CAST(encounter AS STRING))"
+
+
+def get_study_summary(from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
+    """Top-line counts for the research study: monitoring volume, silent resolutions, alert mix."""
+    runs_filter  = _date_clause("run_started_at", from_date, to_date)
+    res_filter   = _date_clause("resolved_at", from_date, to_date)
+    alert_filter = _date_clause("alerted_at", from_date, to_date)
+
+    sql = f"""
+    WITH patients AS (
+        SELECT DISTINCT {_PATIENT_KEY} AS patient_key
+        FROM {fqn("pipeline_patient_runs")}
+        WHERE 1=1 {runs_filter}
+    ),
+    resolutions AS (
+        SELECT was_ever_alerted
+        FROM {fqn("problem_resolution_events")}
+        WHERE 1=1 {res_filter}
+    ),
+    alerts AS (
+        SELECT alert_id, COALESCE(alert_source, 'llm_reasoned') AS alert_source
+        FROM {fqn("study_alerts")}
+        WHERE 1=1 {alert_filter}
+    )
+    SELECT
+        (SELECT COUNT(*) FROM patients)                                          AS patients_monitored,
+        (SELECT COUNT(*) FROM resolutions)                                       AS resolutions_total,
+        (SELECT COUNTIF(NOT was_ever_alerted) FROM resolutions)                  AS resolved_without_alert,
+        (SELECT COUNT(DISTINCT alert_id) FROM alerts WHERE alert_source = 'llm_reasoned')     AS llm_alerts,
+        (SELECT COUNT(DISTINCT alert_id) FROM alerts WHERE alert_source = 'care_gap_shortcut') AS care_gap_alerts
+    """
+    rows = query(sql)
+    row = rows[0] if rows else {}
+    resolutions_total     = int(row.get("resolutions_total") or 0)
+    resolved_without_alert = int(row.get("resolved_without_alert") or 0)
+    return {
+        "patients_monitored":      int(row.get("patients_monitored") or 0),
+        "resolutions_total":       resolutions_total,
+        "resolved_without_alert":  resolved_without_alert,
+        "resolved_without_alert_pct": round(resolved_without_alert / resolutions_total * 100, 1) if resolutions_total else 0,
+        "llm_alerts":              int(row.get("llm_alerts") or 0),
+        "care_gap_alerts":         int(row.get("care_gap_alerts") or 0),
+    }
+
+
+def get_alerts_by_protocol(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
+    """Alert counts grouped by matched protocol_id. 'none' = no seeded protocol matched (pure model reasoning)."""
+    date_filter = _date_clause("alerted_at", from_date, to_date)
+    sql = f"""
+    SELECT
+        IF(pid = '', 'none', pid) AS protocol_id,
+        COALESCE(alert_source, 'llm_reasoned') AS alert_source,
+        COUNT(DISTINCT alert_id) AS alert_count
+    FROM {fqn("study_alerts")},
+        UNNEST(IF(protocol_ids IS NULL OR protocol_ids = '', [''], SPLIT(protocol_ids, ','))) AS pid
+    WHERE 1=1 {date_filter}
+    GROUP BY 1, 2
+    ORDER BY alert_count DESC
+    """
+    rows = query(sql)
+    return [
+        {
+            "protocol_id":  r.get("protocol_id", "none"),
+            "alert_source": r.get("alert_source", "llm_reasoned"),
+            "alert_count":  int(r.get("alert_count") or 0),
+        }
+        for r in rows
+    ]
+
+
+def get_monitoring_by_protocol(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
+    """Distinct monitored problems grouped by matched protocol_id."""
+    date_filter = _date_clause("run_started_at", from_date, to_date)
+    sql = f"""
+    SELECT
+        IF(pid = '', 'none', pid) AS protocol_id,
+        COUNT(DISTINCT CONCAT(CPMRN, '#', CAST(encounter AS STRING), '#', problem_name)) AS problem_count
+    FROM {fqn("patient_next_checks")},
+        UNNEST(IF(protocol_ids IS NULL OR protocol_ids = '', [''], SPLIT(protocol_ids, ','))) AS pid
+    WHERE 1=1 {date_filter}
+    GROUP BY 1
+    ORDER BY problem_count DESC
+    """
+    rows = query(sql)
+    return [
+        {"protocol_id": r.get("protocol_id", "none"), "problem_count": int(r.get("problem_count") or 0)}
+        for r in rows
+    ]
+
+
+def get_cost_by_tier(from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
+    """
+    Weighted-average cost for expensive vs. cheap pipeline runs across the date range,
+    derived from pipeline_run_costs.patient_tiers (JSON: expensive_count, cheap_count,
+    avg_cost_expensive_usd, avg_cost_cheap_usd per run).
+    """
+    date_filter = _date_clause("run_started_at", from_date, to_date)
+    rows = query(f"""
+    SELECT patient_tiers
+    FROM {fqn("pipeline_run_costs")}
+    WHERE 1=1 {date_filter}
+    """)
+    exp_cost = exp_count = cheap_cost = cheap_count = 0.0
+    for r in rows:
+        tiers = parse_json_col(r.get("patient_tiers"))
+        if not tiers:
+            continue
+        ec = float(tiers.get("expensive_count") or 0)
+        cc = float(tiers.get("cheap_count") or 0)
+        exp_cost   += float(tiers.get("avg_cost_expensive_usd") or 0) * ec
+        exp_count  += ec
+        cheap_cost += float(tiers.get("avg_cost_cheap_usd") or 0) * cc
+        cheap_count += cc
+    return {
+        "expensive_run_count":    int(exp_count),
+        "avg_cost_per_expensive_run": round(exp_cost / exp_count, 6) if exp_count else 0,
+        "cheap_run_count":        int(cheap_count),
+        "avg_cost_per_cheap_run": round(cheap_cost / cheap_count, 6) if cheap_count else 0,
+    }
+
+
+def get_daily_cost_per_patient(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
+    """
+    Estimated per-patient-per-day cost: total run cost that day / distinct patients
+    monitored that day. This is an EVEN-SPLIT ESTIMATE, not a true per-patient
+    attribution — the underlying LLM billing is tracked per pipeline run (batched
+    across all patients touched that run), not itemized per patient.
+    """
+    cost_filter    = _date_clause("run_started_at", from_date, to_date)
+    patient_filter = _date_clause("run_started_at", from_date, to_date)
+
+    cost_rows = query(f"""
+    SELECT DATE(run_started_at) AS day, totals
+    FROM {fqn("pipeline_run_costs")}
+    WHERE 1=1 {cost_filter}
+    """)
+    daily_cost: dict[str, float] = {}
+    for r in cost_rows:
+        day = str(r.get("day"))
+        totals = parse_json_col(r.get("totals"))
+        daily_cost[day] = daily_cost.get(day, 0.0) + float(totals.get("cost_usd") or 0)
+
+    patient_rows = query(f"""
+    SELECT DATE(run_started_at) AS day, COUNT(DISTINCT {_PATIENT_KEY}) AS patients
+    FROM {fqn("pipeline_patient_runs")}
+    WHERE 1=1 {patient_filter}
+    GROUP BY 1
+    """)
+    daily_patients = {str(r.get("day")): int(r.get("patients") or 0) for r in patient_rows}
+
+    days = sorted(set(daily_cost) | set(daily_patients))
+    result = []
+    for day in days:
+        cost = daily_cost.get(day, 0.0)
+        patients = daily_patients.get(day, 0)
+        result.append({
+            "day":                 day,
+            "cost_usd":            round(cost, 4),
+            "patients_monitored":  patients,
+            "estimated_cost_per_patient": round(cost / patients, 4) if patients else 0,
+        })
+    return result
+
+
 # ── raw ratings for agreement ──────────────────────────────────────────────────
 
 def get_ratings_per_alert(from_date: str | None = None, to_date: str | None = None) -> dict[str, list[int]]:

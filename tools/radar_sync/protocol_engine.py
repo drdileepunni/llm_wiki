@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,36 @@ def _problem_text(problems: list[dict]) -> str:
         if p.get("cause"):
             parts.append(str(p.get("cause")))
     return " ".join(parts).lower()
+
+
+def _keyword_hit(proto: dict, haystack: str) -> bool:
+    """True if any of the protocol's applies_when keywords appears in haystack (case-insensitive)."""
+    return any(kw.lower() in haystack for kw in (proto.get("applies_when") or []))
+
+
+def _match_first_by_section(
+    protocols: list[dict],
+    problems: list[dict],
+    has_section: "Callable[[dict], bool]",
+) -> dict[str, dict]:
+    """
+    Per-problem, first-match-wins keyword matching against protocols carrying a
+    given section. Shared by match_for_gate (scenarios/gate_question) and
+    match_for_audit (audit) — the two matchers that resolve one protocol per
+    problem, as opposed to match_for_guidance's patient-wide multi-match.
+
+    Returns {problem_name: protocol_doc}.
+    """
+    matched: dict[str, dict] = {}
+    for prob in problems:
+        name_lc = prob.get("name", "").lower()
+        for proto in protocols:
+            if not has_section(proto):
+                continue
+            if _keyword_hit(proto, name_lc):
+                matched[prob.get("name", "")] = proto
+                break
+    return matched
 
 
 def match_for_guidance(
@@ -101,8 +131,7 @@ def match_for_guidance(
             continue
 
         # Keyword trigger — empty applies_when means "global, matches every problem"
-        keywords = [kw.lower() for kw in (proto.get("applies_when") or [])]
-        if not keywords or any(kw in haystack for kw in keywords):
+        if not proto.get("applies_when") or _keyword_hit(proto, haystack):
             matched.append(proto)
             seen_ids.add(pid)
 
@@ -140,17 +169,10 @@ def match_for_gate(protocols: list[dict], problems: list[dict]) -> dict[str, dic
     (indicated by the presence of a `scenarios` list or a `gate_question`).
     Returns {problem_name: protocol_doc}.  Same first-match-wins logic as before.
     """
-    matched: dict[str, dict] = {}
-    for prob in problems:
-        name_lc = prob.get("name", "").lower()
-        for proto in protocols:
-            # Must have a permissive gate section
-            if not (proto.get("scenarios") or proto.get("gate_question")):
-                continue
-            if any(kw in name_lc for kw in proto.get("applies_when", [])):
-                matched[prob["name"]] = proto
-                break
-    return matched
+    return _match_first_by_section(
+        protocols, problems,
+        lambda p: bool(p.get("scenarios") or p.get("gate_question")),
+    )
 
 
 def _load_stored_gates(
@@ -259,16 +281,9 @@ def match_for_audit(protocols: list[dict], problems: list[dict]) -> list[tuple[d
     carrying an `audit` section.  One problem matches at most one protocol
     (first-match-wins on applies_when).
     """
-    results: list[tuple[dict, dict]] = []
-    for prob in problems:
-        name_lc = prob.get("name", "").lower()
-        for proto in protocols:
-            if not proto.get("audit"):
-                continue
-            if any(kw in name_lc for kw in proto.get("applies_when", [])):
-                results.append((prob, proto))
-                break
-    return results
+    matched = _match_first_by_section(protocols, problems, lambda p: bool(p.get("audit")))
+    by_name = {p.get("name", ""): p for p in problems}
+    return [(by_name[name], proto) for name, proto in matched.items() if name in by_name]
 
 
 # ── Combined injection entry point ────────────────────────────────────────────
