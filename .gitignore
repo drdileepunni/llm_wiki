@@ -24,3 +24,7 @@ validation/results/*
 app/radar_service_account.json
 app/gchat_feedback.csv
 cds_human_comparison_lead_time_analysis.csv
+.venv/*
+prodtech_sa_key.json
+.env.local
+.obsidian/workspace.json

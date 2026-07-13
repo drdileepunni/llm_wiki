@@ -4,21 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "4dbe129715221e7c",
+        "id": "cc016ae1c43569ad",
         "type": "tabs",
         "children": [
           {
-            "id": "a08d52b5e9a620c6",
+            "id": "737feb69ddddecbd",
             "type": "leaf",
             "state": {
-              "type": "markdown",
-              "state": {
-                "file": "wiki/sources/snake-bite-order-set-2024.md",
-                "mode": "source",
-                "source": false
-              },
+              "type": "empty",
+              "state": {},
               "icon": "lucide-file",
-              "title": "snake-bite-order-set-2024"
+              "title": "New tab"
             }
           }
         ]
@@ -182,19 +178,27 @@
       "bases:Create new base": false
     }
   },
-  "active": "a08d52b5e9a620c6",
+  "active": "737feb69ddddecbd",
   "lastOpenFiles": [
-    "app/frontend/node_modules/@emnapi/core/dist/emnapi-core.cjs.js",
-    "app/frontend/node_modules/@emnapi/core/dist",
-    "app/frontend/node_modules/@emnapi/core/LICENSE",
-    "app/frontend/node_modules/@emnapi/core",
-    "app/frontend/node_modules/@tybys/wasm-util/lib/cjs",
-    "app/frontend/node_modules/@tybys/wasm-util/lib",
-    "app/frontend/node_modules/@tybys/wasm-util",
-    "app/frontend/node_modules/@rolldown/binding-android-arm64",
-    "app/frontend/node_modules/@napi-rs/wasm-runtime",
-    "app/frontend/node_modules/@emnapi/wasi-threads",
-    "app/frontend/node_modules/lightningcss-win32-arm64-msvc",
+    "tools/radar_sync/sync_one_patient.py",
+    "tools/radar_sync/replay_pipeline.py",
+    "tools/radar_sync/replay_order_gen.py",
+    "tools/radar_sync/migrate_filter_vitals.py",
+    "tools/radar_sync/cds_runner.py",
+    "tools/radar_sync/backfill_tz_fix.py",
+    "kbs/agent_school/clinical_rules.yaml",
+    "kbs/agent_school/CLAUDE.md",
+    "kbs/agent_school",
+    "kbs",
+    "app/frontend/vite.config.js",
+    "app/frontend/tailwind.config.js",
+    "app/frontend/src/assets/vite.svg",
+    "app/frontend/src/assets/react.svg",
+    "app/frontend/src/assets/hero.png",
+    "app/frontend/public/icons.svg",
+    "app/frontend/public/favicon.svg",
+    "app/frontend/README.md",
+    "README.md",
     "app/frontend/node_modules/tslib/SECURITY.md",
     "app/frontend/node_modules/tslib/README.md",
     "app/frontend/node_modules/@tybys/wasm-util/README.md",
@@ -217,16 +221,8 @@
     "app/frontend/node_modules/micromark-extension-gfm-table/readme.md",
     "app/frontend/node_modules/micromark-extension-gfm-strikethrough/readme.md",
     "app/frontend/node_modules/micromark-extension-gfm-footnote/readme.md",
-    "app/frontend/node_modules/micromark-extension-gfm-autolink-literal/readme.md",
-    "app/frontend/node_modules/markdown-table/readme.md",
-    "app/frontend/node_modules/unist-util-visit-parents/readme.md",
     "app/frontend/dist/icons.svg",
     "app/frontend/dist/favicon.svg",
-    "app/frontend/src/assets/vite.svg",
-    "app/frontend/src/assets/react.svg",
-    "app/frontend/src/assets/hero.png",
-    "app/frontend/public/icons.svg",
-    "app/frontend/public/favicon.svg",
     "Untitled 1.canvas",
     "Untitled.canvas"
   ]
